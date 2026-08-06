@@ -1362,12 +1362,14 @@ function areaNode(panel, area) {
 }
 
 /* The rule that picked what an area holds, printed with the area. «Надо
-   запланировать» is the one area whose entire content is text chosen by a
-   narrow test, and the test is narrower than the heading: what is observed is
-   that the line names no task, which is not the same claim as «эта работа не
-   начата». A reader who can see the rule can judge the list. */
+   запланировать» is the one area whose entire content is text chosen by a test,
+   and the test says less than the heading: what is observed is that no task
+   could be linked to the line, which is not the same claim as «эта работа не
+   начата». The rule used to be «в строке нет номера задачи», and under it three
+   of the four shown lines already had tasks (finding HIGH-1 of review 814). A
+   reader who can see the rule can judge the list. */
 const AREA_RULE = {
-  plan: "строки раздела «В работе» продуктов этого направления, в которых не названо ни одной задачи",
+  plan: "строки раздела «В работе», для которых не удалось наблюсти задачу: сверка идёт по номеру-ссылке, по названию задачи в строке и по слагу — под каждой строкой написано, с чем её сверили",
   pickup: "живого прогона нет, гейты не отказали, и ничто на диске эту задачу не держит",
   queued: "стоит за названным держателем — он в строке каждой плашки",
 };
@@ -1406,9 +1408,16 @@ function promiseNode(q) {
   const row = document.createElement("div");
   row.className = "row";
   const src = tag("«В работе» продукта " + q.product);
-  src.title = "наблюдено: раздел «В работе» в products/" + q.product
-    + "/product.md, задача в строке не названа";
+  src.title = "наблюдено: раздел «В работе» в products/" + q.product + "/product.md";
   row.appendChild(src);
+  /* What the line is claimed to be, in the words the observation supports. «Связь
+     с задачей не установлена» is a statement about a comparison that failed;
+     «задачи нет» would be a statement about the world, and the previous version
+     made it on evidence that could not carry it. The comparison itself hangs on
+     the same line, so the reader can check the verdict instead of trusting it. */
+  const said = tag("связь с задачей не установлена");
+  said.title = "сверка: " + (q.checked || "");
+  row.appendChild(said);
   node.appendChild(row);
   return node;
 }

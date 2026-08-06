@@ -82,10 +82,18 @@ BOARD_AREA_RU = {
 # which is the first question of every wake-up, and «за чем стоит остальное».
 # The split is one observation: whether anything on disk is holding the task.
 #
-# `plan` holds no tasks at all. It carries promises written in a product record
-# with no task behind them — the place where «посмотреть код companion» stood
-# for two days because the flow had nowhere to put «надо запланировать».
+# `plan` holds no tasks at all. It carries lines written in a product record for
+# which no task could be observed — the place where «посмотреть код companion»
+# stood for two days because the flow had nowhere to put «надо запланировать».
 AREAS_WITHOUT_TASKS = ("plan",)
+
+# One line of that area. `checked` says what the line was compared against, and
+# it is required for the same reason `actor_src` is: the area may report a failed
+# comparison, never the absence of a task, and the difference is only visible if
+# the comparison is shown. `link` is `unknown` for everything the area prints —
+# a line whose task was observed is that task and does not stand here.
+PROMISE_FIELDS = ("text", "link", "checked")
+PROMISE_LINKS = ("unknown",)
 
 # Fields of one plate. `actor`, `role` and `why` are nullable on purpose: an
 # empty cell is the honest answer when nothing on disk names the executor or the
@@ -227,6 +235,19 @@ def validate_snapshot(snapshot: dict) -> dict:
 
     for product in snapshot["products"]:
         _require(product, ("slug", "questions", "effect", "promises"), "продукт")
+        for promise in product["promises"]:
+            where = f"строка «В работе» продукта {product['slug']!r}"
+            if not isinstance(promise, dict):
+                raise ContractError(f"{where}: ожидался объект со сверкой, а не строка")
+            _require(promise, PROMISE_FIELDS, where)
+            if promise["link"] not in PROMISE_LINKS:
+                raise ContractError(f"{where}: связь {promise['link']!r}")
+            # The same rule the plates live under, applied to the one area whose
+            # content is prose: a line may be shown as unplanned only together
+            # with what was compared against it. Without that the area is back to
+            # asserting «задачи нет» from a test that never looked for one.
+            if not str(promise["checked"]).strip():
+                raise ContractError(f"{where}: не сказано, с чем сверена строка")
     if not isinstance(snapshot["owners_awake"], list):
         raise ContractError("снимок: owners_awake должен быть списком")
     for owner in snapshot["owners_awake"]:

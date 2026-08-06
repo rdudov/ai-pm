@@ -49,6 +49,21 @@ def a_task(**over) -> dict:
     return task
 
 
+def a_promise(**over) -> dict:
+    """One line of «В работе» as the collector hands it over: text plus the sverka.
+
+    A promise is never a bare string on this boundary. The line is shown because
+    a comparison failed, and the comparison travels with it — otherwise the area
+    is back to printing «задачи нет» from a test that never looked for a task.
+    """
+    promise = {"text": "2026-08-04 — ревью кода companion силами Claude",
+               "link": "unknown",
+               "checked": "сверено с каталогом задач (710 задач) по номеру-ссылке, "
+                          "по названию и по слагу"}
+    promise.update(over)
+    return promise
+
+
 def a_snapshot(tasks=None, products=None) -> dict:
     return {
         "schema_version": schema.SCHEMA_VERSION,
@@ -64,7 +79,7 @@ def a_snapshot(tasks=None, products=None) -> dict:
         }],
         "products": products or [{"slug": "task-agent", "questions": ["Публиковать ли перенос?"],
                                   "effect": ["2026-08-06 — карта показывает ленту"],
-                                  "promises": ["2026-08-04 — ревью кода companion силами Claude"]}],
+                                  "promises": [a_promise()]}],
         "owners_awake": [],
     }
 
@@ -1120,12 +1135,30 @@ class WhatCanBePickedUp(unittest.TestCase):
         # and a reader who cannot see the rule reads the heading as a verdict.
         page = a_page()
         self.assertIn("ничто на диске эту задачу не держит", page)
-        self.assertIn("не названо ни одной задачи", page)
+        self.assertIn("не удалось наблюсти задачу", page)
 
 
 def queue_why(task, repo, busy):
     """`queue_reason` with the run reduced to the one field it reads."""
     return state.queue_reason(task, {"repo": repo}, busy)
+
+
+CATALOGUE = [
+    {"id": 736, "title": "надо исправить task_index — она присылает задачи companion-agent",
+     "slug": "736-max-task-index"},
+    {"id": 713, "title": "Ревью кода companion силами Claude: старый код и кандидаты на рефакторинг",
+     "slug": "713-companion"},
+    {"id": 394, "title": "Move `/task` workflow ownership into companion",
+     "slug": "394-task-workflow-ownership"},
+    {"id": 811, "title": "Закрыть доступ: /codex только в Calypso и только у владельца",
+     "slug": "811-calypso-codex-owner-only"},
+    {"id": 266, "title": "Remove TTS cleanup attempt prefix", "slug": "266-tts-prefix"},
+]
+
+
+def unplanned(*items) -> list[dict]:
+    """`unplanned` against a fixed catalogue, so the fixture is the whole input."""
+    return state.unplanned(list(items), CATALOGUE)
 
 
 class WhatNeedsPlanning(unittest.TestCase):
@@ -1134,18 +1167,83 @@ class WhatNeedsPlanning(unittest.TestCase):
     «ревью кода companion силами Claude… Запрошено пользователем» stood in the
     `## В работе` section of the product record for two days and never became a
     task, because the flow had nowhere to put «надо запланировать».
+
+    The first version of the area answered it with «в строке нет отдельно
+    стоящего трёхзначного числа», and that признак was wrong in both directions
+    at once (finding HIGH-1 of review 814): three of the four lines it printed
+    already had tasks, and a real promise carrying an unrelated число was
+    suppressed. The tests below are that finding, both directions of it.
     """
 
-    def test_a_line_naming_a_task_is_not_an_unkept_promise(self):
-        self.assertEqual(state.unplanned([
-            "2026-08-05 — **`/task_index` в Max: код починен, но не выкачен (736)**"]), [])
+    def test_a_line_referencing_a_task_number_is_not_an_unkept_promise(self):
+        self.assertEqual(unplanned(
+            "2026-08-05 — **`/task_index` в Max: код починен, но не выкачен (736)**"), [])
 
-    def test_a_line_naming_no_task_is_one(self):
-        promise = "2026-08-04 — ревью кода companion силами Claude: код старый"
-        self.assertEqual(state.unplanned([promise]), [promise])
+    def test_a_line_naming_an_existing_task_in_words_is_not_an_unkept_promise(self):
+        """First direction of the finding: the area invented work already planned.
+
+        The line carries no number at all, and задача 713 stands under almost
+        exactly its words. The area printed it as «надо запланировать» and sent
+        the person to plan a task that was already in the catalogue.
+        """
+        line = ("2026-08-04 — ревью кода companion силами Claude: код старый, вдумчиво "
+                "его никто не смотрел, ищем кандидатов на рефакторинг.")
+        self.assertEqual(unplanned(line), [])
+        self.assertEqual(state.promise_link(line, CATALOGUE)["task"], 713)
+
+    def test_a_line_with_a_number_that_counts_something_is_not_suppressed(self):
+        """Second direction: a real promise lost to a число that named no task.
+
+        «394 пройденных теста» is a quantity standing mid-sentence, and задача
+        394 — about `/task` workflow ownership — has nothing to do with the line.
+        The old rule read the digits and dropped the line off the board.
+        """
+        line = ("2026-08-05 — живой проверкой считается настоящая задача, а не юнит-набор: "
+                "в наборе 394 пройденных теста, а поверхность так и не проверена")
+        self.assertEqual([p["text"] for p in unplanned(line)], [line])
+        self.assertIsNone(state.promise_link(line, CATALOGUE))
+
+    def test_a_number_counting_a_noun_inside_brackets_is_not_a_reference(self):
+        # «(266 тестов)» is written exactly like «(736)» and means a count. The
+        # word right after the число is the difference, and it is the difference
+        # the rule reads.
+        self.assertEqual(state.task_references("регрессии зелёные (266 тестов)"), [])
+        self.assertEqual(state.task_references("не выкачен (736)"), [736])
+
+    def test_a_fragment_of_a_commit_hash_is_not_a_task_number(self):
+        # `2a8e061` used to contribute «061» and suppress the line around it.
+        self.assertEqual(state.task_references("коммит `2a8e061`, SHA-256 `4a0ede88`"), [])
+
+    def test_a_number_written_as_a_quantity_still_names_a_task_when_the_words_agree(self):
+        """The contour writes «(811 идёт, 812 ждёт её)», which reads like a count.
+
+        The число alone cannot decide it, so the task's own name decides: half of
+        the significant words of задача 811 stand in the line. The evidence names
+        those words, so the link can be judged rather than believed.
+        """
+        line = ("2026-08-06 — **работа поставлена (811 идёт)**: /codex остаётся только "
+                "в Calypso и только у владельца, доступ второго закрываем")
+        link = state.promise_link(line, CATALOGUE)
+        self.assertEqual(link["task"], 811)
+        self.assertIn("codex", link["how"])
+
+    def test_a_number_naming_no_known_task_is_reported_with_the_line(self):
+        # The area may say what it compared and what it found; it may not turn a
+        # number it could not resolve into silence.
+        line = "2026-08-06 — **999 обещано и не заведено**"
+        shown = unplanned(line)
+        self.assertEqual(len(shown), 1)
+        self.assertIn("999", shown[0]["checked"])
+
+    def test_a_shown_line_says_what_it_was_compared_against(self):
+        shown = unplanned("2026-08-04 — исследование продуктового решения по памяти")
+        self.assertEqual(shown[0]["link"], "unknown")
+        self.assertTrue(shown[0]["checked"].strip())
+        # And never the claim the observation cannot carry.
+        self.assertNotIn("задачи нет", shown[0]["checked"])
 
     def test_a_struck_through_line_is_settled(self):
-        self.assertEqual(state.unplanned(["~~сделано и закрыто~~"]), [])
+        self.assertEqual(unplanned("~~сделано и закрыто~~"), [])
 
     def test_the_promises_stand_in_their_own_area_and_are_counted_there(self):
         board = render.build_board(a_snapshot())
@@ -1157,10 +1255,38 @@ class WhatNeedsPlanning(unittest.TestCase):
 
     def test_a_promise_of_a_product_no_direction_owns_is_not_invented_onto_a_panel(self):
         snapshot = a_snapshot(products=[{"slug": "moex-strategy-lab", "questions": [],
-                                         "effect": [], "promises": ["чужое обещание"]}])
+                                         "effect": [],
+                                         "promises": [a_promise(text="чужое обещание")]}])
         board = render.build_board(snapshot)
         area = next(a for a in board["panels"][0]["areas"] if a["key"] == "plan")
         self.assertEqual(area["promises"], [])
+
+    def test_the_line_reaches_the_page_with_its_comparison(self):
+        board = render.build_board(a_snapshot())
+        area = next(a for a in board["panels"][0]["areas"] if a["key"] == "plan")
+        self.assertTrue(area["promises"][0]["checked"].strip())
+        self.assertEqual(area["promises"][0]["link"], "unknown")
+
+    def test_the_page_says_the_comparison_failed_and_not_that_no_task_exists(self):
+        page = Path(render.TEMPLATE).read_text()
+        self.assertIn("связь с задачей не установлена", page)
+        rule = page.split("const AREA_RULE")[1].split("};")[0]
+        self.assertIn("не удалось наблюсти задачу", rule)
+        self.assertNotIn("в которых не названо ни одной задачи", rule)
+
+    def test_a_line_shown_without_its_comparison_is_refused(self):
+        # The same rule the plates live under: a caption the board cannot back
+        # with a named observation must not reach the page.
+        snapshot = a_snapshot()
+        snapshot["products"][0]["promises"] = [a_promise(checked="  ")]
+        with self.assertRaises(schema.ContractError):
+            schema.validate_snapshot(snapshot)
+
+    def test_a_bare_string_promise_is_refused(self):
+        snapshot = a_snapshot()
+        snapshot["products"][0]["promises"] = ["строка без сверки"]
+        with self.assertRaises(schema.ContractError):
+            schema.validate_snapshot(snapshot)
 
 
 class TheOtherProductOwner(unittest.TestCase):

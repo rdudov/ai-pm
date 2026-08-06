@@ -339,20 +339,23 @@ def product_questions(snapshot: dict, thread: dict) -> list[dict]:
 
 
 def product_promises(snapshot: dict, thread: dict) -> list[dict]:
-    """Promises of this direction's products that name no task.
+    """Lines of this direction's products for which no task could be observed.
 
     The fourth question of the board, and the one with a price already paid: a
     request to review the companion code stood in `## В работе` of the product
     record for two days and never became a task, because the flow had nowhere
     to put «надо запланировать».
 
-    The rule is printed next to the list on purpose. What is observed is narrow
-    — the line references no task number — and that is not the same claim as
-    «эта работа не начата». A reader who can see the rule can judge the list;
-    a reader shown a bare heading would take it for a verdict.
+    What each line carries with it is the comparison that failed, and that is
+    the whole difference from what shipped before. The area used to print «в
+    строке нет номера задачи» as if it meant «задачи нет», and three of the four
+    lines it showed already had tasks (finding HIGH-1 of review 814). A failed
+    comparison is «связь не установлена» — the reader is told what was compared,
+    so the list can be judged instead of believed.
     """
     mine = set(thread.get("products") or [])
-    return [{"text": promise, "product": product["slug"]}
+    return [{"text": promise["text"], "product": product["slug"],
+             "link": promise["link"], "checked": promise["checked"]}
             for product in snapshot["products"] if product["slug"] in mine
             for promise in product.get("promises") or []]
 
@@ -380,10 +383,11 @@ def build_board(snapshot: dict) -> dict:
             mine.sort(key=lambda p: (p["since"] or "9999", -(p["id"] or 0)))
             shown = mine[:PER_BOARD_AREA]
             asked = questions if key == "waiting_human" else []
-            # «Надо запланировать» carries no tasks by construction: a promise
-            # with a task behind it is a task and stands in one of the areas
-            # above. The area is the only one whose whole content is text from a
-            # product record, so the rule that selected it is shown with it.
+            # «Надо запланировать» carries no tasks by construction: a line with
+            # an observed task behind it is that task and stands in one of the
+            # areas above. The area is the only one whose whole content is text
+            # from a product record, so the rule that selected it is shown with
+            # it, and each line says what was compared against it.
             owed = promises if key == "plan" else []
             areas.append({
                 "key": key,

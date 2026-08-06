@@ -191,9 +191,9 @@ def read_json(path: Path) -> dict:
     return payload if isinstance(payload, dict) else {}
 
 
-def query_tasks(args: list[str]) -> list[dict]:
+def query_tasks(args: list[str], limit: int = 60) -> list[dict]:
     out = subprocess.run(
-        [str(PYTHON), str(TASKS_INDEX), "query", *args, "--format", "json", "--limit", "60"],
+        [str(PYTHON), str(TASKS_INDEX), "query", *args, "--format", "json", "--limit", str(limit)],
         capture_output=True, text=True, cwd=REPO,
     )
     if out.returncode != 0:
@@ -203,6 +203,16 @@ def query_tasks(args: list[str]) -> list[dict]:
     except json.JSONDecodeError:
         return []
     return payload if isinstance(payload, list) else payload.get("tasks", [])
+
+
+def task_catalogue() -> list[dict]:
+    """Every task the index knows: id, title and slug, and nothing read from disk.
+
+    The pool a product line is matched against. It is one query against the same
+    index the board already reads, so the answer to «есть ли за этой строкой
+    задача» is reproducible by hand with `tasks_index.py query`.
+    """
+    return query_tasks(["--status", "all"], limit=5000)
 
 
 def thread_tasks(thread: dict) -> list[dict]:
@@ -881,7 +891,7 @@ def markdown_section(text: str, heading: str) -> list[str]:
     return items
 
 
-def products() -> list[dict]:
+def products(catalogue: list[dict] | None = None) -> list[dict]:
     """Products, with the canonical list of questions the user owes an answer to.
 
     Deliberately *not* filtered through `pending_questions`, and the difference
@@ -896,6 +906,11 @@ def products() -> list[dict]:
     находок 706 превращаем в работу»), and dropping a question the user is
     actually waiting on is the more expensive error of the two.
     """
+    # The pool a promise is matched against is the whole catalogue, not the
+    # tasks of one direction: a promise written in a product record may have
+    # become a task under any project, and matching against a narrower pool
+    # would report «связь не установлена» for a link that exists.
+    catalogue = task_catalogue() if catalogue is None else catalogue
     entries = []
     for path in sorted(PRODUCTS.glob("*/product.md")):
         try:
@@ -906,33 +921,197 @@ def products() -> list[dict]:
             "slug": path.parent.name,
             "questions": [q for q in markdown_section(text, "Открытые вопросы") if not q.startswith(STRUCK)],
             "effect": markdown_section(text, "Журнал эффекта")[:8],
-            "promises": unplanned(markdown_section(text, "В работе")),
+            "promises": unplanned(markdown_section(text, "В работе"), catalogue),
         })
     return entries
 
 
-# A reference to a task, as the product record writes one: a bare number in
-# brackets at the end of a claim, or a number named in the sentence.
-TASK_REFERENCE = re.compile(r"(?<!\d)\d{3}(?!\d)")
+# ---------------------------------------------------------------------------
+# «Надо запланировать»: which lines of a product record have a task behind them
+# ---------------------------------------------------------------------------
+#
+# The area used to answer this with «в строке нет отдельно стоящего трёхзначного
+# числа», and that признак cannot establish what the board printed above it
+# (finding HIGH-1 of review 814). It was wrong in both directions at once. A
+# product line is prose written by the product owner, and most three-digit
+# numbers in it are quantities or fragments of something else — «630 строк»,
+# «266 тестов», «411 фрагментов», the tail of a commit hash `2a8e061`, `SHA-256`,
+# `127.0.0.1` — so a real promise «в наборе 394 теста» was suppressed by a число
+# that never named a task. And a line naming an existing task in words rather
+# than by number — «ревью кода companion силами Claude», which is задача 713
+# under almost that exact title — was printed as unplanned work, sending the
+# person to plan work already planned.
+#
+# What replaces it is a link to a task that can be checked by hand, from two
+# observations and nothing else: a число standing in a *reference position* that
+# resolves to a task the index knows, and the *name* of a task standing in the
+# line verbatim. When neither holds, the line is shown saying «связь с задачей не
+# установлена» — never «задачи нет», which is a claim about the world that
+# nothing here observed. `--plan-links` prints the whole judgement, line by line,
+# with the evidence for each.
+
+NUMBER = re.compile(r"(?<![\w])(\d{3})(?![\w])")
+
+# A число is a reference to a task when it is written the way this contour
+# writes one, not merely when it is three digits long. Three positions, all
+# taken from the product records as they are actually written:
+#   «Работа заведена задачей 813»  — a task word right in front of it;
+#   «2026-08-06 — **806 принята**» — the head of the claim, after the date;
+#   «(736)», «(805 → 808)», «(805, 806, идут)» — inside brackets, with the
+#                                                 number not counting a noun.
+# The last one is why the bracket alone is not enough: «(266 тестов)» and «(630
+# строк)» are brackets too, and a number immediately followed by a word is
+# counting that word.
+TASK_WORD = re.compile(r"(?:задач\w*|таск\w*|task|№)\s*$", re.IGNORECASE)
+CLAIM_HEAD = re.compile(r"^\s*(?:\d{4}-\d{2}-\d{2})?(?:\s+\d{2}:\d{2})?\s*[—–-]*\s*"
+                        r"[*`_«»\s]*(?:\d{3}[\s,и–—-]*)*$")
+# What may stand right after a reference: punctuation that closes or separates
+# it, an arrow to the task that replaced it, or the end of the line. A letter or
+# a digit there means the number is counting something.
+AFTER_REFERENCE = re.compile(r"^\s*(?:[)\]},;.!?]|→|$)")
+OPEN_BRACKET = re.compile(r"[(\[]")
+CLOSE_BRACKET = re.compile(r"[)\]]")
+
+WORDS = re.compile(r"[^0-9a-zа-я]+")
 
 
-def unplanned(items: list[str]) -> list[str]:
-    """Lines of «В работе» that name no task — work promised and never started.
+def normal(text: str) -> str:
+    """One spelling of a phrase, so a comparison is about words and not markup."""
+    return WORDS.sub(" ", text.lower().replace("ё", "е")).strip()
+
+
+def inside_brackets(text: str, position: int) -> bool:
+    """Whether an offset stands inside a bracket that opened before it."""
+    opened = OPEN_BRACKET.search(text[:position][::-1])
+    closed = CLOSE_BRACKET.search(text[:position][::-1])
+    if not opened:
+        return False
+    return not closed or opened.start() < closed.start()
+
+
+def task_references(item: str) -> list[int]:
+    """Numbers of the line that are written as references to a task."""
+    found: list[int] = []
+    for match in NUMBER.finditer(item):
+        before, after = item[:match.start()], item[match.end():]
+        reference = bool(TASK_WORD.search(before)) or bool(CLAIM_HEAD.match(before))
+        if not reference and inside_brackets(item, match.start()):
+            reference = bool(AFTER_REFERENCE.match(after))
+        if reference:
+            found.append(int(match.group(1)))
+    return found
+
+
+def stems(text: str) -> set[str]:
+    """Significant words of a phrase, cut to a stem so a case ending is not a wall.
+
+    «закрывает» and «закрыть», «канон» and «каноне» are the same word for this
+    purpose, and the contour writes its records in Russian. Five letters is the
+    cut: short enough to survive declension, long enough that the match is still
+    about a word and not about a syllable.
+    """
+    return {word[:5] for word in normal(text).split() if len(word) >= 5}
+
+
+# How much of a task's own name has to stand in the line before a число in it is
+# read as naming that task. Half, and never fewer than two words: one shared word
+# is a coincidence between a contour that says «Calypso» in every second line and
+# a catalogue of 710 tasks, and a coincidence is exactly what must not close this
+# question.
+CORROBORATION = 0.5
+
+
+def corroborated(item: str, task: dict) -> list[str]:
+    """The words of a task's name that also stand in the line, when enough do."""
+    named = stems(task.get("title") or "")
+    if len(named) < 2:
+        return []
+    shared = sorted(named & stems(item))
+    if len(shared) < 2 or len(shared) / len(named) < CORROBORATION:
+        return []
+    return shared
+
+
+def title_lead(title: str) -> str:
+    """The part of a task title a person repeats when naming the task in prose.
+
+    Titles in this contour carry a qualifier after a colon or a dash — задача 713
+    is «Ревью кода companion силами Claude: старый код и кандидаты на
+    рефакторинг» — and the product record names the task by the part in front of
+    it. Matching the whole title would find nothing; matching any fragment would
+    find everything, so the lead has to be long enough to be a name.
+    """
+    lead = normal(re.split(r"[:(—]", title)[0])
+    return lead if len(lead) >= 15 and len(lead.split()) >= 3 else ""
+
+
+def promise_link(item: str, catalogue: list[dict]) -> dict | None:
+    """The task behind a product line, when one can be observed. Never guessed.
+
+    Two observations, in the order a person would make them: the line references
+    a task number that the index resolves, or the line carries a task's name (or
+    its directory slug) verbatim. Both are checkable with one command against the
+    same index the board reads.
+    """
+    known = {task.get("id"): task for task in catalogue if task.get("id")}
+    for number in task_references(item):
+        task = known.get(number)
+        if task:
+            return {"task": number, "title": task.get("title"),
+                    "how": f"номер {number} стоит в строке как ссылка на задачу "
+                           f"и найден в каталоге задач"}
+    line = normal(item)
+    for task in catalogue:
+        lead = title_lead(task.get("title") or "")
+        if lead and lead in line:
+            return {"task": task.get("id"), "title": task.get("title"),
+                    "how": f"название задачи {task.get('id')} дословно стоит в строке: «{lead}»"}
+        slug = normal(re.sub(r"^\d+-", "", task.get("slug") or "")).replace(" ", "-")
+        if len(slug) >= 12 and slug.count("-") >= 1 and slug in item.lower():
+            return {"task": task.get("id"), "title": task.get("title"),
+                    "how": f"слаг задачи {task.get('id')} «{slug}» стоит в строке"}
+    # A число that stands where the contour writes a quantity — «(811 идёт, 812
+    # ждёт её)» reads exactly like «(266 тестов)» — still names a task when the
+    # line also carries that task's own words. The число alone never decides
+    # anything here: the words are the observation and they are printed with it.
+    for number in {n for n in map(int, NUMBER.findall(item))}:
+        task = known.get(number)
+        shared = corroborated(item, task) if task else []
+        if shared:
+            return {"task": number, "title": task.get("title"),
+                    "how": f"число {number} стоит в строке вместе со словами названия "
+                           f"задачи {number}: {', '.join(shared)}"}
+    return None
+
+
+def unplanned(items: list[str], catalogue: list[dict]) -> list[dict]:
+    """Lines of «В работе» with no observable task behind them.
 
     This is the fourth question of the board, and it has a price already paid:
     «ревью кода companion силами Claude… Запрошено пользователем» stood in this
     section for two days and never became a task, because the flow had no place
-    for «надо запланировать». The section is where the product owner writes what
-    is being done, so a line in it with no task number behind it is a promise
-    nobody is executing.
+    for «надо запланировать».
 
-    The test is deliberately the weak one — whether a task is referenced at all,
-    not whether that task is alive. A number in the line is an observation; that
-    the numbered task actually covers the promise is a reading, and reading the
-    line is not something this collector is allowed to do.
+    What the area may claim is bounded by what was compared. «Связь с задачей не
+    установлена» is the honest reading of a failed comparison; «задачи нет» is
+    not, and a board that invents work costs the person more than an empty area
+    does. So every line carries what was checked against it, and the numbers that
+    were in it but named no task are carried with it — that is where a wrong
+    entry is caught by reading, and it is the only place where it can be.
     """
-    return [item for item in items
-            if not item.startswith(STRUCK) and not TASK_REFERENCE.search(item)]
+    shown = []
+    for item in items:
+        if item.startswith(STRUCK):
+            continue
+        if promise_link(item, catalogue):
+            continue
+        numbers = [str(n) for n in task_references(item)]
+        checked = (f"сверено с каталогом задач ({len(catalogue)} задач) "
+                   "по номеру-ссылке, по названию и по слагу")
+        if numbers:
+            checked += f"; номера-ссылки {', '.join(numbers)} в каталоге не найдены"
+        shown.append({"text": item, "link": "unknown", "checked": checked})
+    return shown
 
 
 def ticked_thread(cmdline: list[str]) -> str | None:
@@ -997,6 +1176,7 @@ def build(anonymize: bool, only: str | None = None) -> dict:
     the same functions produce the same fields either way.
     """
     config = load_config()
+    catalogue = task_catalogue()
     threads = []
     for key, thread in config["threads"].items():
         if only and key != only:
@@ -1022,7 +1202,7 @@ def build(anonymize: bool, only: str | None = None) -> dict:
         "schema_version": SCHEMA_VERSION,
         "mode": "demo" if anonymize else "real",
         "threads": threads,
-        "products": products(),
+        "products": products(catalogue),
         # Who else is deciding right now. Not a thread and not a task: it is the
         # contour watching itself, and it belongs above the columns.
         "owners_awake": owner_wakeups(),
@@ -1034,6 +1214,41 @@ def build(anonymize: bool, only: str | None = None) -> dict:
     return validate_snapshot(snapshot)
 
 
+def plan_links() -> None:
+    """Every line of every «В работе» with its verdict and the evidence for it.
+
+    The area on the board shows one side of this — the lines nothing was found
+    for. Judging the area means seeing the other side too: which line was held
+    back, by which task, and by which of the two observations. Without this the
+    rule is only as checkable as the reader's patience, and the previous rule
+    survived a whole review that way.
+    """
+    catalogue = task_catalogue()
+    for path in sorted(PRODUCTS.glob("*/product.md")):
+        try:
+            text = path.read_text()
+        except OSError:
+            continue
+        items = markdown_section(text, "В работе")
+        print(f"\n=== {path.parent.name}: строк в «В работе» — {len(items)}")
+        for item in items:
+            head = " ".join(item.split())[:110]
+            if item.startswith(STRUCK):
+                print(f"  [зачёркнуто] {head}")
+                continue
+            link = promise_link(item, catalogue)
+            if link:
+                print(f"  [связана {link['task']}] {head}")
+                print(f"      чем: {link['how']}")
+                print(f"      задача: {link['title']}")
+                continue
+            numbers = task_references(item)
+            print(f"  [НАДО ЗАПЛАНИРОВАТЬ] {head}")
+            print("      связь с задачей не установлена; сверено с каталогом "
+                  f"({len(catalogue)} задач) по номеру-ссылке, названию и слагу"
+                  + (f"; номера-ссылки {numbers} в каталоге не найдены" if numbers else ""))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--anonymize", action="store_true",
@@ -1041,7 +1256,12 @@ def main() -> None:
     parser.add_argument("--out", type=Path, help="write here instead of stdout")
     parser.add_argument("--summary", action="store_true", help="print counts instead of the document")
     parser.add_argument("--thread", help="observe one direction instead of all four")
+    parser.add_argument("--plan-links", action="store_true",
+                        help="судьба каждой строки «В работе»: с какой задачей связана и чем")
     args = parser.parse_args()
+
+    if args.plan_links:
+        return plan_links()
 
     snapshot = build(args.anonymize, args.thread)
     if args.summary:
