@@ -203,6 +203,39 @@ PER_BOARD_AREA = 25
 NOW_IN_STRIP = 3
 JAMS_IN_STRIP = 4
 
+# Characters of name plus reason one strip group may take. The count is the whole
+# mechanism that keeps the strip short: the page shows every reason it prints in
+# full — no ellipsis, no line clamp — so the only honest way to bound the strip
+# is to print fewer names and say how many were left out. Review 789 found the
+# other way round: four jams named, one reason readable, three running past the
+# right edge of the window.
+#
+# Measured in a browser, not guessed: at 390×844 — the narrower of the two sizes
+# the board is checked on — a group of this many characters wraps into a block
+# that still leaves «Ждёт решения человека» and the top of the columns on the
+# first screen. Raising it is a change to be re-measured on a phone size, not a
+# constant to tune by eye.
+STRIP_GROUP_CHARS = 400
+
+
+def strip_group(items: list[dict], cap: int, budget: int = STRIP_GROUP_CHARS) -> tuple[list[dict], int]:
+    """The names of one strip group that fit with their reason shown whole.
+
+    Returns what to show and how many were left for the columns below. The first
+    item is always shown: «где затор» with nothing named answers nothing, and a
+    single long reason is still one honest answer.
+    """
+    shown: list[dict] = []
+    used = 0
+    for item in items[:cap]:
+        reason = item.get("why") or item.get("happening") or ""
+        cost = len(item.get("title") or "") + len(reason)
+        if shown and used + cost > budget:
+            break
+        shown.append(item)
+        used += cost
+    return shown, len(items) - len(shown)
+
 
 def plate(task: dict) -> dict:
     """One task as the user described it: number, name, status, who, what, how long."""
@@ -326,14 +359,20 @@ def build_board(snapshot: dict) -> dict:
             if area["key"] == "stuck":
                 jams += [{**p, "thread": panel["title"]} for p in area["plates"]]
     waiting_areas = [a for p in panels for a in p["areas"] if a["key"] == "waiting_human"]
+    now_shown, now_hidden = strip_group(now, NOW_IN_STRIP)
+    jams_shown, jams_hidden = strip_group(
+        sorted(jams, key=lambda p: -(p["age_seconds"] or 0)), JAMS_IN_STRIP)
     return {
         "panels": panels,
         "areas": [{"key": k, "title": BOARD_AREA_RU[k]} for k in BOARD_AREAS],
         # A summary that fills the screen is not one: the strip sits above the
         # columns and every line it takes is a line the board loses. What the cap
-        # drops is still in the columns below, under «Затор» and «В работе».
-        "now": now[:NOW_IN_STRIP],
-        "jams": sorted(jams, key=lambda p: -(p["age_seconds"] or 0))[:JAMS_IN_STRIP],
+        # drops is still in the columns below, under «Затор» and «В работе», and
+        # the strip says how many that is instead of dropping them silently.
+        "now": now_shown,
+        "now_hidden": now_hidden,
+        "jams": jams_shown,
+        "jams_hidden": jams_hidden,
         # The headline number, and the two things it is made of. A single number
         # nobody can take apart is what let thirteen wrong entries stand as an
         # answer: split by source, a reader can check it against the columns.

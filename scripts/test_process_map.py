@@ -744,6 +744,52 @@ class JamReason(unittest.TestCase):
         self.assertIn('why.textContent = "почему: " + p.why', html)
         self.assertIn('w.textContent = " — " + why', html)
 
+    def test_the_strip_shows_only_the_jams_whose_reason_fits_whole(self):
+        """Finding HIGH-1 of review 789: four jams named, one reason readable.
+
+        The page no longer cuts a reason — no ellipsis, no line clamp — so the
+        strip is kept short here instead: it takes names while their reasons fit
+        the budget and leaves the rest to the columns. Geometry is measured in a
+        browser; what this test pins is that the cap exists, bites and is counted.
+        """
+        short = {"title": "к", "why": "п", "why_src": "s"}
+        long = {"title": "т" * 10, "why": "п" * (render.STRIP_GROUP_CHARS - 20),
+                "why_src": "s"}
+        shown, hidden = render.strip_group([short, long, long], cap=4)
+        self.assertEqual([len(p["title"]) for p in shown], [1, 10])
+        self.assertEqual(hidden, 1)
+        # Nothing named at all is not an answer to «где затор»: the first jam is
+        # shown even when its own reason is longer than the whole budget.
+        alone = {"title": "т", "why": "п" * (render.STRIP_GROUP_CHARS * 2), "why_src": "s"}
+        shown, hidden = render.strip_group([alone, short], cap=4)
+        self.assertEqual(len(shown), 1)
+        self.assertEqual(hidden, 1)
+        # The count of names still bounds the group before the budget does.
+        shown, hidden = render.strip_group([short] * 6, cap=4)
+        self.assertEqual((len(shown), hidden), (4, 2))
+
+    def test_the_page_neither_elides_nor_clamps_a_reason_and_counts_what_it_dropped(self):
+        html = render.render({"snapshot": a_snapshot(), "timeline": [],
+                              "board": render.build_board(a_snapshot()),
+                              "world": render.build_world(a_snapshot(), []),
+                              "built_at": "2026-08-06T12:00:00+00:00",
+                              "live_url": None, "digest": "d"})
+        strip_css = html.split("#strip .item")[1].split("}")[0]
+        self.assertNotIn("text-overflow", strip_css)
+        self.assertNotIn("nowrap", strip_css)
+        self.assertNotIn("line-clamp", html.split("#strip .item")[-1].split("}")[0])
+        self.assertIn('"ещё " + hidden + " — в колонках ниже"', html)
+
+    def test_the_board_says_how_many_names_the_strip_left_out(self):
+        jams = [a_task(id=700 + n, dir=f"{700 + n}-t", flags=["blocked"],
+                       status_detail="п" * 200,
+                       board={"area": "stuck", "why": "п" * 200, "why_src": "s"})
+                for n in range(5)]
+        board = render.build_board(a_snapshot(jams))
+        self.assertLess(len(board["jams"]), 5)
+        self.assertEqual(board["jams_hidden"], 5 - len(board["jams"]))
+        self.assertIn("now_hidden", board)
+
 
 class Liveness(unittest.TestCase):
     """A run is this task's run, or it is not one (finding MEDIUM-2 of review 786)."""

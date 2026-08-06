@@ -85,17 +85,27 @@
   #strip .jam { color: var(--blocked); }
   #strip .ask { color: var(--stale); }
   #strip .none { color: var(--idle); }
-  /* One line per item. Left to wrap, six jams each carrying a paragraph-long
-     reason took more than half of a 1440×900 screen and pushed the columns —
-     the actual board — off it. The whole reason still stands on the plate in the
-     column; this is the summary, and a summary that fills the screen is not one. */
+  /* Every item shows its whole text. Cutting the line into an ellipsis was how
+     the strip named four jams and let a person read the reason of one (finding
+     HIGH-1 of review 789): three reasons ran to `x=2536.9` inside a 1440 window
+     and were elided. The strip is kept short by showing fewer jams — the count
+     the renderer fits into `STRIP_GROUP_CHARS`, with the rest counted out loud —
+     not by hiding the end of a reason it has already promised to answer.
+     `overflow-wrap: anywhere` is required, not cosmetic: an observed reason is
+     often one unbroken token (`queued_behind_active_worktree_writers_669_689`)
+     and would otherwise push the box past the window on a phone. */
   #strip .item { border: 1px solid var(--edge); border-radius: 6px; padding: 2px 8px;
-                 max-width: 100%; white-space: nowrap; overflow: hidden;
-                 text-overflow: ellipsis; }
+                 max-width: 100%; white-space: normal; overflow-wrap: anywhere;
+                 line-height: 1.35; }
   /* The reason, right next to the jam it belongs to. Dimmer than the name so the
      eye reads «what» first and «why» second, but on the same line and never
      hidden behind a hover. */
   #strip .why { color: var(--dim); }
+  /* A live child's activity line: the same fact as `.doing` on the plate, and
+     not the observed reason of a jam. */
+  #strip .doing { color: var(--dim); }
+  /* What the strip did not take. A silent cap reads as «показано всё». */
+  #strip .more { color: var(--dim); }
   #strip .grp { flex: 1 1 100%; }
 
   #columns { flex: 1; display: grid; grid-template-columns: repeat(4, 1fr);
@@ -184,15 +194,14 @@
     #boardhead { padding: 8px 12px 6px; }
     #boardhead h1 { font-size: 15px; }
     /* One column cannot fit four directions, so on a phone the strip *is* the
-       first-screen answer — which means a reason may not be cut into an
-       ellipsis here. The item wraps and the reason takes its own line. */
+       first-screen answer — which means a reason may not be cut here. The item
+       wraps and the reason takes as many lines as it needs. */
     #strip { padding: 7px 12px; }
-    /* Wrapped rather than elided, but bounded: an unbounded reason on a phone
-       pushed «Ждёт решения человека» off the first screen, which is trading one
-       acceptance answer for another. Three lines carry the reason of every jam
-       observed so far, and the whole text stands on the plate below. */
-    #strip .item { white-space: normal; display: -webkit-box; -webkit-line-clamp: 3;
-                   -webkit-box-orient: vertical; overflow: hidden; }
+    /* The three-line clamp that used to stand here was the phone half of finding
+       HIGH-1: reasons #723, #727 and #747 ended in an ellipsis and two of them
+       ran past the right edge of a 390 window. What keeps «Ждёт решения
+       человека» on the first screen is the character budget in the renderer,
+       which shows fewer jams, not a clamp that cuts the ones it shows. */
     #strip .why { color: var(--dim); }
   }
 
@@ -1074,14 +1083,16 @@ function stripItem(p, cls) {
   if (age) bits.push("· " + age);
   s.textContent = bits.join(" ");
   /* The jam is named on the first screen, so its reason has to be there too:
-     «где затор» without «почему» is two thirds of an acceptance question. What
-     is doing the work — the child's activity line or the observed reason — is
-     shown as its own span, so it is read rather than hovered over. */
+     «где затор» without «почему» is two thirds of an acceptance question. The
+     text is shown as its own span and in full, so it is read rather than
+     hovered over or cut. The observed reason and a live child's activity line
+     are two different facts — as they are on the plate — so they keep two
+     classes: `.why` carries a paired source and `.doing` does not. */
   const why = p.why || p.happening;
   if (why) {
     const w = document.createElement("span");
-    w.className = "why"; w.textContent = " — " + why;
-    if (p.why_src) w.title = "наблюдено: " + p.why_src;
+    w.className = p.why ? "why" : "doing"; w.textContent = " — " + why;
+    if (p.why && p.why_src) w.title = "наблюдено: " + p.why_src;
     s.appendChild(w);
   }
   s.title = p.thread;
@@ -1092,10 +1103,10 @@ function drawStrip(board) {
   const strip = el("strip");
   strip.textContent = "";
   const groups = [
-    ["Кто работает сейчас", board.now, "who", "никто: живых прогонов нет"],
-    ["Где затор", board.jams, "jam", "заторов нет"],
+    ["Кто работает сейчас", board.now, "who", "никто: живых прогонов нет", board.now_hidden],
+    ["Где затор", board.jams, "jam", "заторов нет", board.jams_hidden],
   ];
-  for (const [label, items, cls, empty] of groups) {
+  for (const [label, items, cls, empty, hidden] of groups) {
     const grp = document.createElement("div");
     grp.className = "grp";
     const lbl = document.createElement("span");
@@ -1107,6 +1118,15 @@ function drawStrip(board) {
       grp.appendChild(none);
     }
     for (const p of items) grp.appendChild(stripItem(p, cls));
+    /* The strip shows as many names as fit with their reason whole, so what it
+       did not take has to be counted here: a cap nobody can see reads as
+       «показано всё», and the rest stands in the columns below. */
+    if (hidden > 0) {
+      const more = document.createElement("span");
+      more.className = "more";
+      more.textContent = "ещё " + hidden + " — в колонках ниже";
+      grp.appendChild(more);
+    }
     strip.appendChild(grp);
   }
   const grp = document.createElement("div");
