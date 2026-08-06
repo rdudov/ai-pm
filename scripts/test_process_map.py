@@ -870,6 +870,50 @@ class WaitingMeansWaitingOnTheUser(unittest.TestCase):
         self.assertEqual(entry["owner"], "user")
         self.assertIn("не найдено в почтовом хранилище", entry["note"])
 
+    def test_a_stored_outgoing_letter_makes_its_thread_readable_from_disk(self):
+        """The seam with the mail client, read as files rather than as intent.
+
+        `mailbox()` has always been written to read `sent`, but nothing wrote
+        that directory, so every question asked by mail stayed in the user's area
+        with «письмо не найдено в почтовом хранилище» — including two he had
+        already answered. This holds the file shape the sender now writes:
+        `sent/<id>/metadata.json` with the identifier, the subject that names the
+        thread and the date, and no body.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._store(root / "sent" / "19fd7e7ea2c3f7fb", {
+                "message_id": "19fd7e7ea2c3f7fb",
+                "subject": "Продакт: MOEX Strategy Lab",
+                "from": "elfiona.sea.girl@gmail.com", "to": "rdudov@gmail.com",
+                "date": "Thu, 06 Aug 2026 09:12:00 +0300", "attachments": []})
+            self._store(root / "inbox" / "19fd7f2481303262", {
+                "message_id": "19fd7f2481303262",
+                "subject": "Re: Продакт: MOEX Strategy Lab",
+                "from": "rdudov@gmail.com", "to": "elfiona.sea.girl@gmail.com",
+                "date": "Thu, 06 Aug 2026 10:40:00 +0300", "attachments": []})
+            original = (state.MAIL_INBOX, state.MAIL_SENT)
+            state.MAIL_INBOX, state.MAIL_SENT = root / "inbox", root / "sent"
+            try:
+                mail = state.mailbox()
+                entry = state.question_entry(
+                    "Сколько ставок брать? Спрошено у пользователя 2026-08-06, "
+                    "письмо 19fd7e7ea2c3f7fb.", mail)
+            finally:
+                state.MAIL_INBOX, state.MAIL_SENT = original
+
+        self.assertTrue(mail["sent_known"])
+        self.assertEqual(mail["threads"]["19fd7e7ea2c3f7fb"],
+                         state.thread_key("Продакт: MOEX Strategy Lab"))
+        self.assertEqual(entry["owner"], "product")
+        self.assertIn("в том же треде", entry["answer_src"])
+
+    @staticmethod
+    def _store(directory: Path, metadata: dict) -> None:
+        directory.mkdir(parents=True)
+        (directory / "metadata.json").write_text(
+            json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
     def test_a_thread_is_one_thread_whatever_prefix_a_client_added(self):
         self.assertEqual(state.thread_key("Re: Продакт: MOEX Strategy Lab"),
                          state.thread_key("Продакт: MOEX Strategy Lab"))
