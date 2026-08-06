@@ -582,6 +582,27 @@ def delivery_receipt(task_dir: Path) -> dict | None:
     return None
 
 
+# The names the contour actually writes its delivery note under. `delivery.md` is
+# the one the audit of 835 wrote 71 times; `product-owner-delivery.md` is the one
+# the product owner writes by hand when they send a document themselves, and on
+# 2026-08-06 they wrote six of them — including all three documents of the very
+# decision this observation has to check. Both carry the same three things, which
+# is what makes them one convention rather than two: channel, message identifier,
+# sha256 of what was attached. Knowing only the first name meant the observer
+# called three deliveries of that evening undelivered while the letters were in
+# the user's mailbox.
+DELIVERY_NOTES = ("delivery.md", "product-owner-delivery.md")
+
+
+def delivery_note(task_dir: Path) -> Path | None:
+    """The delivery note of this task under any of the names the contour uses."""
+    for name in DELIVERY_NOTES:
+        path = task_dir / name
+        if path.is_file():
+            return path
+    return None
+
+
 def handoff(task_dir: Path) -> dict | None:
     """Whether the document this task made ever reached a person, and what said so.
 
@@ -593,18 +614,19 @@ def handoff(task_dir: Path) -> dict | None:
     document = human_document(task_dir)
     if not document:
         return None
-    note = task_dir / "delivery.md"
-    if note.is_file():
+    note = delivery_note(task_dir)
+    if note:
         return {**document, "delivered": True,
-                "delivered_src": "файл delivery.md в каталоге задачи"}
+                "delivered_src": f"файл {note.name} в каталоге задачи"}
     receipt = delivery_receipt(task_dir)
     if receipt:
         return {**document, "delivered": True,
                 "delivered_src": f"квитанция {receipt['kind']} с идентификатором сообщения "
                                  f"в dev-pipeline/notification-receipts.jsonl"}
     return {**document, "delivered": False,
-            "delivered_src": "delivery.md нет, а квитанции задачи несут только события "
-                             "жизненного цикла прогона — доставки документа среди них нет"}
+            "delivered_src": "записки о доставке в каталоге нет ни под одним из имён "
+                             f"({', '.join(DELIVERY_NOTES)}), а квитанции задачи несут только "
+                             "события жизненного цикла прогона — доставки документа среди них нет"}
 
 
 # Entries of the task directory the card lists. Names, sizes and mtimes only:
@@ -638,7 +660,8 @@ def task_files(task_dir: Path) -> list[dict]:
 
 def board_area(status: str | None, flags: list[str], asked_user: bool,
                blocked_by: str | None = None, ours: bool = False,
-               undelivered: bool = False) -> str:
+               undelivered: bool = False, ready: bool = False,
+               decision_unmet: bool = False) -> str:
     """Which area of the board a task stands in. One rule, one owner.
 
     `asked_user` means a question was put to the user in writing and no answer
@@ -658,8 +681,21 @@ def board_area(status: str | None, flags: list[str], asked_user: bool,
     A finished task whose document never reached anyone is not «Сделано». It is
     the case of 783 — a 441 KB report that lay on the server for an hour behind
     two receipts about the life of the run — and it gets its own area.
+
+    A decision taken out loud and not carried out is the same hole one step
+    earlier. On 2026-08-06 the product owner wrote «из девяти живых документов
+    человеку идут три» and three hours later none of the three had been sent: the
+    decision lived in a sentence, so no observation and no wake-up knew it was
+    outstanding. `decision_unmet` is that decision as a state — recorded in the
+    task's own field, checked against the delivery evidence the contour already
+    writes, and therefore able to close itself.
     """
     if status in TERMINAL:
+        # A decision the product owner took and nobody carried out outranks the
+        # passive «не доставлено»: one is work that was merely never looked at,
+        # the other is work somebody already decided must go out.
+        if decision_unmet:
+            return "decision_unmet"
         return "undelivered" if undelivered else "done"
     # The user owing an answer comes first: it is the whole of one acceptance
     # question, and an answer nobody gives blocks everything behind it.
@@ -669,6 +705,11 @@ def board_area(status: str | None, flags: list[str], asked_user: bool,
         return "running"
     if {"stale_label", "killed", "gap", "blocked", "work_outside_owner"} & set(flags):
         return "stuck"
+    # An unexecuted decision on a task that is not finished stands here: below
+    # the facts about the work, above every list of what one *might* do, because
+    # somebody already decided this one.
+    if decision_unmet:
+        return "decision_unmet"
     # Our own question stands below the live run and the jam — those are facts
     # about the work, and this is a fact about a decision — but above «можно
     # подхватить»: a task nobody has decided about is not free to start.
@@ -680,12 +721,24 @@ def board_area(status: str | None, flags: list[str], asked_user: bool,
     # wake-up, and «за чем стоит остальное» is the second; they are the same
     # split, taken on one observation — whether anything on disk is holding
     # this task. Nothing holding it means it can be started now.
-    return "queued" if blocked_by else "pickup"
+    if blocked_by:
+        return "queued"
+    # «Готово к запуску» is narrower than «можно подхватить» and that is the
+    # whole of its value. Both say nothing is holding the task; only this one
+    # says somebody wrote a condition down and the condition has since been met.
+    # 831 belonged here for forty minutes and there was nowhere to put it.
+    return "ready_to_start" if ready else "pickup"
 
 
 def jam_reason(status_detail: str | None, run: dict, verdicts: list[dict],
-               flags: list[str]) -> tuple[str | None, str | None]:
+               flags: list[str], condition: dict | None = None) -> tuple[str | None, str | None]:
     """Why this task stands where it stands, and what observed it.
+
+    `condition` says the detail is a recognised start condition rather than
+    prose. Then the reason is not the field's text — a reader is owed «за чем
+    именно стоит», not a grammar — and it is left to `assign_areas`, which is the
+    only place that has seen every task and can say whether the condition is
+    still holding and by what.
 
     The board named the jam and could not say why, although the reason was
     sitting in the same payload: task 686 showed `happening: null` while its
@@ -698,7 +751,7 @@ def jam_reason(status_detail: str | None, run: dict, verdicts: list[dict],
     softened: where the disk says nothing, this returns nothing and the plate
     stays silent rather than filling the space.
     """
-    if status_detail:
+    if status_detail and condition is None:
         return status_detail, "поле status_detail во frontmatter task.md"
     if run.get("stop_reason"):
         return run["stop_reason"], "watcher_stop_reason в .runner/runner.json"
@@ -715,7 +768,126 @@ def jam_reason(status_detail: str | None, run: dict, verdicts: list[dict],
     return None, None
 
 
-def queue_reason(task: dict, run: dict, busy_repos: dict) -> tuple[str | None, str | None]:
+# ---------------------------------------------------------------------------
+# Условие запуска, которое машина видит
+# ---------------------------------------------------------------------------
+#
+# The condition on which a planned task may start used to live in a sentence.
+# 831 carried «Запускать только после завершения прогона 830: он идёт в том же
+# рабочем дереве /opt/projects/moex-trading-engine» in the last line of its
+# `## Summary`, and that sentence is invisible to everything: the observer could
+# not tell that the condition had been met, so «препятствие исчезло» could be
+# neither a state nor a transition, and the task stood forty minutes after 830
+# closed until the user asked how the queue is tracked at all.
+#
+# The condition therefore has to be a field. It is `status_detail` — the field
+# that already carries «почему эта задача стоит», is already written by the one
+# interface allowed to write frontmatter (`tasks_index.py set-status --detail`),
+# is already read here by `jam_reason` and `queue_reason`, and already carried
+# this exact meaning in the contour's own shorthand
+# (`queued_behind_active_worktree_writers_669_689` on 686). A second field or a
+# second file would be a second mechanism for one concept.
+#
+# What is new is not the field but that the observer now *evaluates* it. Until
+# now any `status_detail` was an opaque hold that could never clear: prose does
+# not stop being prose when the thing it describes has finished. A recognised
+# condition is checked against observed state — the named tasks' statuses and
+# whether the named working tree has a live run — so it clears itself.
+#
+# Grammar, deliberately small and ASCII so it survives YAML escaping and reads
+# to a person as well as to the parser:
+#
+#     starts_after=830 worktree=/opt/projects/moex-trading-engine
+#     decision=deliver
+#
+# Anything the grammar does not recognise behaves exactly as before: an opaque
+# hold, shown to the reader in the words its author wrote. The change of
+# behaviour is confined to text that opted into it.
+STARTS_AFTER = re.compile(r"\bstarts_after\s*=\s*([0-9]+(?:\s*,\s*[0-9]+)*)", re.IGNORECASE)
+WORKTREE = re.compile(r"\bworktree\s*=\s*([^\s;,]+)", re.IGNORECASE)
+DECISION = re.compile(r"\bdecision\s*=\s*([a-z_]+)", re.IGNORECASE)
+
+# Decisions this observer can check the execution of. A decision it cannot check
+# is not recorded as one: an area that cannot say «исполнено» would be a second
+# list of prose, which is the defect, not the repair.
+DECISIONS = {"deliver"}
+
+
+def start_condition(status_detail: str | None) -> dict | None:
+    """The machine-readable start condition of a task, or `None`.
+
+    `None` covers both «поля нет» and «в поле проза»: neither is a condition this
+    module may act on, and treating unrecognised prose as a condition would let
+    the board invent a queue nobody wrote down.
+    """
+    if not status_detail:
+        return None
+    after: list[int] = []
+    for match in STARTS_AFTER.finditer(status_detail):
+        after += [int(part) for part in match.group(1).replace(" ", "").split(",")]
+    worktrees = [match.group(1) for match in WORKTREE.finditer(status_detail)]
+    decision = None
+    match = DECISION.search(status_detail)
+    if match and match.group(1).lower() in DECISIONS:
+        decision = match.group(1).lower()
+    if not after and not worktrees and not decision:
+        return None
+    return {
+        "after": sorted(set(after)),
+        "worktrees": sorted(set(worktrees)),
+        "decision": decision,
+        "src": "поле status_detail во frontmatter task.md",
+    }
+
+
+def condition_state(condition: dict, statuses: dict, busy_repos: dict,
+                    task_id: int | None) -> dict:
+    """Whether a recorded start condition is still holding the task, and what said so.
+
+    Two observations and nothing else, each named where it is reported:
+
+    * the status of every task the condition names, taken from the same index the
+      board is built from — a task not yet terminal is still holding;
+    * whether the named working tree has a live run, taken from the same
+      `busy_repos` map the queue reason already uses — two children in one tree
+      is the collision the condition exists to prevent.
+
+    A task the index does not know is *not* silently treated as finished. An
+    unobservable predecessor is reported as unobservable and keeps holding, so a
+    typo in a number can never promote work to «готово к запуску».
+    """
+    holding: list[str] = []
+    for other in condition["after"]:
+        status = statuses.get(other)
+        if status is None:
+            holding.append(f"задачи {other} нет в индексе, состояние не наблюдается")
+        elif status not in TERMINAL:
+            holding.append(f"задача {other} ещё не закрыта ({status})")
+    for tree in condition["worktrees"]:
+        holder = busy_repos.get(tree)
+        if holder and holder.get("id") != task_id:
+            holding.append(f"рабочее дерево {Path(tree).name} занято живым прогоном "
+                           f"задачи {holder['id']}")
+    met = [f"задача {other} закрыта ({statuses[other]})" for other in condition["after"]
+           if statuses.get(other) in TERMINAL]
+    met += [f"рабочее дерево {Path(tree).name} свободно" for tree in condition["worktrees"]
+            if not busy_repos.get(tree)]
+    return {
+        "after": condition["after"],
+        "worktrees": condition["worktrees"],
+        "decision": condition["decision"],
+        "holding": holding,
+        "met": met,
+        # «Готово к запуску» is the whole point: a condition was written down and
+        # nothing it names is holding any more.
+        "satisfied": not holding,
+        "src": "статусы названных задач в индексе задач и живость прогонов "
+               "в тех же рабочих деревьях",
+    }
+
+
+def queue_reason(task: dict, run: dict, busy_repos: dict,
+                 condition: dict | None = None) -> tuple[str | None, str | None]:
     """What is holding this task, when something observably is.
 
     «В очереди» on its own answers nothing: the user asked for «за чем именно
@@ -728,7 +900,19 @@ def queue_reason(task: dict, run: dict, busy_repos: dict) -> tuple[str | None, s
     and is built once per snapshot: one direction owns its repositories, and a
     second write-run in a repository somebody is already writing to is the one
     queue this contour genuinely has.
+
+    `condition` is the evaluated start condition when `status_detail` carried
+    one. It is the one branch that can *stop* holding: a recognised condition
+    whose named tasks have closed and whose named tree is free returns nothing
+    here, which is how a queued task becomes startable without anybody editing
+    the field. Prose keeps its old behaviour — an opaque hold in its author's own
+    words — because nothing observable can tell when a sentence stopped being
+    true.
     """
+    if condition is not None:
+        if condition["holding"]:
+            return "; ".join(condition["holding"]), condition["src"]
+        return None, None
     detail = task.get("status_detail")
     if detail:
         return detail, "поле status_detail во frontmatter task.md"
@@ -1047,7 +1231,8 @@ def task_entry(task: dict, mail: dict) -> dict:
     role, role_src = observed_role(task_dir)
     since, age, since_src = state_age(task_dir)
     status_detail = task.get("status_detail")
-    why, why_src = jam_reason(status_detail, run, verdicts, flags)
+    condition = start_condition(status_detail)
+    why, why_src = jam_reason(status_detail, run, verdicts, flags, condition)
     progress = run.get("progress") or {}
 
     return {
@@ -1086,6 +1271,16 @@ def task_entry(task: dict, mail: dict) -> dict:
             "area": None,
             "blocked_by": None,
             "blocked_by_src": None,
+            # The start condition, filled by `assign_areas` for the same reason
+            # the area is: whether a condition still holds depends on the other
+            # tasks. `None` means the task named no condition, which is not the
+            # same as a condition that has been met, and the two must never
+            # collapse into one answer.
+            "start_condition": None,
+            # The decision recorded on this task and whether anything observed it
+            # carried out. Also filled by `assign_areas`, from the same delivery
+            # evidence the contour already writes.
+            "decision": None,
             "actor": actor,
             "actor_src": actor_src,
             "role": role,
@@ -1105,24 +1300,61 @@ def task_entry(task: dict, mail: dict) -> dict:
     }
 
 
-def assign_areas(entries: list[dict], tasks: list[dict]) -> None:
+def assign_areas(entries: list[dict], tasks: list[dict],
+                 statuses: dict | None = None) -> None:
     """The second pass: which area each task stands in, once all of them are known.
 
     «Можно подхватить» is not a property of one task read alone — it is the
     absence of anything holding it, and one of the things that can hold it is
     another task's live run in the same repository. So the areas are assigned
     after every task has been observed, never during.
+
+    `statuses` maps a task number to its status across the whole index, not just
+    this direction. A start condition may name a task of another direction — and
+    the one this repair was built on did: the wake-up asks about one thread and
+    would otherwise have to call an unknown predecessor unobservable. Callers
+    that have no catalogue get the directions's own tasks, which is what the
+    tests and any single-thread reader already have.
     """
     busy = busy_repository_map(entries)
+    known = dict(statuses or {})
+    for entry in entries:
+        known.setdefault(entry.get("id"), entry.get("status"))
     for entry, task in zip(entries, tasks):
-        why, why_src = queue_reason(task, entry["run"], busy)
+        condition = start_condition(entry.get("status_detail"))
+        evaluated = None
+        if condition:
+            evaluated = condition_state(condition, known, busy, entry.get("id"))
+            entry["board"]["start_condition"] = evaluated
+        why, why_src = queue_reason(task, entry["run"], busy, evaluated)
         entry["board"]["blocked_by"] = why
         entry["board"]["blocked_by_src"] = why_src
         hand = entry["detail"].get("handoff") or {}
+        # A decision is unexecuted only while nothing observed it carried out.
+        # The observation is the one the contour already writes for delivery —
+        # `delivery.md` or a receipt carrying a message identifier — so the area
+        # closes itself the moment the document actually goes out, and no second
+        # notion of «исполнено» is invented here.
+        decision = None
+        if evaluated and evaluated["decision"] == "deliver":
+            done = bool(hand) and bool(hand.get("delivered"))
+            decision = {
+                "kind": "deliver",
+                "done": done,
+                "src": (hand.get("delivered_src") if hand else
+                        "документа для человека в каталоге задачи не наблюдается"),
+            }
+        entry["board"]["decision"] = decision
         entry["board"]["area"] = board_area(
             entry["status"], entry["flags"], bool(entry["asked_user"]), why,
             ours=bool(entry["our_questions"]),
-            undelivered=bool(hand) and not hand.get("delivered"))
+            undelivered=bool(hand) and not hand.get("delivered"),
+            # «Готово к запуску» requires a start condition, not merely a field:
+            # a task carrying only a decision has named no obstacle, so it stands
+            # where it always stood.
+            ready=bool(evaluated) and evaluated["satisfied"]
+            and bool(evaluated["after"] or evaluated["worktrees"]),
+            decision_unmet=bool(decision) and not decision["done"])
         # A queued task's reason for standing is the thing holding it, and the
         # plate has one place for «почему». `jam_reason` already filled it from
         # `status_detail` when there was one; a repository held by a named run
@@ -1509,13 +1741,17 @@ def build(anonymize: bool, only: str | None = None) -> dict:
     # Read once: whose question is still unanswered is asked of every task and
     # every product, and the mailbox may not answer it differently between them.
     mail = mailbox()
+    statuses = {task["id"]: task.get("status") for task in catalogue if task.get("id")}
     threads = []
     for key, thread in config["threads"].items():
         if only and key != only:
             continue
         source = thread_tasks(thread)
         tasks = [task_entry(task, mail) for task in source]
-        assign_areas(tasks, source)
+        # A start condition may name a task of another direction, and the index
+        # is the same one the board is already built from, so the answer to «эта
+        # задача закрыта?» cannot depend on which thread is being collected.
+        assign_areas(tasks, source, statuses)
         threads.append({
             "key": key,
             "title": thread.get("title", key),

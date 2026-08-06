@@ -21,6 +21,7 @@ import process_map_recorder as recorder
 import process_map_render as render
 import process_map_schema as schema
 import process_map_state as state
+import thread_tick as tick
 
 
 def a_question(**over) -> dict:
@@ -70,7 +71,8 @@ def a_task(**over) -> dict:
                       "role": None, "role_src": None, "happening": None,
                       "why": None, "why_src": None, "since": None, "since_src": None,
                       "age_seconds": None, "attempt": 0,
-                      "blocked_by": None, "blocked_by_src": None}}
+                      "blocked_by": None, "blocked_by_src": None,
+                      "start_condition": None, "decision": None}}
     task.update(over)
     task["board"].update(board)
     task["detail"].update(detail)
@@ -581,8 +583,9 @@ class BoardLayout(unittest.TestCase):
     def test_the_areas_stand_in_the_order_of_urgency(self):
         board = render.build_board(a_snapshot())
         order = [area["key"] for area in board["panels"][0]["areas"]]
-        self.assertEqual(order, ["waiting_human", "running", "stuck", "undelivered",
-                                 "product_owner", "pickup", "queued", "plan", "done"])
+        self.assertEqual(order, ["waiting_human", "running", "stuck", "decision_unmet",
+                                 "undelivered", "product_owner", "ready_to_start",
+                                 "pickup", "queued", "plan", "done"])
 
     def test_what_can_be_picked_up_stands_above_what_is_held(self):
         """The first question of a wake-up outranks the reference list below it.
@@ -1371,6 +1374,172 @@ def queue_why(task, repo, busy):
     return state.queue_reason(task, {"repo": repo}, busy)
 
 
+# The real sentence 831 carried, and the field it should have carried instead.
+# The scenario is not invented: 830 held /opt/projects/moex-trading-engine, 831
+# was the next step in the same tree, and the sentence saying so was invisible.
+LIVE_831 = "starts_after=830 worktree=/opt/projects/moex-trading-engine"
+
+
+def conditioned(task_id, field, **over):
+    """A task whose `status_detail` carries a condition, as the collector hands it."""
+    return a_task(id=task_id, dir=f"{task_id}-t", status_detail=field, **over)
+
+
+class StartConditionIsAField(unittest.TestCase):
+    """831 stood forty minutes because its condition was a sentence.
+
+    The condition existed and was correct — «после завершения прогона 830, то же
+    рабочее дерево» — but it lived in the last line of `## Summary`, so the
+    observer could not tell that 830 had closed and the tree was free. «Условие
+    снялось» could be neither a state nor a transition, and the queue moved only
+    when the user asked how it is tracked.
+    """
+
+    def test_the_condition_is_read_out_of_the_field_it_is_written_in(self):
+        condition = state.start_condition(LIVE_831)
+        self.assertEqual(condition["after"], [830])
+        self.assertEqual(condition["worktrees"], ["/opt/projects/moex-trading-engine"])
+        self.assertIn("status_detail", condition["src"])
+
+    def test_prose_is_not_a_condition(self):
+        # The old field is full of sentences, and reading one as a condition
+        # would let the board clear a hold nobody wrote in a checkable form.
+        self.assertIsNone(state.start_condition(
+            "Запускать только после завершения прогона 830, то же рабочее дерево"))
+        self.assertIsNone(state.start_condition(None))
+
+    def test_prose_keeps_holding_exactly_as_before(self):
+        why, src = state.queue_reason(
+            {"id": 686, "status_detail": "queued_behind_active_worktree_writers_669_689"},
+            {"repo": None}, {})
+        self.assertEqual(why, "queued_behind_active_worktree_writers_669_689")
+        self.assertIn("status_detail", src)
+
+    def test_an_open_predecessor_holds_the_task_and_is_named(self):
+        condition = state.start_condition(LIVE_831)
+        verdict = state.condition_state(condition, {830: "in_progress"}, {}, 831)
+        self.assertFalse(verdict["satisfied"])
+        self.assertIn("830", verdict["holding"][0])
+
+    def test_a_busy_working_tree_holds_the_task_even_after_the_predecessor_closed(self):
+        # The two halves of the real condition are independent: 830 closing does
+        # not free the tree if something else is writing in it, and putting a
+        # second child there is the collision the sentence was written to stop.
+        condition = state.start_condition(LIVE_831)
+        busy = {"/opt/projects/moex-trading-engine": {"id": 775, "title": "Живая"}}
+        verdict = state.condition_state(condition, {830: "completed"}, busy, 831)
+        self.assertFalse(verdict["satisfied"])
+        self.assertIn("775", verdict["holding"][0])
+
+    def test_a_predecessor_the_index_does_not_know_keeps_holding(self):
+        # An unobservable predecessor is not a finished one. A typo in a number
+        # must never promote work to «готово к запуску».
+        verdict = state.condition_state(state.start_condition("starts_after=9999"), {}, {}, 1)
+        self.assertFalse(verdict["satisfied"])
+        self.assertIn("не наблюдается", verdict["holding"][0])
+
+    def test_the_condition_clears_itself_when_what_it_named_is_gone(self):
+        condition = state.start_condition(LIVE_831)
+        verdict = state.condition_state(condition, {830: "completed"}, {}, 831)
+        self.assertTrue(verdict["satisfied"])
+        self.assertEqual(state.queue_reason({"id": 831}, {"repo": None}, {}, verdict),
+                         (None, None))
+        self.assertIn("задача 830 закрыта (completed)", verdict["met"])
+
+    def test_ready_to_start_is_not_the_same_answer_as_pickup(self):
+        # Both say nothing is holding the task. Only one says a condition was
+        # written down in advance and has since been met, and that is the whole
+        # difference between «можно подхватить» and «пора запускать».
+        self.assertEqual(state.board_area("planned", ["idle"], False, None), "pickup")
+        self.assertEqual(state.board_area("planned", ["idle"], False, None, ready=True),
+                         "ready_to_start")
+
+    def test_the_whole_pass_moves_the_task_from_the_queue_to_ready(self):
+        """The real 830→831 pair, driven through the pass the board really uses."""
+        live = a_task(id=830, dir="830-t", flags=["live"], status="in_progress",
+                      run={"repo": "/opt/projects/moex-trading-engine", "alive": True,
+                           "alive_src": "проверено по .runner/runner.json"})
+        waiting = conditioned(831, LIVE_831)
+        entries, source = [live, waiting], [{"id": 830}, {"id": 831}]
+        state.assign_areas(entries, source, {830: "in_progress", 831: "planned"})
+        self.assertEqual(waiting["board"]["area"], "queued")
+        self.assertIn("830", waiting["board"]["blocked_by"])
+        self.assertTrue(waiting["board"]["blocked_by_src"].strip())
+
+        # 830 closes and its process goes: exactly the 19:52 UTC of 2026-08-06.
+        live["flags"] = []
+        live["status"] = "completed"
+        live["run"]["alive"] = False
+        waiting = conditioned(831, LIVE_831)
+        state.assign_areas([live, waiting], source, {830: "completed", 831: "planned"})
+        self.assertEqual(waiting["board"]["area"], "ready_to_start")
+        self.assertIsNone(waiting["board"]["blocked_by"])
+        self.assertTrue(waiting["board"]["start_condition"]["satisfied"])
+
+    def test_a_task_that_named_no_condition_says_so_rather_than_saying_met(self):
+        plain = a_task(id=1, dir="001-t")
+        state.assign_areas([plain], [{"id": 1}], {1: "planned"})
+        self.assertIsNone(plain["board"]["start_condition"])
+        self.assertEqual(plain["board"]["area"], "pickup")
+
+    def test_the_board_draws_the_area_and_says_by_what_rule(self):
+        ready = a_task(board={"area": "ready_to_start"})
+        area = next(a for a in render.build_board(a_snapshot([ready]))["panels"][0]["areas"]
+                    if a["key"] == "ready_to_start")
+        self.assertEqual([p["id"] for p in area["plates"]], [1])
+        self.assertIn("машиночитаемое условие запуска", a_page())
+
+
+class DecisionTakenAndNotCarriedOut(unittest.TestCase):
+    """The same hole one step earlier, and the same evening.
+
+    «Решение продакта принято здесь и вслух: из девяти живых документов человеку
+    идут три» was written at 20:1x on 2026-08-06. At 20:5x none of the three had
+    gone out, and all three moved only after the user asked. A decision in a
+    sentence moves nobody, so it becomes a field checked against the delivery
+    evidence the contour already writes.
+    """
+
+    DELIVERED = {"delivered": True, "delivered_src": "delivery.md в каталоге задачи"}
+    NOT_DELIVERED = {"delivered": False, "delivered_src": "квитанции несут только "
+                                                          "события жизненного цикла прогона"}
+
+    def decided(self, handoff):
+        task = conditioned(835, "decision=deliver", status="completed",
+                           detail={"handoff": handoff})
+        state.assign_areas([task], [{"id": 835}], {835: "completed"})
+        return task
+
+    def test_a_decision_nothing_carried_out_stands_in_its_own_area(self):
+        task = self.decided(self.NOT_DELIVERED)
+        self.assertEqual(task["board"]["area"], "decision_unmet")
+        self.assertFalse(task["board"]["decision"]["done"])
+        self.assertTrue(task["board"]["decision"]["src"].strip())
+
+    def test_the_existing_delivery_evidence_closes_it_and_no_new_sign_is_invented(self):
+        task = self.decided(self.DELIVERED)
+        self.assertEqual(task["board"]["area"], "done")
+        self.assertTrue(task["board"]["decision"]["done"])
+        self.assertIn("delivery.md", task["board"]["decision"]["src"])
+
+    def test_a_decision_outranks_the_passive_undelivered_area(self):
+        # «Не доставлено» is work nobody looked at; this is work somebody decided
+        # must go out. They must not be the same plate.
+        undecided = a_task(id=783, dir="783-t", status="completed",
+                           detail={"handoff": self.NOT_DELIVERED})
+        state.assign_areas([undecided], [{"id": 783}], {783: "completed"})
+        self.assertEqual(undecided["board"]["area"], "undelivered")
+
+    def test_an_unknown_decision_is_not_recorded_as_one(self):
+        # An area that cannot say «исполнено» would be a second list of prose.
+        self.assertIsNone(state.start_condition("decision=подумать"))
+
+    def test_a_decision_alone_does_not_make_a_task_ready_to_start(self):
+        task = conditioned(835, "decision=deliver", detail={"handoff": self.DELIVERED})
+        state.assign_areas([task], [{"id": 835}], {835: "planned"})
+        self.assertEqual(task["board"]["area"], "pickup")
+
+
 CATALOGUE = [
     {"id": 736, "title": "надо исправить task_index — она присылает задачи companion-agent",
      "slug": "736-max-task-index"},
@@ -1743,6 +1912,29 @@ class DoneButNeverShown(unittest.TestCase):
         self.assertTrue(hand["delivered"])
         self.assertIn("delivery.md", hand["delivered_src"])
 
+    def test_the_note_the_product_owner_writes_by_hand_closes_it_too(self):
+        """Two names, one convention — channel, message identifier, sha256.
+
+        The audit of 835 wrote `delivery.md` 71 times; the product owner writes
+        `product-owner-delivery.md` when they send a document themselves, and on
+        2026-08-06 they wrote six — including all three documents of the decision
+        this observation exists to check. Knowing only the first name called
+        three deliveries undelivered while the letters were in the mailbox.
+        """
+        task = self.like_783()
+        (task / "product-owner-delivery.md").write_text(
+            "# Доставка пользователю\n- 2026-08-06, письмо `19fd8d2ef212b626`\n")
+        hand = state.handoff(task)
+        self.assertTrue(hand["delivered"])
+        self.assertIn("product-owner-delivery.md", hand["delivered_src"])
+
+    def test_the_absence_says_which_names_were_looked_for(self):
+        # «Свидетельства нет» is only checkable if the reader is told what was
+        # searched for; a bare «нет» is the claim that hid the six notes above.
+        hand = state.handoff(self.like_783())
+        for name in state.DELIVERY_NOTES:
+            self.assertIn(name, hand["delivered_src"])
+
     def test_a_receipt_about_something_other_than_the_run_closes_it_too(self):
         task = self.like_783()
         with (task / "dev-pipeline" / "notification-receipts.jsonl").open("a") as handle:
@@ -1864,6 +2056,79 @@ class ReadableAtBothSizes(unittest.TestCase):
         self.assertIn("#cardbody { padding:", text)
         self.assertNotIn("#cardbody { overflow: auto", text)
         self.assertIn("window.scrollTo(0, boardScroll)", text)
+
+
+class TheWakeUpSeesTheQueueMove(unittest.TestCase):
+    """A timer wakes a process, never a conversation — so the process has to see it.
+
+    Before this, the tick knew four transitions and «планируемая задача стала
+    запускаемой» could not be among them: startability was not a state, so it had
+    no edge. On 2026-08-06 the tick correctly reported «прогон 830 завершился»
+    and nothing said what that made possible; 831 stood forty minutes.
+    """
+
+    def report(self, ready=(), decided=()):
+        return {
+            "live_runs": [], "needs_attention": [], "repos": [],
+            "ready_to_start": [{"id": i, "title": "Задача", "condition": None,
+                                "met": [], "met_src": None} for i in ready],
+            "decided_not_done": [{"id": i, "title": "Задача", "decision": "deliver",
+                                  "src": "квитанции несут только события прогона"}
+                                 for i in decided],
+            "owners_awake": [],
+        }
+
+    def test_a_condition_that_cleared_is_a_transition_like_a_finished_run(self):
+        before = tick.snapshot(self.report())
+        after = tick.snapshot(self.report(ready=[831]))
+        events = tick.transitions(before, after)
+        self.assertEqual(len(events), 1)
+        self.assertIn("831", events[0])
+        self.assertIn("запускать", events[0])
+
+    def test_standing_ready_is_a_state_and_only_becoming_ready_is_the_event(self):
+        # Otherwise every tick would shout about the same task forever, and a
+        # wake-up that cries every twenty minutes is a wake-up nobody reads.
+        steady = tick.snapshot(self.report(ready=[831]))
+        self.assertEqual(tick.transitions(steady, steady), [])
+
+    def test_a_decision_nobody_carried_out_is_a_transition_too(self):
+        events = tick.transitions(tick.snapshot(self.report()),
+                                       tick.snapshot(self.report(decided=[835])))
+        self.assertEqual(len(events), 1)
+        self.assertIn("835", events[0])
+        self.assertIn("не исполнено", events[0])
+
+    def test_yielding_to_another_owner_leaves_the_list_on_disk(self):
+        """Yielding is right; yielding silently is how the list reaches nobody."""
+        report = self.report(ready=[831])
+        report["owners_awake"] = [{"pid": 1, "thread": "moex", "since": "2026-08-06T20:05:00+00:00",
+                                   "age_seconds": 60, "src": "командная строка процесса в /proc"}]
+        left = tick.yielded(report)
+        self.assertEqual([item["id"] for item in left["ready_to_start"]], [831])
+        self.assertEqual(left["to"][0]["pid"], 1)
+        self.assertTrue(left["src"].strip())
+
+    def test_the_tick_does_not_count_itself_as_the_other_owner(self):
+        # The second owner of 2026-08-06 was awake on the *same* direction, so
+        # the exclusion has to be this process and not this thread.
+        report = self.report(ready=[831])
+        report["owners_awake"] = [{"pid": os.getpid(), "thread": "moex", "since": "x",
+                                   "age_seconds": 1, "src": "/proc"}]
+        self.assertIsNone(tick.yielded(report))
+
+    def test_the_list_is_written_whether_or_not_an_agent_is_woken(self):
+        source = Path(state.HOME / "scripts" / "thread_tick.py").read_text()
+        # Written into the thread's own state file, next to the snapshot, before
+        # the agent runs — so it survives a tick that decides to say nothing.
+        self.assertIn('"yielded_to_awake_owner": yielded(report)', source)
+        self.assertIn("**standing", source)
+
+    def test_the_wake_up_report_carries_both_areas_apart(self):
+        source = Path(state.HOME / "scripts" / "thread_state.py").read_text()
+        self.assertIn('area"] == "ready_to_start"', source)
+        self.assertIn('area"] == "decision_unmet"', source)
+        self.assertIn('area"] == "pickup"', source)
 
 
 if __name__ == "__main__":

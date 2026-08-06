@@ -189,6 +189,11 @@
   .area.a-plan > h3 { color: var(--plan); }
   .area.a-product_owner > h3 { color: var(--ours); }
   .area.a-undelivered > h3 { color: var(--undelivered); }
+  /* «Готово к запуску» is «можно подхватить» with a condition behind it that
+     has since been met, so it reads in the same colour and stands above it. */
+  .area.a-ready_to_start > h3 { color: var(--pick); }
+  /* A decision taken and not carried out is our own jam, not the work's. */
+  .area.a-decision_unmet > h3 { color: var(--undelivered); }
   .area.shut .plates { display: none; }
   .area .empty { color: var(--idle); font-size: 12px; padding: 2px 0 4px; }
   /* The rule that selected the contents of an area, printed with the area. It
@@ -219,6 +224,8 @@
   .plate.p-plan { border-left-color: var(--plan); }
   .plate.p-product_owner { border-left-color: var(--ours); }
   .plate.p-undelivered { border-left-color: var(--undelivered); }
+  .plate.p-ready_to_start { border-left-color: var(--pick); }
+  .plate.p-decision_unmet { border-left-color: var(--undelivered); }
   /* A plate opens its card. It is a control, so it says so before it is clicked
      rather than after — a board nobody knows is clickable has no drill-down. */
   .plate { cursor: pointer; }
@@ -1509,6 +1516,8 @@ const AREA_RULE = {
      same check in a minute instead of an evening. */
   waiting_human: "только то, что спрошено у пользователя письмом или сообщением — с датой и идентификатором — и на что ответа не наблюдалось: ни письма от него в том же треде, ни решения, записанного в строке",
   product_owner: "наши собственные вопросы: открытые, но пользователю их не задавали, либо он ответил, а решение осталось незаписанным. Решает продакт, а не человек",
+  ready_to_start: "у задачи записано машиночитаемое условие запуска — после каких задач и какое рабочее дерево она занимает, — и по наблюдению ничто из названного её больше не держит",
+  decision_unmet: "на задаче записано решение продакта, а наблюдения, что оно исполнено, нет: для доставки таким наблюдением служит delivery.md или квитанция с идентификатором сообщения",
   undelivered: "задача завершена, документ для человека лежит в каталоге задачи, а свидетельства доставки нет: ни delivery.md, ни квитанции о документе — только события жизненного цикла прогона",
 };
 

@@ -158,6 +158,29 @@ def build(name: str) -> dict:
         # reading the whole list again.
         "can_pick_up": [{"id": task["id"], "title": task["title"]}
                         for task in thread["tasks"] if task["board"]["area"] == "pickup"],
+        # Work whose start condition was written down and has since been met.
+        # Kept apart from «можно подхватить» on purpose: both say nothing is
+        # holding the task, but only this one says somebody decided in advance
+        # when it may start and that moment has arrived. 831 was exactly this and
+        # had nowhere to be seen — it stood forty minutes after 830 closed and
+        # moved only when the user asked how the queue is tracked.
+        "ready_to_start": [
+            {"id": task["id"], "title": task["title"],
+             "condition": task["board"]["start_condition"],
+             # What the condition asked for and what was observed instead of it,
+             # so «готово» can be checked rather than believed.
+             "met": (task["board"]["start_condition"] or {}).get("met") or [],
+             "met_src": (task["board"]["start_condition"] or {}).get("src")}
+            for task in thread["tasks"] if task["board"]["area"] == "ready_to_start"],
+        # Decisions recorded on a task that nothing observed carried out. The
+        # other half of the same hole: on 2026-08-06 «из девяти живых документов
+        # человеку идут три» was written down and three hours later none had gone
+        # out, because a decision in a sentence moves nobody.
+        "decided_not_done": [
+            {"id": task["id"], "title": task["title"],
+             "decision": task["board"]["decision"]["kind"],
+             "src": task["board"]["decision"]["src"]}
+            for task in thread["tasks"] if task["board"]["area"] == "decision_unmet"],
         # Other instances of the product owner deciding right now. A tick that
         # cannot see one creates the task the other one just created.
         "owners_awake": snapshot["owners_awake"],
@@ -187,6 +210,15 @@ def main() -> None:
     for item in report["needs_attention"]:
         mark = " РАБОТА ШЛА ВНЕ УМЕРШЕГО ВЛАДЕЛЬЦА" if (item["run"] or {}).get("work_outside_owner") else ""
         print(f"  {item['id']} {item['status']}{mark} — {item['title'][:70]}")
+    print(f"готово к запуску: {len(report['ready_to_start'])}")
+    for item in report["ready_to_start"]:
+        print(f"  {item['id']} — {item['title'][:70]}")
+        for line in item["met"]:
+            print(f"      условие снято: {line}")
+    print(f"решено, но не исполнено: {len(report['decided_not_done'])}")
+    for item in report["decided_not_done"]:
+        print(f"  {item['id']} {item['decision']} — {item['title'][:70]}")
+        print(f"      исполнения не наблюдается: {item['src']}")
     print(f"можно подхватить: {len(report['can_pick_up'])}")
     for item in report["can_pick_up"][:8]:
         print(f"  {item['id']} — {item['title'][:70]}")

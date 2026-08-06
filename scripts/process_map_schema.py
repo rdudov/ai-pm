@@ -64,8 +64,10 @@ BOARD_AREAS = (
     "waiting_human",  # the *user* was asked in writing and has not answered
     "running",        # a process is alive right now
     "stuck",          # a dead run under a living label, a kill, a failed gate
+    "decision_unmet", # a decision was recorded and nothing observed it carried out
     "undelivered",    # finished, a document exists, nothing observed it delivered
     "product_owner",  # our own open question: the product owner owes the answer
+    "ready_to_start", # a condition was written down, and it has since been met
     "pickup",         # nothing running, nothing observably holding it: start it
     "queued",         # held by something named, and the name is next to it
     "plan",           # promised in a product record and never made a task
@@ -76,8 +78,10 @@ BOARD_AREA_RU = {
     "waiting_human": "Ждёт решения пользователя",
     "running": "В работе сейчас",
     "stuck": "Затор",
+    "decision_unmet": "Решено, но не исполнено",
     "undelivered": "Сделано, но не доставлено",
     "product_owner": "Решает продакт",
+    "ready_to_start": "Готово к запуску",
     "pickup": "Можно подхватить",
     "queued": "В очереди, за чем стоит",
     "plan": "Надо запланировать",
@@ -143,7 +147,14 @@ BOARD_FIELDS = ("area", "actor", "actor_src", "role", "role_src",
                 # What is holding a queued task, and what observed it. «В
                 # очереди» without this is a label, not an answer: the user
                 # asked for «за чем именно стоит».
-                "blocked_by", "blocked_by_src")
+                "blocked_by", "blocked_by_src",
+                # The start condition as a field rather than a sentence, and the
+                # decision recorded on the task. Both are `None` when the task
+                # named neither, and `None` never means «условие выполнено»: a
+                # condition nobody wrote down and a condition that has cleared
+                # are two different states and 831 stood for forty minutes in the
+                # gap between them.
+                "start_condition", "decision")
 
 # What a plate shows when it is opened. Collected by the observer rather than
 # fetched by the page: the renderer may not reach a disk, so a drill-down that

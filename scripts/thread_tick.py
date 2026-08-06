@@ -10,6 +10,20 @@ Transitions that wake the product owner:
   - a run claims `running` while its process is gone
   - a task entered `blocked`
   - a repository the thread owns moved to a new commit
+  - a task's recorded start condition became met, so it is startable now
+  - a decision recorded on a task is still not carried out
+
+The last two exist because the first four could not answer «что теперь можно
+запускать». On 2026-08-06 task 831 named its condition in a sentence — «после
+завершения прогона 830, то же рабочее дерево» — and the tick saw only «прогон
+830 завершился». Nothing said what that made possible, so 831 stood forty
+minutes and moved when the user asked. A condition that is a field becomes a
+transition like any other.
+
+And when the tick yields to another instance of the product owner, it leaves the
+list of what it did not start on disk beside the snapshot. Yielding is right —
+two children in one working tree is the collision the condition exists to
+prevent — but yielding silently is how the list ends up in nobody's hands.
 
 Usage: thread_tick.py <thread> [--dry-run] [--force]
 """
@@ -40,6 +54,12 @@ def snapshot(report: dict) -> dict:
         "blocked": sorted(item["id"] for item in report["needs_attention"] if item["status"] == "blocked"),
         "stale": sorted(item["id"] for item in report["live_runs"] if item["run"]["stale_running"]),
         "heads": {repo["repo"]: repo.get("head", "") for repo in report["repos"] if repo["present"]},
+        # Startability is a state now, so it can be compared between two ticks
+        # like every other state here. Without it «условие снялось» could only be
+        # inferred by a reader, and readers of a background tick are the thing
+        # this file does not have.
+        "ready": sorted(item["id"] for item in report["ready_to_start"]),
+        "decided": sorted(item["id"] for item in report["decided_not_done"]),
     }
 
 
@@ -51,6 +71,16 @@ def transitions(previous: dict, current: dict) -> list[str]:
         events.append(f"задача {task_id} числится running, но процесс мёртв")
     for task_id in sorted(set(current["blocked"]) - set(previous.get("blocked", []))):
         events.append(f"задача {task_id} перешла в blocked")
+    # A condition that has just cleared is the transition the queue was missing.
+    # It is reported on the edge, exactly like a finished run: standing in
+    # «готово к запуску» is a state, becoming startable is the event.
+    for task_id in sorted(set(current["ready"]) - set(previous.get("ready", []))):
+        events.append(f"условие запуска задачи {task_id} выполнено — её можно запускать")
+    # An unexecuted decision is reported on its edge too, so a decision taken and
+    # then forgotten does not have to wait for the next unrelated event to be
+    # mentioned.
+    for task_id in sorted(set(current["decided"]) - set(previous.get("decided", []))):
+        events.append(f"решение по задаче {task_id} записано и не исполнено")
     for repo, head in current["heads"].items():
         if previous.get("heads", {}).get(repo, head) != head:
             events.append(f"{Path(repo).name}: новый коммит {head}")
@@ -96,6 +126,37 @@ def notify(text: str) -> None:
         return
 
 
+def yielded(report: dict) -> dict | None:
+    """What this tick did not start because another product owner is awake.
+
+    Yielding is correct: two children in one working tree is the collision the
+    start condition exists to prevent, and the tick has no way to know what the
+    other instance is about to do. What was wrong is that yielding was silent —
+    on 2026-08-06 the background owner stood down and the list of work it did not
+    start existed only inside its own text, so nothing and nobody held it.
+
+    So the list is written down instead. It is an observation, not a claim: who
+    else was seen awake, and which tasks were startable at that moment. The
+    interactive owner reads the same file the tick writes, which is the whole
+    point — a timer wakes a process, never a conversation.
+    """
+    # Every awake owner except this very process. Excluding by thread instead
+    # would have thrown away exactly the case that cost the forty minutes: the
+    # second owner of 2026-08-06 was awake on the *same* direction, and it is a
+    # same-direction second owner that must not put a second child into one
+    # working tree.
+    others = [owner for owner in report["owners_awake"] if owner["pid"] != os.getpid()]
+    if not others:
+        return None
+    return {
+        "at": datetime.now(timezone.utc).isoformat(),
+        "to": others,
+        "ready_to_start": report["ready_to_start"],
+        "decided_not_done": report["decided_not_done"],
+        "src": "командные строки процессов в /proc и области наблюдаемого состояния треда",
+    }
+
+
 def prompt(report: dict, events: list[str]) -> str:
     return f"""Ты продакт-агент на фоновом пробуждении треда «{report['title']}».
 
@@ -117,6 +178,13 @@ def prompt(report: dict, events: list[str]) -> str:
 4. Верни короткий текст для пользователя в формате вердикта продакта: что теперь
    может пользователь, цена, что осталось, и строка «Риск/долг», если в
    verification есть GAP. Если сказать нечего — верни ровно слово SILENT.
+
+Разделы «готово к запуску» и «решено, но не исполнено» в состоянии выше — это
+работа, у которой условие уже снято или решение уже принято: по ней нужен либо
+запуск, либо названная причина, почему нет. Если бодрствует ещё один продакт,
+уступи ему дорогу — двух детей в одном рабочем дереве быть не должно; список
+того, что ты не стал запускать, уже лежит на диске в файле состояния треда, так
+что пересказывать его в тексте не нужно.
 
 Не запускай новых детей в write-режиме без явного разрешения пользователя.
 Не читай транскрипты детей: только артефакты задач и наблюдаемое состояние.
@@ -143,13 +211,23 @@ def main() -> int:
 
     events = transitions(previous, current) if previous else ["первый запуск треда"]
     now = datetime.now(timezone.utc).isoformat()
+    # Written whether or not an agent is woken, and before it is: the list of
+    # work standing ready has to survive a tick that decides to say nothing, and
+    # it must not depend on what the woken agent chose to write down.
+    standing = {
+        "ready_to_start": report["ready_to_start"],
+        "decided_not_done": report["decided_not_done"],
+        "yielded_to_awake_owner": yielded(report),
+    }
 
     if args.dry_run:
-        print(json.dumps({"events": events, "snapshot": current}, ensure_ascii=False, indent=2))
+        print(json.dumps({"events": events, "snapshot": current, **standing},
+                         ensure_ascii=False, indent=2))
         return 0
 
     state_path.write_text(json.dumps(
-        {"thread": args.thread, "updated_at": now, "snapshot": current, "last_events": events},
+        {"thread": args.thread, "updated_at": now, "snapshot": current,
+         "last_events": events, **standing},
         ensure_ascii=False, indent=2,
     ))
 
