@@ -104,15 +104,40 @@ class Scribe:
         # started it.
         self.seeding = not cursor_path.is_file()
         self.cursor = state.read_json(cursor_path) if cursor_path.is_file() else {}
-        self.cursor.setdefault("events", {})     # task dir -> last sequence seen
+        self.cursor.setdefault("events", {})     # task dir -> journal byte cursor
         self.cursor.setdefault("artifacts", {})  # "task/file" -> mtime
         self.cursor.setdefault("activity", {})   # task dir -> last activity line
         self.cursor.setdefault("status", {})     # task dir -> last frontmatter status
         self.cursor.setdefault("commits", {})    # repo -> last HEAD
-        self.cursor.setdefault("receipts", {})   # task dir -> receipts seen
+        self.cursor.setdefault("receipts", {})   # task dir -> journal byte cursor
         self.cursor.setdefault("mail", [])       # message ids seen
+        self._migrate_journal_cursors()
         self.threads = self._thread_of_task()
         self.written = 0
+
+    def _migrate_journal_cursors(self) -> None:
+        """Carry an old cursor over to byte offsets without replaying history.
+
+        The previous cursor stored a sequence number for events and a list of
+        receipt ids; both meant «everything in this file has been seen». Reading
+        them as a byte offset of zero would replay every past record into the
+        timeline, so a legacy entry is turned into a cursor at the end of the
+        file it refers to.
+        """
+        journals = {"events": ("dev-pipeline", "core", "events.jsonl"),
+                    "receipts": ("dev-pipeline", "notification-receipts.jsonl")}
+        for key, parts in journals.items():
+            for task, value in list(self.cursor[key].items()):
+                if isinstance(value, dict):
+                    continue
+                path = TASKS.joinpath(task, *parts)
+                try:
+                    stat = path.stat()
+                except OSError:
+                    self.cursor[key].pop(task)
+                    continue
+                self.cursor[key][task] = {"offset": stat.st_size, "size": stat.st_size,
+                                          "inode": stat.st_ino}
 
     # -- attribution ------------------------------------------------------
     def _thread_of_task(self) -> dict:
@@ -123,6 +148,18 @@ class Scribe:
             for task in state.thread_tasks(thread):
                 mapping[Path(task["path"]).name] = key
         return mapping
+
+    @staticmethod
+    def observed_runner(task_dir: Path) -> dict:
+        """`actor` plus what named it, or nothing at all.
+
+        The one source that actually names who is doing the work is the runner
+        field the launcher writes. When it is absent the record simply carries no
+        actor, and the board shows a dash — an empty cell beats a confident
+        untruth in a caption (finding MEDIUM-3 of review 780).
+        """
+        runner, source = state.observed_actor(task_dir, state.run_state(task_dir))
+        return {"actor": runner, "actor_src": source} if runner else {}
 
     def _repos(self) -> list[tuple[str, Path]]:
         config = state.load_config()
@@ -173,12 +210,11 @@ class Scribe:
             started = state.read_json(task_dir / ".runner" / "runner.json").get("started_at")
             self.emit({**base, "at": started or mtime_iso(task_dir / "task.md"),
                        "kind": "task_appeared",
-                       "label": title, "observed_by": "каталог задачи на диске",
-                       "actor": "продакт"})
+                       "label": title, "observed_by": "каталог задачи на диске"})
         elif self.cursor["status"][name] != front["status"]:
             self.emit({**base, "at": now(), "kind": "task_status",
                        "label": f"{self.cursor['status'][name]} → {front['status']}",
-                       "observed_by": "frontmatter task.md", "actor": "продакт",
+                       "observed_by": "frontmatter task.md",
                        "status": front["status"]})
         self.cursor["status"][name] = front["status"]
 
@@ -191,22 +227,18 @@ class Scribe:
         path = task_dir / "dev-pipeline" / "core" / "events.jsonl"
         if not path.is_file():
             return
-        seen = self.cursor["events"].get(base["task"], 0)
-        highest = seen
-        try:
-            lines = path.read_text().splitlines()
-        except OSError:
-            return
+        # Only what was appended since the last look is read. The cursor keeps a
+        # byte offset with the size and inode it was taken at, so a truncated or
+        # rotated journal restarts from zero instead of being silently skipped.
+        lines, cursor = state.tail_lines(path, self.cursor["events"].get(base["task"]))
+        self.cursor["events"][base["task"]] = cursor
         for line in lines:
             try:
                 event = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            sequence = event.get("sequence", 0)
-            if sequence <= seen:
-                continue
-            highest = max(highest, sequence)
             payload = event.get("payload") or {}
+            runtime = payload.get("runtime")
             self.emit({
                 **base,
                 "at": event.get("timestamp") or now(),
@@ -214,10 +246,12 @@ class Scribe:
                 "label": event.get("kind"),
                 "observed_by": "событие dev-pipeline в events.jsonl",
                 "station": EVENT_STATIONS.get(event.get("kind")),
-                "actor": payload.get("runtime") or "исполнитель",
+                # Named only when the event itself names it. «Исполнитель»
+                # written into every record was an assumption wearing the
+                # clothes of an observation.
+                **({"actor": runtime, "actor_src": "поле runtime события"} if runtime else {}),
                 "detail": payload.get("reason") or payload.get("outcome"),
             })
-        self.cursor["events"][base["task"]] = highest
 
     def observe_artifacts(self, task_dir: Path, base: dict) -> None:
         for path in sorted(task_dir.iterdir()):
@@ -243,7 +277,9 @@ class Scribe:
                 "observed_by": "появление файла" if fresh else "обновление файла",
                 "station": station,
                 "artifact": path.name,
-                "actor": "исполнитель",
+                # No actor: a file that exists says a file exists. Who wrote it
+                # is not observable from its presence, and a plate that repeats
+                # this record must not claim otherwise (finding MEDIUM-3).
             })
 
     @staticmethod
@@ -279,27 +315,20 @@ class Scribe:
             # Freshness is the file's mtime, never the child's own timestamp:
             # children routinely write local time into a UTC field.
             "observed_by": "строка activity в progress.json (свежесть по mtime)",
-            "actor": "исполнитель",
+            **self.observed_runner(task_dir),
         })
 
     def observe_receipts(self, task_dir: Path, base: dict) -> None:
         path = task_dir / "dev-pipeline" / "notification-receipts.jsonl"
         if not path.is_file():
             return
-        seen = set(self.cursor["receipts"].get(base["task"], []))
-        try:
-            lines = path.read_text().splitlines()
-        except OSError:
-            return
+        lines, cursor = state.tail_lines(path, self.cursor["receipts"].get(base["task"]))
+        self.cursor["receipts"][base["task"]] = cursor
         for line in lines:
             try:
                 receipt = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            event_id = receipt.get("event_id")
-            if not event_id or event_id in seen:
-                continue
-            seen.add(event_id)
             self.emit({
                 **base,
                 "at": receipt.get("recorded_at") or now(),
@@ -307,9 +336,7 @@ class Scribe:
                 "label": f"уведомление: {receipt.get('kind')}",
                 "observed_by": "notification-receipts.jsonl",
                 "channel": "telegram",
-                "actor": "исполнитель",
             })
-        self.cursor["receipts"][base["task"]] = sorted(seen)
 
     def observe_commits(self) -> None:
         for thread, repo in self._repos():
@@ -339,7 +366,6 @@ class Scribe:
                     "observed_by": f"git log в {repo.name}",
                     "station": "commit",
                     "channel": "git",
-                    "actor": "исполнитель",
                     "repo": repo.name,
                 })
 
@@ -359,7 +385,6 @@ class Scribe:
                 "label": payload.get("subject") or "письмо",
                 "observed_by": "каталог входящей почты продакта",
                 "channel": "email",
-                "actor": "пользователь",
             })
         self.cursor["mail"] = sorted(seen)
 

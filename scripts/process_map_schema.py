@@ -21,12 +21,43 @@ SCHEMA_VERSION = 1
 # ---------------------------------------------------------------------------
 
 SNAPSHOT_FIELDS = ("schema_version", "mode", "threads", "products")
-THREAD_FIELDS = ("key", "title", "products", "task_count", "tasks", "repos")
-TASK_FIELDS = ("id", "title", "status", "dir", "run", "gates", "flags")
+THREAD_FIELDS = ("key", "title", "products", "task_count", "tasks", "repos", "channels")
+TASK_FIELDS = ("id", "title", "status", "dir", "run", "gates", "flags", "board")
 RUN_FIELDS = ("state", "runner", "workflow", "alive", "progress")
 REPO_FIELDS = ("name", "present")
+CHANNEL_FIELDS = ("channel", "direction", "count")
 
 MODES = ("demo", "real")
+
+# ---------------------------------------------------------------------------
+# Board: the plates the user asked for, and the areas they stand in.
+# ---------------------------------------------------------------------------
+
+# Areas of one direction panel, top to bottom. The order is urgency, not the
+# alphabet, and it is part of the contract: «ждёт решения человека» being first
+# and always visible is the whole answer to one of the three acceptance
+# questions, so a renderer may not reorder it silently.
+BOARD_AREAS = (
+    "waiting_human",  # a person has to decide; shown even when empty
+    "running",        # a process is alive right now
+    "stuck",          # a dead run under a living label, a kill, a failed gate
+    "queued",         # nothing is happening and nothing is wrong
+    "done",           # terminal
+)
+
+BOARD_AREA_RU = {
+    "waiting_human": "Ждёт решения человека",
+    "running": "В работе сейчас",
+    "stuck": "Затор",
+    "queued": "В очереди",
+    "done": "Сделано",
+}
+
+# Fields of one plate. `actor` and `role` are nullable on purpose: an empty cell
+# is the honest answer when nothing on disk names the executor, and it is better
+# than a confident invention (finding MEDIUM-3 of review 780).
+BOARD_FIELDS = ("area", "actor", "actor_src", "role", "role_src",
+                "happening", "since", "age_seconds", "attempt")
 
 # Task flags promised to the renderer. Each one has to be visible as a shape on
 # the map, so adding a flag here is a change to the picture, not only to data.
@@ -103,11 +134,29 @@ def validate_snapshot(snapshot: dict) -> dict:
             where = f"задача {task.get('id')!r}"
             _require(task, TASK_FIELDS, where)
             _require(task["run"], RUN_FIELDS, f"{where}: run")
+            _require(task["board"], BOARD_FIELDS, f"{where}: board")
+            if task["board"]["area"] not in BOARD_AREAS:
+                raise ContractError(f"{where}: область {task['board']['area']!r}")
+            role = task["board"]["role"]
+            if role is not None and role not in STATIONS:
+                raise ContractError(f"{where}: роль {role!r}")
+            # A named executor without a named observation is exactly the caption
+            # the board must not carry: it would read as fact and be a guess.
+            for value, source, what in ((task["board"]["actor"], task["board"]["actor_src"], "исполнитель"),
+                                        (role, task["board"]["role_src"], "роль")):
+                if value and not str(source or "").strip():
+                    raise ContractError(f"{where}: {what} названа, но не сказано, чем наблюдена")
             unknown = [flag for flag in task["flags"] if flag not in TASK_FLAGS]
             if unknown:
                 raise ContractError(f"{where}: неизвестные флаги {unknown}")
         for repo in thread["repos"]:
             _require(repo, REPO_FIELDS, f"репозиторий {repo.get('name')!r}")
+        for channel in thread["channels"]:
+            _require(channel, CHANNEL_FIELDS, f"канал направления {thread.get('key')!r}")
+            if channel["channel"] not in CHANNELS:
+                raise ContractError(f"канал {channel['channel']!r}")
+            if channel["direction"] not in ("in", "out"):
+                raise ContractError(f"канал: направление {channel['direction']!r}")
 
     for product in snapshot["products"]:
         _require(product, ("slug", "questions", "effect"), "продукт")
@@ -129,6 +178,11 @@ def validate_record(record: dict) -> dict:
         # A transition without a stated observation is exactly what the task
         # forbids: the caption has to say what the move was observed by.
         raise ContractError("запись ленты: не сказано, чем наблюдено")
+    if record.get("actor") and not str(record.get("actor_src") or "").strip():
+        # Same rule as `observed_by`, applied to the participant: a record may
+        # leave the executor unnamed, but may not name one without saying what
+        # named them.
+        raise ContractError("запись ленты: исполнитель назван, но не сказано, чем наблюдён")
     station = record.get("station")
     if station is not None and station not in STATIONS:
         raise ContractError(f"запись ленты: станция {station!r}")

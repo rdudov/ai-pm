@@ -67,6 +67,86 @@
   select { background: #162034; color: var(--ink); border: 1px solid var(--edge);
            border-radius: 9px; padding: 6px 8px; font: inherit; }
 
+  /* ---------- board: the default screen ----------
+     Plain plates on purpose. The task is explicit that styling waits until the
+     structure reads, so this is typography and spacing and nothing else. */
+  #board { position: fixed; inset: 0; overflow: hidden; display: flex; flex-direction: column; }
+  #boardhead { padding: 12px 18px 8px; display: flex; gap: 14px; align-items: baseline; flex-wrap: wrap;
+               border-bottom: 1px solid var(--edge); }
+  #boardhead h1 { margin: 0; font-size: 17px; font-weight: 650; }
+  #boardhead .sub { color: var(--dim); font-size: 12.5px; }
+  /* The strip above the columns: who is working and where the jam is, by name.
+     Both answers have to be readable without scrolling anything. */
+  #strip { display: flex; gap: 22px; padding: 9px 18px; border-bottom: 1px solid var(--edge);
+           flex-wrap: wrap; font-size: 12.5px; align-items: baseline; }
+  #strip .grp { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; max-width: 100%; }
+  #strip .lbl { color: var(--dim); font-size: 11px; letter-spacing: .07em; text-transform: uppercase; }
+  #strip .who { color: var(--live); }
+  #strip .jam { color: var(--blocked); }
+  #strip .ask { color: var(--stale); }
+  #strip .none { color: var(--idle); }
+  #strip .item { border: 1px solid var(--edge); border-radius: 6px; padding: 2px 8px; }
+
+  #columns { flex: 1; display: grid; grid-template-columns: repeat(4, 1fr);
+             gap: 12px; padding: 12px 14px 14px; overflow: hidden; min-height: 0; }
+  .col { display: flex; flex-direction: column; min-height: 0; min-width: 0;
+         border: 1px solid var(--edge); border-radius: 12px; background: rgba(14,21,36,.5); }
+  .colhead { padding: 10px 12px 8px; border-bottom: 1px solid var(--edge); }
+  .colhead h2 { margin: 0; font-size: 13.5px; font-weight: 620; }
+  .colhead .meta { color: var(--dim); font-size: 11.5px; margin-top: 3px; }
+  .colbody { overflow: auto; padding: 8px 9px 12px; flex: 1; min-height: 0; }
+
+  .area { margin-bottom: 12px; }
+  .area > h3 { margin: 0 0 6px; font-size: 11px; letter-spacing: .07em; text-transform: uppercase;
+               color: var(--dim); cursor: pointer; display: flex; gap: 7px; align-items: baseline; }
+  .area > h3 .n { color: var(--ink); font-size: 12px; font-weight: 650; }
+  .area > h3 .old { margin-left: auto; font-weight: 400; text-transform: none; letter-spacing: 0; }
+  .area.a-waiting_human > h3 { color: var(--stale); }
+  .area.a-running > h3 { color: var(--live); }
+  .area.a-stuck > h3 { color: var(--blocked); }
+  .area.shut .plates { display: none; }
+  .area .empty { color: var(--idle); font-size: 12px; padding: 2px 0 4px; }
+
+  .plate { border: 1px solid var(--edge); border-left: 3px solid var(--idle); border-radius: 9px;
+           background: #101828; padding: 8px 10px; margin-bottom: 7px; }
+  .plate.p-waiting_human { border-left-color: var(--stale); }
+  .plate.p-running { border-left-color: var(--live); }
+  .plate.p-stuck { border-left-color: var(--blocked); }
+  .plate.p-done { border-left-color: var(--done); }
+  .plate .head { display: flex; gap: 7px; align-items: baseline; }
+  .plate .num { color: var(--dim); font-variant-numeric: tabular-nums; font-size: 12px; flex: none; }
+  .plate .name { font-size: 13px; font-weight: 550; line-height: 1.3; }
+  .plate .row { margin-top: 5px; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  .tag { font-size: 11px; border: 1px solid var(--edge); border-radius: 5px; padding: 1px 6px;
+         color: var(--dim); white-space: nowrap; }
+  .tag.who { color: var(--ink); }
+  .tag.alive { color: var(--live); border-color: #245c3c; }
+  .tag.lie { color: var(--blocked); border-color: #6b2626; }
+  .tag.age { font-variant-numeric: tabular-nums; }
+  .tag.retry { color: var(--killed); border-color: #453a6e; }
+  .plate .doing { margin-top: 5px; color: var(--dim); font-size: 12px; line-height: 1.35; }
+  .plate .ask { margin-top: 5px; color: var(--stale); font-size: 12px; line-height: 1.35;
+                display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+                overflow: hidden; }
+  .plate .doing { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
+                  overflow: hidden; }
+  .plate .more { margin-top: 4px; color: var(--idle); font-size: 11.5px; }
+  .plate .dash { color: var(--idle); }
+
+  .chan { border-top: 1px solid var(--edge); padding: 8px 12px 10px; font-size: 11.5px; color: var(--dim); }
+  .chan div { margin-top: 3px; }
+  .chan b { color: var(--ink); font-weight: 600; }
+  .chan .warn { color: var(--stale); }
+
+  #switch { margin-left: auto; display: flex; gap: 6px; }
+  #switch button { padding: 5px 11px; font-size: 12.5px; }
+  #switch button.on { background: #1e3a5f; border-color: #2f5f8a; }
+
+  @media (max-width: 900px) {
+    #columns { grid-template-columns: 1fr; overflow: auto; }
+    .col { min-height: 60vh; }
+  }
+
   #tip { position: fixed; z-index: 9; background: rgba(9,14,24,.96); border: 1px solid var(--edge);
          border-radius: 10px; padding: 9px 11px; max-width: 300px; font-size: 12.5px;
          display: none; pointer-events: none; }
@@ -100,12 +180,27 @@
 </style>
 </head>
 <body>
+<div id="board">
+  <div id="boardhead">
+    <h1>Доска процессной работы</h1>
+    <span class="sub" id="boardsub"></span>
+    <span id="boardmode"></span>
+    <span id="switch">
+      <button id="toboard" class="on">Доска</button>
+      <button id="tomap">Карта во времени</button>
+    </span>
+  </div>
+  <div id="strip"></div>
+  <div id="columns"></div>
+</div>
+
 <div id="stage"><canvas id="map"></canvas></div>
 
 <div class="hud" id="top">
   <h1>Карта процессной работы</h1>
   <span class="sub" id="subtitle"></span>
   <span id="mode"></span>
+  <span id="switch2"><button id="tomapback">← К доске</button></span>
 </div>
 
 <div class="hud" id="legend">
@@ -694,10 +789,293 @@ function tipFor(h) {
   tip.style.top = Math.min(h.cy + 14, window.innerHeight - 120) + "px";
 }
 
+/* ---------- the board ----------
+   Four direction panels, areas by urgency inside each, one plate per task. The
+   first screen answers the three acceptance questions — who is working, where
+   the jam is and why, what waits for a person — so nothing here is decorative.
+   Every caption comes from a field of the snapshot; where the snapshot says
+   nothing, the plate shows a dash rather than a plausible guess. */
+const BOARD = DATA.board;
+
+/* An age counted from the instant the state was last observed to change, so it
+   stays true while the page sits open rather than freezing at collection time. */
+function ageOf(p) {
+  if (!p.since) return p.age_seconds;
+  const t = Date.parse(p.since);
+  return isNaN(t) ? p.age_seconds : Math.max(Math.round((Date.now() - t) / 1000), 0);
+}
+
+function ago(seconds) {
+  if (seconds === null || seconds === undefined) return null;
+  const m = Math.floor(seconds / 60), h = Math.floor(m / 60), d = Math.floor(h / 24);
+  if (d >= 1) return d + (d === 1 ? " день" : (d < 5 ? " дня" : " дней"));
+  if (h >= 1) return h + (h === 1 ? " час" : (h < 5 ? " часа" : " часов"));
+  if (m >= 1) return m + " мин";
+  return "только что";
+}
+
+const ROLE_RU = { analysis: "анализ", development: "разработка", tests: "тесты",
+                  review: "ревью", commit: "коммит", report: "отчёт" };
+
+function tag(text, cls) {
+  const s = document.createElement("span");
+  s.className = "tag" + (cls ? " " + cls : "");
+  s.textContent = text;                      // never innerHTML: the data is real
+  return s;
+}
+
+function plateNode(p, areaKey) {
+  const node = document.createElement("div");
+  node.className = "plate p-" + areaKey;
+
+  const head = document.createElement("div");
+  head.className = "head";
+  const num = document.createElement("span");
+  num.className = "num"; num.textContent = p.id === null ? "—" : "#" + p.id;
+  const name = document.createElement("span");
+  name.className = "name"; name.textContent = p.title;
+  head.appendChild(num); head.appendChild(name);
+  node.appendChild(head);
+
+  const row = document.createElement("div");
+  row.className = "row";
+  row.appendChild(tag(p.status || "без статуса"));
+  /* Who and in what role — only when a file actually said so. An empty cell is
+     the honest answer and beats a confident untruth in a caption. */
+  const who = p.actor ? tag(p.actor, "who") : tag("исполнитель неизвестен");
+  if (p.actor_src) who.title = "наблюдено: " + p.actor_src;
+  row.appendChild(who);
+  if (p.role) {
+    const role = tag(ROLE_RU[p.role] || p.role);
+    if (p.role_src) role.title = "наблюдено: " + p.role_src;
+    row.appendChild(role);
+  }
+  /* A live process and a label claiming one are two facts, kept apart on the
+     plate: a dead run under a `running` label has to look like the jam it is. */
+  if (p.alive) row.appendChild(tag("прогон жив", "alive"));
+  if (p.stale_label) row.appendChild(tag("ярлык врёт: процесса нет", "lie"));
+  if (p.attempt > 1) row.appendChild(tag("попытка " + p.attempt, "retry"));
+  const age = ago(ageOf(p));
+  if (age) { const a = tag("в этом состоянии " + age, "age"); a.dataset.since = p.since || ""; row.appendChild(a); }
+  node.appendChild(row);
+
+  if (p.happening) {
+    const doing = document.createElement("div");
+    doing.className = "doing"; doing.textContent = p.happening;
+    node.appendChild(doing);
+  }
+  for (const question of p.questions.slice(0, 2)) {
+    const ask = document.createElement("div");
+    ask.className = "ask"; ask.textContent = "? " + question;
+    node.appendChild(ask);
+  }
+  if (p.questions.length > 2) {
+    const more = document.createElement("div");
+    more.className = "more";
+    more.textContent = "и ещё вопросов: " + (p.questions.length - 2);
+    node.appendChild(more);
+  }
+  return node;
+}
+
+/* Which areas the viewer folded open survives a live refresh, so an update
+   never yanks the screen out from under someone reading it. */
+const shutKey = (col, area) => "shut:" + col + ":" + area;
+function isShut(col, area, byDefault) {
+  const stored = sessionStorage.getItem(shutKey(col, area));
+  return stored === null ? byDefault : stored === "1";
+}
+
+function areaNode(panel, area) {
+  const node = document.createElement("section");
+  const shut = isShut(panel.key, area.key, area.collapsed);
+  node.className = "area a-" + area.key + (shut ? " shut" : "");
+
+  const title = document.createElement("h3");
+  title.appendChild(document.createTextNode(area.title + " "));
+  const n = document.createElement("span");
+  n.className = "n"; n.textContent = area.count;
+  title.appendChild(n);
+  if (area.hidden) title.appendChild(document.createTextNode(" (показано " +
+      area.plates.length + ", скрыто " + area.hidden + ")"));
+  const oldest = ago(area.oldest);
+  if (oldest && area.count) {
+    const old = document.createElement("span");
+    old.className = "old"; old.textContent = "старшая: " + oldest;
+    title.appendChild(old);
+  }
+  title.addEventListener("click", () => {
+    const now = !node.classList.contains("shut");
+    node.classList.toggle("shut", now);
+    sessionStorage.setItem(shutKey(panel.key, area.key), now ? "1" : "0");
+  });
+  node.appendChild(title);
+
+  const plates = document.createElement("div");
+  plates.className = "plates";
+  if (!area.count) {
+    const empty = document.createElement("div");
+    empty.className = "empty";
+    /* «Ждёт решения человека» is drawn even when empty: an empty area is an
+       answer to the question, and a missing one is not. */
+    empty.textContent = area.key === "waiting_human" ? "ничего не ждёт решения" : "пусто";
+    plates.appendChild(empty);
+  }
+  for (const p of area.plates) plates.appendChild(plateNode(p, area.key));
+  node.appendChild(plates);
+  return node;
+}
+
+function channelsNode(panel) {
+  const node = document.createElement("div");
+  node.className = "chan";
+  const names = { telegram: "Telegram", email: "Почта продакта", git: "Git" };
+  const out = [];
+  for (const c of panel.channels) {
+    out.push(names[c.channel] + (c.direction === "in" ? " входящих " : " исходящих ") + c.count);
+  }
+  if (out.length) {
+    const line = document.createElement("div");
+    line.textContent = "Связь: " + out.join(" · ");
+    node.appendChild(line);
+  }
+  /* Commits and pushes at the level of the product, not the task: nothing on
+     disk ties a commit to a task number, so no such tie is drawn. */
+  for (const repo of panel.repos) {
+    const line = document.createElement("div");
+    const head = document.createElement("b");
+    head.textContent = repo.name;
+    line.appendChild(head);
+    line.appendChild(document.createTextNode(" " + (repo.branch || "?") + " · " +
+      (repo.head || "?") + " · " + (repo.head_subject || "")));
+    if (repo.tracked_dirty || repo.unpushed) {
+      const warn = document.createElement("span");
+      warn.className = "warn";
+      const bits = [];
+      if (repo.tracked_dirty) bits.push("незакоммичено " + repo.tracked_dirty);
+      if (repo.unpushed) bits.push("не отправлено " + repo.unpushed);
+      warn.textContent = " — " + bits.join(", ");
+      line.appendChild(warn);
+    }
+    node.appendChild(line);
+  }
+  return node;
+}
+
+function stripItem(p, cls) {
+  const s = document.createElement("span");
+  s.className = "item " + cls;
+  const bits = ["#" + p.id, p.title];
+  if (p.actor) bits.push("— " + p.actor);
+  if (p.role) bits.push("(" + (ROLE_RU[p.role] || p.role) + ")");
+  const age = ago(p.age_seconds);
+  if (age) bits.push("· " + age);
+  s.textContent = bits.join(" ");
+  s.title = p.thread + (p.happening ? " · " + p.happening : "");
+  return s;
+}
+
+function drawStrip(board) {
+  const strip = el("strip");
+  strip.textContent = "";
+  const groups = [
+    ["Кто работает сейчас", board.now, "who", "никто: живых прогонов нет"],
+    ["Где затор", board.jams, "jam", "заторов нет"],
+  ];
+  for (const [label, items, cls, empty] of groups) {
+    const grp = document.createElement("div");
+    grp.className = "grp";
+    const lbl = document.createElement("span");
+    lbl.className = "lbl"; lbl.textContent = label;
+    grp.appendChild(lbl);
+    if (!items.length) {
+      const none = document.createElement("span");
+      none.className = "none"; none.textContent = empty;
+      grp.appendChild(none);
+    }
+    for (const p of items) grp.appendChild(stripItem(p, cls));
+    strip.appendChild(grp);
+  }
+  const grp = document.createElement("div");
+  grp.className = "grp";
+  const lbl = document.createElement("span");
+  lbl.className = "lbl"; lbl.textContent = "Ждёт решения человека";
+  const n = document.createElement("span");
+  n.className = board.waiting ? "ask" : "none";
+  n.textContent = board.waiting ? board.waiting + " — в колонках ниже, первой областью" : "ничего";
+  grp.appendChild(lbl); grp.appendChild(n);
+  strip.appendChild(grp);
+}
+
+function drawBoard(board, snapshot) {
+  drawStrip(board);
+  const columns = el("columns");
+  columns.textContent = "";
+  for (const panel of board.panels) {
+    const col = document.createElement("div");
+    col.className = "col";
+
+    const head = document.createElement("div");
+    head.className = "colhead";
+    const h2 = document.createElement("h2");
+    h2.textContent = panel.title;
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    const running = panel.areas.find(a => a.key === "running").count;
+    const waiting = panel.areas.find(a => a.key === "waiting_human").count;
+    const stuck = panel.areas.find(a => a.key === "stuck").count;
+    meta.textContent = "задач " + panel.task_count + " · в работе " + running +
+                       " · ждёт человека " + waiting + " · заторов " + stuck;
+    head.appendChild(h2); head.appendChild(meta);
+    col.appendChild(head);
+
+    const body = document.createElement("div");
+    body.className = "colbody";
+    for (const area of panel.areas) body.appendChild(areaNode(panel, area));
+    col.appendChild(body);
+    col.appendChild(channelsNode(panel));
+    columns.appendChild(col);
+  }
+
+  const totals = board.panels.reduce((acc, p) => {
+    for (const a of p.areas) acc[a.key] = (acc[a.key] || 0) + a.count;
+    return acc;
+  }, {});
+  el("boardsub").textContent = "в работе " + (totals.running || 0) +
+    " · ждёт решения человека " + (totals.waiting_human || 0) +
+    " · заторов " + (totals.stuck || 0) +
+    " · собрано " + new Date(DATA.built_at).toLocaleString("ru-RU");
+  el("boardmode").textContent = snapshot.mode === "demo" ? "обезличено" : "";
+}
+
+/* ---------- two screens ---------- */
+const MAP_PARTS = ["stage", "top", "legend", "panels", "bottom"];
+function showBoard(on) {
+  el("board").style.display = on ? "flex" : "none";
+  for (const id of MAP_PARTS) el(id).style.display = on ? "none" : "";
+  el("toboard").classList.toggle("on", on);
+  el("tomap").classList.toggle("on", !on);
+  sessionStorage.setItem("screen", on ? "board" : "map");
+  if (!on) { resize(); fit(); }        // the canvas had no size while hidden
+}
+el("toboard").addEventListener("click", () => showBoard(true));
+el("tomap").addEventListener("click", () => showBoard(false));
+el("tomapback").addEventListener("click", () => showBoard(true));
+
+drawBoard(BOARD, SNAP);
+setInterval(() => {
+  for (const node of document.querySelectorAll(".tag.age[data-since]")) {
+    const age = ago(ageOf({ since: node.dataset.since }));
+    if (age) node.textContent = "в этом состоянии " + age;
+  }
+}, 30000);
 window.addEventListener("resize", resize);
 resize();
 requestAnimationFrame(frame);
-setTimeout(() => setPlaying(true), 700);
+/* The board is the default screen. The timeline from the previous version stays
+   as a second mode, one button away, and starts playing only when opened. */
+showBoard(sessionStorage.getItem("screen") !== "map");
+setTimeout(() => { if (sessionStorage.getItem("screen") === "map") setPlaying(true); }, 700);
 
 /* Live mode: the same renderer, served with a fresh snapshot. A recording never
    takes this branch — `file://` cannot fetch, and its data is already inside. */
@@ -706,7 +1084,11 @@ if (DATA.live_url) {
   setInterval(async () => {
     try {
       const fresh = await (await fetch(DATA.live_url, { cache: "no-store" })).json();
-      if (fresh.timeline.length !== RECORDS.length) location.reload();
+      /* The digest covers the whole shown document, not the length of the
+         timeline. A status change, a run that died, a repository gone dirty —
+         none of them append a record, and all of them have to reach the screen
+         (finding MEDIUM-1 of review 780). */
+      if (fresh.digest !== DATA.digest) location.reload();
     } catch (err) { /* server gone: keep showing what we have */ }
   }, 10000);
 }

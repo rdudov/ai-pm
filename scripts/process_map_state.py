@@ -23,9 +23,10 @@ import re
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
-from process_map_schema import SCHEMA_VERSION, validate_snapshot
+from process_map_schema import SCHEMA_VERSION, STATIONS, validate_snapshot
 
 HOME = Path(__file__).resolve().parents[1]
 CONFIG = HOME / "threads.json"
@@ -33,9 +34,90 @@ PRODUCTS = HOME / "products"
 REPO = Path("/opt/projects/companion-agent")
 TASKS_INDEX = REPO / "skills" / "task-creator" / "scripts" / "tasks_index.py"
 PYTHON = REPO / ".venv" / "bin" / "python"
+MAIL_ROOT = REPO / ".state" / "gmail" / "product-owner"
 
 # Terminal statuses never carry a live figure on the map, however loud the label.
 TERMINAL = {"completed", "cancelled", "superseded"}
+
+# dev-pipeline event kinds, mapped to the station they say the work is at. The
+# contour declares no role state machine, so this is a reading of observed
+# events, not a lifecycle the map invents.
+EVENT_STATIONS = {
+    "attempt_started": "analysis",
+    "run_started": "analysis",
+    "process_started": "analysis",
+    "native_session_discovered": "analysis",
+    "increment_ready_for_review": "review",
+    "review_started": "review",
+    "review_completed": "review",
+    "checkpoint_completed": "report",
+    "run_completed": "report",
+    "attempt_completed": "report",
+    "run_failed": "report",
+    "attempt_failed": "report",
+}
+
+
+def tail_lines(path: Path, cursor: dict | None) -> tuple[list[str], dict]:
+    """Lines appended past a stored byte offset, plus the cursor to store next.
+
+    Reading a whole `events.jsonl` on every look makes the cost of watching grow
+    with the amount of work already done, which is the one thing the contour
+    forbids. The cursor carries the byte offset with the size and inode it was
+    taken at: a file that shrank was truncated and one whose inode changed was
+    rotated, and both start from zero rather than silently skipping the head.
+    """
+    try:
+        stat = path.stat()
+    except OSError:
+        return [], (cursor or {})
+    offset = 0
+    if cursor:
+        same_file = cursor.get("inode") == stat.st_ino
+        not_truncated = stat.st_size >= cursor.get("size", 0)
+        if same_file and not_truncated:
+            offset = min(cursor.get("offset", 0), stat.st_size)
+    try:
+        with path.open("rb") as handle:
+            handle.seek(offset)
+            chunk = handle.read()
+            end = handle.tell()
+    except OSError:
+        return [], (cursor or {})
+    text = chunk.decode("utf-8", "replace")
+    if text and not text.endswith("\n"):
+        # A record still being written is not news yet; leave it for next look.
+        keep, _, partial = text.rpartition("\n")
+        end -= len(partial.encode())
+        text = keep
+    lines = [line for line in text.splitlines() if line.strip()]
+    return lines, {"offset": end, "size": stat.st_size, "inode": stat.st_ino}
+
+
+def last_json_line(path: Path) -> dict:
+    """The last well-formed JSON object of a journal, read from its tail."""
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return {}
+    window = min(size, 65536)
+    try:
+        with path.open("rb") as handle:
+            handle.seek(size - window)
+            chunk = handle.read()
+    except OSError:
+        return {}
+    for line in reversed(chunk.decode("utf-8", "replace").splitlines()):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            return payload
+    return {}
 
 
 def load_config() -> dict:
@@ -138,6 +220,97 @@ def run_state(task_dir: Path) -> dict:
     }
 
 
+def observed_actor(task_dir: Path, run: dict) -> tuple[str | None, str | None]:
+    """Who is doing the work, and what said so. Nothing said — nobody named.
+
+    Existence of a file says a file exists, not who wrote it (finding MEDIUM-3
+    of review 780). Only these three sources name an executor, so a plate whose
+    task has none of them carries a dash instead of a plausible guess.
+    """
+    if run.get("runner"):
+        source = "поле runner в status.json" if read_json(task_dir / "status.json").get("runner") \
+            else "поле runner в .runner/runner.json"
+        return run["runner"], source
+    event = last_json_line(task_dir / "dev-pipeline" / "core" / "events.jsonl")
+    runtime = (event.get("payload") or {}).get("runtime")
+    if runtime:
+        return runtime, "поле runtime события dev-pipeline"
+    return None, None
+
+
+def observed_role(task_dir: Path) -> tuple[str | None, str | None]:
+    """The station the last observed dev-pipeline event puts the work at."""
+    event = last_json_line(task_dir / "dev-pipeline" / "core" / "events.jsonl")
+    station = EVENT_STATIONS.get(event.get("kind"))
+    if station in STATIONS:
+        return station, f"последнее событие dev-pipeline: {event.get('kind')}"
+    return None, None
+
+
+def state_age(task_dir: Path, run: dict) -> tuple[str | None, int | None]:
+    """When the current state was last observed to change, and how long ago.
+
+    A jam is not a status, it is time spent in one — so the plate needs an age.
+    It is taken from the mtime of the file that carries the state, never from a
+    timestamp the child wrote itself: children routinely put local time into a
+    UTC field, and the contour has been burned by that already.
+    """
+    carrier = task_dir / ("status.json" if run.get("state") else "task.md")
+    try:
+        mtime = carrier.stat().st_mtime
+    except OSError:
+        return None, None
+    stamp = datetime.fromtimestamp(mtime, timezone.utc).isoformat()
+    return stamp, max(int(time.time() - mtime), 0)
+
+
+def attempt_count(task_dir: Path) -> int:
+    """How many dev-pipeline runs left state on disk. One task, several tries."""
+    root = task_dir / "dev-pipeline"
+    if not root.is_dir():
+        return 0
+    return sum(1 for child in root.iterdir() if child.is_dir())
+
+
+def board_area(status: str | None, flags: list[str], has_questions: bool) -> str:
+    if status in TERMINAL:
+        return "done"
+    # A person deciding comes first, so the area is checked first: a blocked task
+    # in our contour is one a human has to restart.
+    if has_questions or status == "blocked":
+        return "waiting_human"
+    if "live" in flags:
+        return "running"
+    if {"stale_label", "killed", "gap"} & set(flags):
+        return "stuck"
+    return "queued"
+
+
+OPEN_QUESTIONS = re.compile(r"^##\s+Open Questions\s*$(.*?)(?=^##\s|\Z)",
+                            re.MULTILINE | re.DOTALL)
+
+
+def open_questions(task_dir: Path) -> list[str]:
+    """Bullets of `## Open Questions` that are not the literal `none`."""
+    path = task_dir / "task.md"
+    try:
+        text = path.read_text()
+    except OSError:
+        return []
+    match = OPEN_QUESTIONS.search(text)
+    if not match:
+        return []
+    items: list[str] = []
+    for line in match.group(1).splitlines():
+        if line.startswith("- "):
+            items.append(line[2:].strip())
+        elif items and line.startswith("  ") and line.strip():
+            # A question wrapped over several lines is one question. Taking only
+            # its first line cut real sentences in half on the plate.
+            items[-1] += " " + line.strip()
+    return [item for item in items if item.lower() not in {"none", "нет"}]
+
+
 def task_entry(task: dict) -> dict:
     task_dir = REPO / task["path"]
     run = run_state(task_dir)
@@ -162,6 +335,12 @@ def task_entry(task: dict) -> dict:
     if status not in TERMINAL and not run["alive"] and status:
         flags.append("idle")
 
+    questions = open_questions(task_dir)
+    actor, actor_src = observed_actor(task_dir, run)
+    role, role_src = observed_role(task_dir)
+    since, age = state_age(task_dir, run)
+    progress = run.get("progress") or {}
+
     return {
         "id": task.get("id"),
         "title": task.get("title"),
@@ -171,6 +350,20 @@ def task_entry(task: dict) -> dict:
         "run": run,
         "gates": verdicts,
         "flags": flags,
+        "questions": questions,
+        "board": {
+            "area": board_area(status, flags, bool(questions)),
+            "actor": actor,
+            "actor_src": actor_src,
+            "role": role,
+            "role_src": role_src,
+            # One line of what is going on, from the child's own progress line —
+            # the only place that says it in words. Absent is absent.
+            "happening": progress.get("activity"),
+            "since": since,
+            "age_seconds": age,
+            "attempt": attempt_count(task_dir),
+        },
     }
 
 
@@ -197,6 +390,39 @@ def repo_state(path: str) -> dict:
         "tracked_dirty": len(dirty),
         "unpushed": int(unpushed) if unpushed.isdigit() else None,
     }
+
+
+def count_lines(path: Path) -> int:
+    """Records in an append-only journal, counted without holding it in memory."""
+    total = 0
+    try:
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1 << 20), b""):
+                total += chunk.count(b"\n")
+    except OSError:
+        return 0
+    return total
+
+
+def thread_channels(tasks: list[dict], is_owner: bool) -> list[dict]:
+    """Communication of one direction, counted from what is observable.
+
+    Outgoing from the executors is Telegram — one notification receipt per
+    message actually sent. The product owner's mail is incoming and outgoing on
+    the contour as a whole, not on one direction, so it hangs on the direction
+    that owns the contour rather than being spread over four panels by a
+    connection nothing on disk supports.
+    """
+    telegram = sum(count_lines(REPO / "tasks" / task["dir"] / "dev-pipeline" /
+                               "notification-receipts.jsonl") for task in tasks)
+    channels = [{"channel": "telegram", "direction": "out", "count": telegram}]
+    if is_owner:
+        for direction, box in (("in", "inbox"), ("out", "sent")):
+            folder = MAIL_ROOT / box
+            count = sum(1 for entry in folder.iterdir()
+                        if (entry / "metadata.json").is_file()) if folder.is_dir() else 0
+            channels.append({"channel": "email", "direction": direction, "count": count})
+    return channels
 
 
 def markdown_section(text: str, heading: str) -> list[str]:
@@ -237,17 +463,31 @@ SCRUB = [
     (re.compile(r"/opt/projects/[A-Za-z0-9_./-]*"), "<repo>"),
     (re.compile(r"/(?:home|root|Users)/[A-Za-z0-9_./-]*"), "<home>"),
     (re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+"), "<email>"),
-    (re.compile(r"\b\d{7,}\b"), "<id>"),
+    # Not `\b\d{7,}\b`: a word boundary never fires between `_` and a digit, so
+    # the real leak `telegram_user_433978200` walked straight through it. Digit
+    # look-around catches an identifier however it is glued to its name.
+    (re.compile(r"(?<!\d)\d{7,}(?!\d)"), "<id>"),
 ]
 
 
-# Titles survive anonymisation on purpose: the user asked to recognise a specific
-# task among all the shown work by its real name, not by a demo caption. Content
-# privacy of those titles stays a human step before any showing.
-KEEP_AS_IS = {"title", "task_title"}
+# Numeric identifiers hide from the regexes by not being text at all: `scrub`
+# used to return every integer untouched, and 298 real PIDs went out in a file
+# stamped «ОБЕЗЛИЧЕНО» (finding HIGH-1 of review 780). These keys carry an
+# identifier rather than a measurement, so their value is dropped outright —
+# a count of tasks or a line number stays, a PID does not.
+DROP_NUMERIC_KEYS = {"pid", "inode", "chat_id", "message_id", "user_id"}
 
 
 def scrub(value):
+    """Structural anonymisation of a document, applied to every string in it.
+
+    Task titles are *kept as meaning* and *cleaned as text*: the user asked to
+    recognise a specific task by its real name, and that is compatible with
+    running the name through the same expressions as everything else. Excluding
+    titles from the cleaning altogether — which is what this used to do — let a
+    real chat identifier through inside a real title. Content privacy of titles
+    stays a human step before showing, and is declared as a limit.
+    """
     if isinstance(value, str):
         for pattern, replacement in SCRUB:
             value = pattern.sub(replacement, value)
@@ -255,7 +495,7 @@ def scrub(value):
     if isinstance(value, list):
         return [scrub(item) for item in value]
     if isinstance(value, dict):
-        return {key: item if key in KEEP_AS_IS else scrub(item)
+        return {key: None if key in DROP_NUMERIC_KEYS and isinstance(item, int) else scrub(item)
                 for key, item in value.items()}
     return value
 
@@ -272,6 +512,10 @@ def build(anonymize: bool) -> dict:
             "task_count": len(tasks),
             "tasks": tasks,
             "repos": [repo_state(path) for path in thread.get("repos", [])],
+            # The product owner's mailbox belongs to the contour, so it is shown
+            # on the direction that owns the contour rather than invented for all
+            # four.
+            "channels": thread_channels(tasks, is_owner=str(REPO) in thread.get("repos", [])),
         })
     snapshot = {
         "schema_version": SCHEMA_VERSION,

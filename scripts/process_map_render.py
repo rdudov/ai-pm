@@ -6,31 +6,33 @@ snapshot document and a timeline, both already checked against
 `process_map_schema`, and nothing else — so whatever is private cannot leak
 through a picture that never saw it.
 
-Two deliveries out of the same template:
+The snapshot is a required argument and this module imports no collector, so the
+boundary is physical rather than a convention about how to call it: there is no
+code path from here to a repository or a task directory. Collecting a fresh
+snapshot and serving it live is the job of `process_map_serve.py`, which sits on
+the other side of that boundary.
 
-    --out map.html            a recording: data embedded, opens by double click
-                              with the network off, is the file you hand over
-    --serve 8765              live mode: the same renderer, refetching a fresh
-                              snapshot instead of carrying a frozen one
+    --snapshot state.json --out map.html
 
-`file://` cannot fetch, which is why the recording embeds its data rather than
-loading it — a build requirement, not a detail.
+produces a recording: data embedded, opens by double click with the network off,
+and is the file you hand over. `file://` cannot fetch, which is why the recording
+embeds its data rather than loading it — a build requirement, not a detail.
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from datetime import datetime, timezone
-from functools import partial
-from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-import process_map_state as state
-from process_map_schema import validate_record, validate_snapshot
+from process_map_schema import (BOARD_AREA_RU, BOARD_AREAS, validate_record,
+                                validate_snapshot)
 
+HOME = Path(__file__).resolve().parents[1]
 TEMPLATE = Path(__file__).resolve().parent / "process_map_template.html"
-DEFAULT_TIMELINE = state.HOME / "state" / "timeline.jsonl"
+DEFAULT_TIMELINE = HOME / "state" / "timeline.jsonl"
 
 # How many task objects one area may carry before the picture stops being
 # readable. Everything dropped is counted out loud in the area caption: a silent
@@ -54,11 +56,24 @@ def load_timeline(path: Path) -> list[dict]:
             record = json.loads(line)
         except json.JSONDecodeError:
             continue
-        records.append(validate_record(record))
+        records.append(validate_record(without_unsourced_actor(record)))
     # Sorting by the string would misplace anything written with a local offset
     # — git stamps commits as `+03:00`, the rest of the contour as `+00:00`.
     records.sort(key=instant)
     return records
+
+
+def without_unsourced_actor(record: dict) -> dict:
+    """Drop a participant nothing named, keeping the record itself.
+
+    Records written before the scribe stopped inventing an actor say things like
+    `actor: исполнитель` with no source behind them. Refusing such a record would
+    throw away a real observation because of one wrong caption, so the caption
+    goes and the observation stays.
+    """
+    if record.get("actor") and not str(record.get("actor_src") or "").strip():
+        record = {key: value for key, value in record.items() if key != "actor"}
+    return record
 
 
 def instant(record: dict) -> datetime:
@@ -168,20 +183,153 @@ def build_world(snapshot: dict, timeline: list[dict]) -> dict:
             "done": done[:14], "subtitle": subtitle}
 
 
-def payload(anonymize: bool, timeline_path: Path, snapshot_path: Path | None,
-            live_url: str | None = None) -> dict:
-    if snapshot_path:
-        snapshot = validate_snapshot(json.loads(snapshot_path.read_text()))
-    else:
-        snapshot = state.build(anonymize)
-    timeline = load_timeline(timeline_path)
+# How many plates one area of one panel shows before the column stops being
+# readable. What the cap dropped is counted out loud in the area caption.
+PER_BOARD_AREA = 25
+
+
+def plate(task: dict) -> dict:
+    """One task as the user described it: number, name, status, who, what, how long."""
+    board = task["board"]
+    run = task["run"]
     return {
+        "id": task["id"],
+        "task": task["dir"],
+        "title": task["title"] or task["dir"],
+        "status": task["status"],
+        "status_detail": task.get("status_detail"),
+        "actor": board["actor"],
+        "actor_src": board["actor_src"],
+        "role": board["role"],
+        "role_src": board["role_src"],
+        "happening": board["happening"],
+        "age_seconds": board["age_seconds"],
+        # The instant, so the page can keep the age honest between refreshes
+        # instead of freezing it at the moment the snapshot was collected.
+        "since": board["since"],
+        # A live process and a label saying «running» are two different facts,
+        # and the contour has already been burned by reading one as the other.
+        # They stay two fields, so a dead run under a living label reads as the
+        # jam it is instead of as work in progress.
+        "alive": run["alive"],
+        "stale_label": "stale_label" in task["flags"],
+        "attempt": board["attempt"],
+        "questions": task.get("questions") or [],
+        "flags": task["flags"],
+    }
+
+
+def board_age(tasks: list[dict]) -> int | None:
+    """How long the oldest plate of an area has stood there."""
+    ages = [t["age_seconds"] for t in tasks if t["age_seconds"] is not None]
+    return max(ages) if ages else None
+
+
+def build_board(snapshot: dict) -> dict:
+    """Four direction panels, each split into areas by urgency.
+
+    The order of the areas is the schema's, not this function's: «ждёт решения
+    человека» has to be first and visible even when empty, because that is the
+    whole answer to one of the three acceptance questions.
+    """
+    panels = []
+    for thread in snapshot["threads"]:
+        plates = [plate(task) for task in thread["tasks"]]
+        areas = []
+        for key in BOARD_AREAS:
+            mine = [p for p, task in zip(plates, thread["tasks"])
+                    if task["board"]["area"] == key]
+            # Oldest first inside an area: time in a state is the jam. Sorted on
+            # the instant rather than on the age derived from it — the age is a
+            # rounded number of seconds, so two plates a fraction apart would
+            # swap places between two collections and look like a change.
+            mine.sort(key=lambda p: (p["since"] or "9999", -(p["id"] or 0)))
+            shown = mine[:PER_BOARD_AREA]
+            areas.append({
+                "key": key,
+                "title": BOARD_AREA_RU[key],
+                "count": len(mine),
+                "hidden": len(mine) - len(shown),
+                "oldest": board_age(mine),
+                "collapsed": key in ("queued", "done"),
+                "plates": shown,
+            })
+        panels.append({
+            "key": thread["key"],
+            "title": thread["title"],
+            "task_count": thread["task_count"],
+            "areas": areas,
+            "channels": thread["channels"],
+            # Commits and pushes stay at the level of the product: nothing on
+            # disk ties a commit to a task number, and the map does not invent
+            # a tie it cannot observe.
+            "repos": [r for r in thread["repos"] if r.get("present")],
+        })
+    # A strip above the columns, so the two questions a person opens the board
+    # for — who is working, where the jam is — are answered without scrolling
+    # and by name, not by a count. The columns below carry the detail.
+    now = []
+    jams = []
+    for panel in panels:
+        for area in panel["areas"]:
+            if area["key"] == "running":
+                now += [{**p, "thread": panel["title"]} for p in area["plates"]]
+            if area["key"] == "stuck":
+                jams += [{**p, "thread": panel["title"]} for p in area["plates"]]
+    return {
+        "panels": panels,
+        "areas": [{"key": k, "title": BOARD_AREA_RU[k]} for k in BOARD_AREAS],
+        "now": now[:6],
+        "jams": sorted(jams, key=lambda p: -(p["age_seconds"] or 0))[:6],
+        "waiting": sum(a["count"] for p in panels for a in p["areas"]
+                       if a["key"] == "waiting_human"),
+    }
+
+
+def payload(timeline_path: Path, snapshot_path: Path, live_url: str | None = None) -> dict:
+    """The whole document the page gets, built from a snapshot and a timeline.
+
+    The renderer takes a validated JSON document and nothing else. It does not
+    import the collector and cannot reach a repository, a task directory or the
+    disk beyond these two files, so «the picture cannot show what it never saw»
+    is a property of the input rather than of how someone chose to call it
+    (finding HIGH-2 of review 780).
+    """
+    snapshot = validate_snapshot(json.loads(snapshot_path.read_text()))
+    timeline = load_timeline(timeline_path)
+    data = {
         "snapshot": snapshot,
         "timeline": timeline,
+        "board": build_board(snapshot),
         "world": build_world(snapshot, timeline),
         "built_at": datetime.now(timezone.utc).isoformat(),
         "live_url": live_url,
     }
+    # A digest of everything shown, so live mode notices a status or a liveness
+    # change that appends nothing to the timeline (finding MEDIUM-1).
+    data["digest"] = digest_of(data)
+    return data
+
+
+# Derived from the wall clock rather than from the contour: an age ticks every
+# second whether or not anything happened. Leaving them in the digest would make
+# live mode reload every ten seconds forever and say nothing — the instant they
+# are derived from (`since`) is in the digest, so no real change is lost.
+TICKING = {"age_seconds", "oldest", "minutes_ago"}
+
+
+def without_ticking(value):
+    if isinstance(value, dict):
+        return {key: without_ticking(item) for key, item in value.items() if key not in TICKING}
+    if isinstance(value, list):
+        return [without_ticking(item) for item in value]
+    return value
+
+
+def digest_of(data: dict) -> str:
+    """A fingerprint of the state shown, insensitive to time simply passing."""
+    shown = without_ticking({key: data[key] for key in ("snapshot", "timeline", "board", "world")})
+    return hashlib.sha256(json.dumps(shown, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
 
 
 def render(data: dict) -> str:
@@ -191,66 +339,24 @@ def render(data: dict) -> str:
     return template.replace("__DATA__", blob)
 
 
-class LiveHandler(BaseHTTPRequestHandler):
-    def __init__(self, *args, anonymize: bool, timeline: Path, **kwargs):
-        self.anonymize, self.timeline = anonymize, timeline
-        super().__init__(*args, **kwargs)
-
-    def _send(self, body: bytes, kind: str) -> None:
-        self.send_response(200)
-        self.send_header("Content-Type", kind)
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(body)
-
-    def do_GET(self) -> None:  # noqa: N802 - http.server API
-        if self.path.startswith("/data.json"):
-            data = payload(self.anonymize, self.timeline, None, live_url="/data.json")
-            self._send(json.dumps(data, ensure_ascii=False).encode(), "application/json; charset=utf-8")
-            return
-        if self.path in ("/", "/index.html"):
-            data = payload(self.anonymize, self.timeline, None, live_url="/data.json")
-            self._send(render(data).encode(), "text/html; charset=utf-8")
-            return
-        self.send_error(404)
-
-    def log_message(self, *args) -> None:  # keep the console for our own output
-        pass
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--out", type=Path, help="write the self-contained recording here")
+    parser.add_argument("--snapshot", type=Path, required=True,
+                        help="the collected snapshot; the renderer has no other way in")
+    parser.add_argument("--out", type=Path, required=True,
+                        help="write the self-contained recording here")
     parser.add_argument("--timeline", type=Path, default=DEFAULT_TIMELINE)
-    parser.add_argument("--snapshot", type=Path, help="use this snapshot instead of collecting one")
-    parser.add_argument("--anonymize", action="store_true",
-                        help="strip absolute paths, mail addresses and numeric identifiers")
-    parser.add_argument("--serve", type=int, metavar="PORT",
-                        help="live mode: same renderer, fresh snapshot on every load")
     args = parser.parse_args()
 
-    if args.serve:
-        handler = partial(LiveHandler, anonymize=args.anonymize, timeline=args.timeline)
-        server = HTTPServer(("127.0.0.1", args.serve), handler)
-        print(f"живой режим: http://127.0.0.1:{args.serve}/ (Ctrl+C — стоп)", flush=True)
-        try:
-            server.serve_forever()
-        except KeyboardInterrupt:
-            pass
-        return 0
-
-    if not args.out:
-        parser.error("нужен --out или --serve")
-    data = payload(args.anonymize, args.timeline, args.snapshot)
+    data = payload(args.timeline, args.snapshot)
     html = render(data)
     args.out.write_text(html)
-    world = data["world"]
-    shown = sum(len(a["tasks"]) for a in world["areas"])
-    hidden = sum(a["note"].count("скрыто") for a in world["areas"])
+    board = data["board"]
+    plates = sum(len(a["plates"]) for p in board["panels"] for a in p["areas"])
+    hidden = sum(a["hidden"] for p in board["panels"] for a in p["areas"])
     print(f"{args.out} — {len(html)} байт, режим {data['snapshot']['mode']}, "
-          f"лента {len(data['timeline'])} записей, объектов {shown}, "
-          f"областей со скрытыми задачами {hidden}")
+          f"лента {len(data['timeline'])} записей, панелей {len(board['panels'])}, "
+          f"плашек {plates}, скрыто {hidden}")
     return 0
 
 
