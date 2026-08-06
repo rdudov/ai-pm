@@ -1,9 +1,35 @@
 #!/usr/bin/env python3
-"""Observable state of one product thread.
+"""Observable state of one product thread, projected from the one observer.
 
-Collects only what can be observed: live child runs, task statuses, and recent
-commits in the repositories the thread owns. It never reads child transcripts,
-so a tick costs the same regardless of how much work happened.
+This file used to *be* an observer. It had its own `pid_alive` built on
+`os.kill`, its own reader of `status.json` and `progress.json`, its own
+`repo_state` and its own idea of what «требует внимания» means — all of it a
+second implementation of what `process_map_state.py` already does for the
+board. Two observers of one disk is exactly why there was no trustworthy source
+of the flow of work: the wake-up and the board counted liveness, freshness and
+status each in their own way and could disagree, and neither could be checked
+against the other because neither was the original.
+
+So there is one observer now. `process_map_state.build(anonymize=False,
+only=<thread>)` collects the direction, and everything below is projection —
+renaming and grouping, no second judgement. In particular:
+
+* liveness is `task_runner.process_is_live`, which compares the recorded PID
+  *and* the kernel start tick. The `os.kill(pid, 0)` this file used answers
+  «some process holds this number», and PIDs are reused: after a wrap an
+  unrelated process counted as a live run of the task, so the tick could stay
+  silent about a run that had ended and shout about one that had not started;
+* freshness is still the mtime of an observed file and never a timestamp a child
+  wrote itself;
+* «требует внимания» now includes work that carried on outside a dead owner —
+  the case that cost three and a half hours on 757 and was invisible to both
+  observers before.
+
+The output shape is the one `thread_tick.py` has always consumed, field for
+field, because the tick is a caller of this module and not its subject.
+
+It never reads child transcripts, so a tick costs the same regardless of how
+much work happened.
 
 Exit code 0 always; the caller decides what to do with the report.
 """
@@ -11,25 +37,27 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
-import subprocess
 import sys
-import time
 from pathlib import Path
 
-HOME = Path(__file__).resolve().parents[1]
-CONFIG = HOME / "threads.json"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import process_map_state as observer  # noqa: E402
+
+HOME = observer.HOME
+CONFIG = observer.CONFIG
 # Tasks and their runtime state stay in the development environment; the product
 # owner only reads them.
-REPO = Path("/opt/projects/companion-agent")
-TASKS_INDEX = REPO / "skills" / "task-creator" / "scripts" / "tasks_index.py"
-PYTHON = REPO / ".venv" / "bin" / "python"
+REPO = observer.REPO
 # States a run record may hold once nobody is expected to come back to it.
 # Anything else, with the process gone, means work was left outstanding.
 TERMINAL_RUN_STATES = {"completed", "complete", "superseded"}
 # Statuses in which the task itself is closed on purpose. A leftover run record
 # under one of these is history, not an abandoned run.
 CLOSED_TASK_STATUSES = {"completed", "cancelled"}
+# How many entries the attention list carries. Unchanged from when this file
+# observed for itself; what the cap drops is counted out loud by the caller.
+ATTENTION = 12
 
 
 def load_thread(name: str) -> dict:
@@ -40,137 +68,99 @@ def load_thread(name: str) -> dict:
         raise SystemExit(f"unknown thread: {name}; known: {sorted(config['threads'])}")
 
 
-def pid_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except (ProcessLookupError, ValueError):
-        return False
-    except PermissionError:
-        return True
-    return True
+def run_projection(task: dict) -> dict | None:
+    """One task's run, in the words this module's callers already use.
 
-
-def query_tasks(args: list[str]) -> list[dict]:
-    out = subprocess.run(
-        [str(PYTHON), str(TASKS_INDEX), "query", *args, "--format", "json", "--limit", "40"],
-        capture_output=True, text=True, cwd=REPO,
-    )
-    if out.returncode != 0:
-        return []
-    try:
-        payload = json.loads(out.stdout)
-    except json.JSONDecodeError:
-        return []
-    return payload if isinstance(payload, list) else payload.get("tasks", [])
-
-
-def thread_tasks(thread: dict) -> list[dict]:
-    seen: dict[str, dict] = {}
-    for project in thread.get("projects", []):
-        for task in query_tasks(["--project", project, "--status", "all"]):
-            seen[task["path"]] = task
-    for term in thread.get("task_search", []):
-        for task in query_tasks(["--search", term, "--status", "all"]):
-            seen[task["path"]] = task
-    return sorted(seen.values(), key=lambda t: t.get("id", 0), reverse=True)
-
-
-def run_state(task_dir: Path) -> dict | None:
-    """Live run of a task, from observed process state rather than child claims."""
-    status_path = task_dir / "status.json"
-    runner_path = task_dir / ".runner" / "runner.json"
-    if not status_path.is_file():
+    Every value here is carried across from the observer's `run` block. The two
+    derived lines are the two the tick acts on, and both are stated in terms of
+    what the observer saw rather than recomputed from a PID.
+    """
+    run = task["run"]
+    if run["state"] is None and run["pid"] is None and run["progress"] is None:
+        # No `status.json` at all: the task was never started, which is not the
+        # same as a run in an unknown state.
         return None
-    try:
-        status = json.loads(status_path.read_text())
-    except (json.JSONDecodeError, OSError):
-        return None
-    pid = None
-    if runner_path.is_file():
-        try:
-            pid = json.loads(runner_path.read_text()).get("pid")
-        except (json.JSONDecodeError, OSError):
-            pid = None
-    alive = pid_alive(int(pid)) if isinstance(pid, int) else False
-    # Freshness comes from observed file mtime, never from the child's own
-    # timestamp: children routinely write local time into a UTC field, and a
-    # long-running owner leaves `status.json` on an old label while progress moves.
-    progress_path = task_dir / "progress.json"
-    progress = {}
-    if progress_path.is_file():
-        try:
-            payload = json.loads(progress_path.read_text())
-        except (json.JSONDecodeError, OSError):
-            payload = {}
-        progress = {
-            "activity": payload.get("activity"),
-            "done": payload.get("completed"),
-            "total": payload.get("total"),
-            "written_minutes_ago": round((time.time() - progress_path.stat().st_mtime) / 60),
-        }
+    progress = run["progress"] or {}
     return {
-        "progress": progress or None,
-        "state": status.get("state"),
-        "current_step": status.get("current_step"),
-        "updated_at": status.get("updated_at"),
-        "runner": status.get("runner"),
-        "workflow": status.get("workflow"),
-        "pid": pid,
-        "process_alive": alive,
+        "progress": {
+            "activity": progress.get("activity"),
+            "done": progress.get("done"),
+            "total": progress.get("total"),
+            "written_minutes_ago": progress.get("minutes_ago"),
+        } if progress else None,
+        "state": run["state"],
+        "current_step": run["current_step"],
+        "runner": run["runner"],
+        "workflow": run["workflow"],
+        "pid": run["pid"],
+        "process_alive": run["alive"],
         # A run that claims to be running while its process is gone is the case
         # the supervisor must surface, not hide.
-        "stale_running": status.get("state") == "running" and not alive,
+        "stale_running": "stale_label" in task["flags"],
         # The same hole one step wider: the owner died leaving a non-terminal
         # run record behind. Its frontmatter may still read "planned", which
         # looks exactly like work that was never started — so nothing wakes up
         # and the task sits still. Judge by the run's own record, not the label.
-        "abandoned_run": bool(status) and not alive
-        and status.get("state") not in TERMINAL_RUN_STATES,
+        "abandoned_run": bool(run["state"]) and not run["alive"]
+        and run["state"] not in TERMINAL_RUN_STATES,
+        # Work that carried on after its owner died. The owner refused its
+        # closing step in writing and the task directory kept moving afterwards,
+        # so the artifacts are worth a look right now. This is the observation
+        # neither observer had, and 757 sat finished for three and a half hours
+        # behind its absence.
+        "work_outside_owner": "work_outside_owner" in task["flags"],
+        "moved_at": task["detail"]["moved"],
+        "moved_src": task["detail"]["moved_src"],
     }
 
 
-def repo_state(path: str) -> dict:
-    repo = Path(path)
-    if not (repo / ".git").exists():
-        return {"repo": path, "present": False}
-
-    def git(*args: str) -> str:
-        out = subprocess.run(["git", "-C", path, *args], capture_output=True, text=True)
-        return out.stdout.strip() if out.returncode == 0 else ""
-
-    dirty = [line for line in git("status", "--porcelain").splitlines() if not line.startswith("??")]
+def repo_projection(repo: dict) -> dict:
+    """A repository, keyed by path the way this module's callers expect."""
+    if not repo.get("present"):
+        return {"repo": repo.get("path") or repo["name"], "present": False}
     return {
-        "repo": path,
+        "repo": repo["path"],
         "present": True,
-        "branch": git("rev-parse", "--abbrev-ref", "HEAD"),
-        "head": git("log", "-1", "--format=%h %s"),
-        "head_at": git("log", "-1", "--format=%cI"),
-        "tracked_dirty": len(dirty),
+        "branch": repo["branch"],
+        "head": f"{repo['head']} {repo['head_subject']}".strip(),
+        "head_at": repo["head_at"],
+        "tracked_dirty": repo["tracked_dirty"],
     }
 
 
 def build(name: str) -> dict:
-    thread = load_thread(name)
-    tasks = thread_tasks(thread)
+    load_thread(name)                       # fail loudly on an unknown thread
+    snapshot = observer.build(False, only=name)
+    thread = snapshot["threads"][0]
+
     live, attention = [], []
-    for task in tasks:
-        task_dir = REPO / task["path"]
-        state = run_state(task_dir)
-        entry = {"id": task.get("id"), "title": task.get("title"), "status": task.get("status"),
-                 "path": task["path"], "run": state}
+    for task in thread["tasks"]:
+        state = run_projection(task)
+        entry = {"id": task["id"], "title": task["title"], "status": task["status"],
+                 "path": f"tasks/{task['dir']}", "run": state}
         if state and (state["process_alive"] or state["stale_running"]):
             live.append(entry)
-        abandoned = bool(state) and state["abandoned_run"] and task.get("status") not in CLOSED_TASK_STATUSES
-        if task.get("status") in {"blocked", "in_progress"} or abandoned or (state and state["stale_running"]):
+        abandoned = bool(state) and state["abandoned_run"] and task["status"] not in CLOSED_TASK_STATUSES
+        outside = bool(state) and state["work_outside_owner"]
+        if (task["status"] in {"blocked", "in_progress"} or abandoned or outside
+                or (state and state["stale_running"])):
             attention.append(entry)
     return {
         "thread": name,
-        "title": thread.get("title", name),
-        "products": thread.get("products", []),
+        "title": thread["title"],
+        "products": thread["products"],
         "live_runs": live,
-        "needs_attention": attention[:12],
-        "repos": [repo_state(path) for path in thread.get("repos", [])],
-        "task_count": len(tasks),
+        "needs_attention": attention[:ATTENTION],
+        "repos": [repo_projection(repo) for repo in thread["repos"]],
+        "task_count": thread["task_count"],
+        # Work with nothing holding it, so a wake-up can answer «что подхватить»
+        # from the same observation the board answers it from, rather than by
+        # reading the whole list again.
+        "can_pick_up": [{"id": task["id"], "title": task["title"]}
+                        for task in thread["tasks"] if task["board"]["area"] == "pickup"],
+        # Other instances of the product owner deciding right now. A tick that
+        # cannot see one creates the task the other one just created.
+        "owners_awake": snapshot["owners_awake"],
     }
 
 
@@ -195,7 +185,13 @@ def main() -> None:
         print(line)
     print(f"требуют внимания: {len(report['needs_attention'])}")
     for item in report["needs_attention"]:
-        print(f"  {item['id']} {item['status']} — {item['title'][:70]}")
+        mark = " РАБОТА ШЛА ВНЕ УМЕРШЕГО ВЛАДЕЛЬЦА" if (item["run"] or {}).get("work_outside_owner") else ""
+        print(f"  {item['id']} {item['status']}{mark} — {item['title'][:70]}")
+    print(f"можно подхватить: {len(report['can_pick_up'])}")
+    for item in report["can_pick_up"][:8]:
+        print(f"  {item['id']} — {item['title'][:70]}")
+    for owner in report["owners_awake"]:
+        print(f"  разбужен ещё один продакт на треде «{owner['thread']}» ({owner['src']})")
     for repo in report["repos"]:
         if not repo["present"]:
             print(f"  репозиторий отсутствует: {repo['repo']}")

@@ -202,6 +202,9 @@ PER_BOARD_AREA = 25
 # and has to leave the board itself on the screen.
 NOW_IN_STRIP = 3
 JAMS_IN_STRIP = 4
+# «Что подхватить» is a shortlist to choose from, not a catalogue: the whole
+# area stands in the columns below and the strip says how many it left there.
+PICKUP_IN_STRIP = 3
 
 # Characters of name plus reason one strip group may take. The count is the whole
 # mechanism that keeps the strip short: the page shows every reason it prints in
@@ -272,6 +275,29 @@ def plate(task: dict) -> dict:
         "attempt": board["attempt"],
         "questions": task.get("questions") or [],
         "flags": task["flags"],
+        # What is holding a queued task. «В очереди» on its own is a label; the
+        # user asked for «за чем именно стоит», and the answer is observed.
+        "blocked_by": board["blocked_by"],
+        "blocked_by_src": board["blocked_by_src"],
+        # Everything the card shows when the plate is opened. It travels with
+        # the plate rather than being fetched, because the page has no way to
+        # reach a disk and must not grow one.
+        "detail": {
+            **task["detail"],
+            "gates": task.get("gates") or [],
+            "dir": task["dir"],
+            "runner": run.get("runner"),
+            "workflow": run.get("workflow"),
+            "sandbox": run.get("sandbox"),
+            "state": run.get("state"),
+            "current_step": run.get("current_step"),
+            "refusal": run.get("refusal"),
+            "refusal_summary": run.get("refusal_summary"),
+            "repo": run.get("repo"),
+            "progress": run.get("progress"),
+            "stop_reason": run.get("stop_reason"),
+            "exit_code": run.get("exit_code"),
+        },
     }
 
 
@@ -301,6 +327,25 @@ def product_questions(snapshot: dict, thread: dict) -> list[dict]:
             for question in product["questions"]]
 
 
+def product_promises(snapshot: dict, thread: dict) -> list[dict]:
+    """Promises of this direction's products that name no task.
+
+    The fourth question of the board, and the one with a price already paid: a
+    request to review the companion code stood in `## В работе` of the product
+    record for two days and never became a task, because the flow had nowhere
+    to put «надо запланировать».
+
+    The rule is printed next to the list on purpose. What is observed is narrow
+    — the line references no task number — and that is not the same claim as
+    «эта работа не начата». A reader who can see the rule can judge the list;
+    a reader shown a bare heading would take it for a verdict.
+    """
+    mine = set(thread.get("products") or [])
+    return [{"text": promise, "product": product["slug"]}
+            for product in snapshot["products"] if product["slug"] in mine
+            for promise in product.get("promises") or []]
+
+
 def build_board(snapshot: dict) -> dict:
     """Four direction panels, each split into areas by urgency.
 
@@ -312,6 +357,7 @@ def build_board(snapshot: dict) -> dict:
     for thread in snapshot["threads"]:
         plates = [plate(task) for task in thread["tasks"]]
         questions = product_questions(snapshot, thread)
+        promises = product_promises(snapshot, thread)
         areas = []
         for key in BOARD_AREAS:
             mine = [p for p, task in zip(plates, thread["tasks"])
@@ -323,18 +369,27 @@ def build_board(snapshot: dict) -> dict:
             mine.sort(key=lambda p: (p["since"] or "9999", -(p["id"] or 0)))
             shown = mine[:PER_BOARD_AREA]
             asked = questions if key == "waiting_human" else []
+            # «Надо запланировать» carries no tasks by construction: a promise
+            # with a task behind it is a task and stands in one of the areas
+            # above. The area is the only one whose whole content is text from a
+            # product record, so the rule that selected it is shown with it.
+            owed = promises if key == "plan" else []
             areas.append({
                 "key": key,
                 "title": BOARD_AREA_RU[key],
                 # One count for one concept: a question of a product and a task
                 # whose question is still open are the same statement about the
                 # same person, so they are counted together or the number lies.
-                "count": len(mine) + len(asked),
+                "count": len(mine) + len(asked) + len(owed),
                 "hidden": len(mine) - len(shown),
                 "oldest": board_age(mine),
+                # «Можно подхватить» is the first question of every wake-up, so
+                # it opens with the board rather than folded. `done` and the
+                # queue behind a named holder are reference, not the question.
                 "collapsed": key in ("queued", "done"),
                 "plates": shown,
                 "questions": asked,
+                "promises": owed,
             })
         panels.append({
             "key": thread["key"],
@@ -352,16 +407,23 @@ def build_board(snapshot: dict) -> dict:
     # and by name, not by a count. The columns below carry the detail.
     now = []
     jams = []
+    pickup = []
     for panel in panels:
         for area in panel["areas"]:
             if area["key"] == "running":
                 now += [{**p, "thread": panel["title"]} for p in area["plates"]]
             if area["key"] == "stuck":
                 jams += [{**p, "thread": panel["title"]} for p in area["plates"]]
+            if area["key"] == "pickup":
+                pickup += [{**p, "thread": panel["title"]} for p in area["plates"]]
     waiting_areas = [a for p in panels for a in p["areas"] if a["key"] == "waiting_human"]
     now_shown, now_hidden = strip_group(now, NOW_IN_STRIP)
     jams_shown, jams_hidden = strip_group(
         sorted(jams, key=lambda p: -(p["age_seconds"] or 0)), JAMS_IN_STRIP)
+    # Oldest first: a task that has been startable the longest is the one most
+    # likely to have been forgotten, which is the whole reason the area exists.
+    pickup_shown, pickup_hidden = strip_group(
+        sorted(pickup, key=lambda p: -(p["age_seconds"] or 0)), PICKUP_IN_STRIP)
     return {
         "panels": panels,
         "areas": [{"key": k, "title": BOARD_AREA_RU[k]} for k in BOARD_AREAS],
@@ -373,6 +435,13 @@ def build_board(snapshot: dict) -> dict:
         "now_hidden": now_hidden,
         "jams": jams_shown,
         "jams_hidden": jams_hidden,
+        "pickup": pickup_shown,
+        "pickup_hidden": pickup_hidden,
+        # Other instances of the product owner deciding right now. Two pairs of
+        # duplicate tasks were created in one hour because the owner in the chat
+        # and the owner woken by the timer could not see each other's queue, so
+        # this stands on the strip beside «кто работает сейчас».
+        "owners_awake": snapshot.get("owners_awake") or [],
         # The headline number, and the two things it is made of. A single number
         # nobody can take apart is what let thirteen wrong entries stand as an
         # answer: split by source, a reader can check it against the columns.
@@ -417,7 +486,7 @@ def payload(timeline_path: Path, snapshot_path: Path, live_url: str | None = Non
 # second whether or not anything happened. Leaving them in the digest would make
 # live mode reload every ten seconds forever and say nothing — the instant they
 # are derived from (`since`) is in the digest, so no real change is lost.
-TICKING = {"age_seconds", "oldest", "minutes_ago"}
+TICKING = {"age_seconds", "oldest", "minutes_ago", "moved_age_seconds"}
 
 
 def without_ticking(value):

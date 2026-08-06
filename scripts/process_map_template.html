@@ -10,6 +10,9 @@
     --bg0: #070b14; --bg1: #0e1524; --panel: rgba(14,21,36,.86);
     --live: #4ade80; --blocked: #f87171; --killed: #a78bfa;
     --stale: #fbbf24; --gap: #fb923c; --done: #38bdf8; --idle: #64748b;
+    /* «Можно подхватить» and «надо запланировать» are invitations, not alarms,
+       so they get their own two hues instead of borrowing a warning colour. */
+    --pick: #22d3ee; --plan: #c084fc;
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; overflow: hidden; }
@@ -84,6 +87,7 @@
   #strip .who { color: var(--live); }
   #strip .jam { color: var(--blocked); }
   #strip .ask { color: var(--stale); }
+  #strip .pick { color: var(--pick); }
   #strip .none { color: var(--idle); }
   /* Every item shows its whole text. Cutting the line into an ellipsis was how
      the strip named four jams and let a person read the reason of one (finding
@@ -137,8 +141,19 @@
   .area.a-waiting_human > h3 { color: var(--stale); }
   .area.a-running > h3 { color: var(--live); }
   .area.a-stuck > h3 { color: var(--blocked); }
+  /* «Можно подхватить» is the first question of a wake-up, so it reads as an
+     invitation rather than as another warning. */
+  .area.a-pickup > h3 { color: var(--pick); }
+  .area.a-plan > h3 { color: var(--plan); }
   .area.shut .plates { display: none; }
   .area .empty { color: var(--idle); font-size: 12px; padding: 2px 0 4px; }
+  /* The rule that selected the contents of an area, printed with the area. It
+     matters for «надо запланировать», whose whole content is text picked by a
+     narrow test — a reader who cannot see the test would read the heading as a
+     verdict about the work rather than as a statement about the line. */
+  .area .rule { color: var(--idle); font-size: 11px; line-height: 1.35;
+                margin: -2px 0 6px; flex: none; }
+  .area.shut .rule { display: none; }
 
   .plate { border: 1px solid var(--edge); border-left: 3px solid var(--idle); border-radius: 9px;
            background: #101828; padding: 8px 10px; margin-bottom: 7px; }
@@ -146,6 +161,12 @@
   .plate.p-running { border-left-color: var(--live); }
   .plate.p-stuck { border-left-color: var(--blocked); }
   .plate.p-done { border-left-color: var(--done); }
+  .plate.p-pickup { border-left-color: var(--pick); }
+  .plate.p-plan { border-left-color: var(--plan); }
+  /* A plate opens its card. It is a control, so it says so before it is clicked
+     rather than after — a board nobody knows is clickable has no drill-down. */
+  .plate { cursor: pointer; }
+  .plate:hover { border-color: #2c3852; background: #131c30; }
   .plate .head { display: flex; gap: 7px; align-items: baseline; }
   .plate .num { color: var(--dim); font-variant-numeric: tabular-nums; font-size: 12px; flex: none; }
   .plate .name { font-size: 13px; font-weight: 550; line-height: 1.3; }
@@ -204,6 +225,45 @@
        which shows fewer jams, not a clamp that cuts the ones it shows. */
     #strip .why { color: var(--dim); }
   }
+
+  /* ---------- the card: detail without leaving the page ----------
+     The user asked to open a plate and see the review verdict and its findings,
+     the gates, the last progress line and when it was written, the live process
+     and its age, the repository the run was pointed at, what was delivered and
+     the files of the task directory — «не уходя со страницы». So it is a layer
+     over the board, the board stays where it was, and closing it puts the eye
+     back on the plate it was opened from. Nothing here is fetched: every field
+     travelled with the plate, because the page has no way to reach a disk. */
+  #card { position: fixed; inset: 0; z-index: 20; display: none;
+          background: rgba(4,7,13,.72); backdrop-filter: blur(3px); }
+  #card.open { display: flex; align-items: stretch; justify-content: flex-end; }
+  #cardbox { width: min(620px, 100%); background: var(--bg1); border-left: 1px solid var(--edge);
+             display: flex; flex-direction: column; box-shadow: -18px 0 44px rgba(0,0,0,.5); }
+  #cardhead { padding: 14px 16px 11px; border-bottom: 1px solid var(--edge); flex: none; }
+  #cardhead .head { display: flex; gap: 9px; align-items: baseline; }
+  #cardhead .num { color: var(--dim); font-variant-numeric: tabular-nums; }
+  #cardhead .name { font-size: 15.5px; font-weight: 620; line-height: 1.3; }
+  #cardclose { margin-left: auto; flex: none; }
+  #cardbody { overflow: auto; padding: 12px 16px 20px; min-height: 0; }
+  #cardbody section { margin-bottom: 14px; }
+  #cardbody h4 { margin: 0 0 6px; font-size: 11px; letter-spacing: .07em;
+                 text-transform: uppercase; color: var(--dim); font-weight: 600; }
+  #cardbody .kv { display: grid; grid-template-columns: minmax(96px, auto) 1fr;
+                  gap: 3px 12px; font-size: 12.5px; }
+  #cardbody .kv dt { color: var(--dim); }
+  #cardbody .kv dd { margin: 0; word-break: break-word; }
+  #cardbody .none { color: var(--idle); font-size: 12.5px; }
+  #cardbody .gate { display: flex; gap: 8px; font-size: 12.5px; padding: 2px 0; }
+  #cardbody .gate .r { flex: none; font-weight: 650; font-variant-numeric: tabular-nums; }
+  #cardbody .gate .r.ok { color: var(--live); }
+  #cardbody .gate .r.bad { color: var(--blocked); }
+  #cardbody .files { font-size: 12px; }
+  #cardbody .files div { display: flex; gap: 10px; padding: 1.5px 0; }
+  #cardbody .files .n { flex: 1; word-break: break-all; }
+  #cardbody .files .m { color: var(--dim); flex: none; font-variant-numeric: tabular-nums; }
+  #cardbody .src { color: var(--idle); font-size: 11px; margin-top: 4px; }
+  #cardbody .warn { color: var(--stale); }
+  @media (max-width: 760px) { #cardbox { width: 100%; border-left: none; } }
 
   #tip { position: fixed; z-index: 9; background: rgba(9,14,24,.96); border: 1px solid var(--edge);
          border-radius: 10px; padding: 9px 11px; max-width: 300px; font-size: 12.5px;
@@ -287,6 +347,19 @@
       <option value="10">×10</option>
     </select>
     <span id="clock"></span>
+  </div>
+</div>
+
+<div id="card">
+  <div id="cardbox">
+    <div id="cardhead">
+      <div class="head">
+        <span class="num" id="cardnum"></span>
+        <span class="name" id="cardname"></span>
+        <button id="cardclose">Закрыть</button>
+      </div>
+    </div>
+    <div id="cardbody"></div>
   </div>
 </div>
 
@@ -893,6 +966,9 @@ function tag(text, cls) {
 function plateNode(p, areaKey) {
   const node = document.createElement("div");
   node.className = "plate p-" + areaKey;
+  /* The drill-down the user asked for: the card opens over the board and the
+     board stays where it was, so nothing reloads and nothing is navigated to. */
+  node.addEventListener("click", () => openCard(p));
 
   const head = document.createElement("div");
   head.className = "head";
@@ -944,7 +1020,11 @@ function plateNode(p, areaKey) {
      whenever the disk carries one and absent when it does not. */
   if (p.why) {
     const why = document.createElement("div");
-    why.className = "why"; why.textContent = "почему: " + p.why;
+    why.className = "why";
+    /* A queue and a jam are two different sentences. «За чем стоит» is what the
+       user asked the queue column for by name, and calling it «почему» would
+       read as something being wrong when nothing is. */
+    why.textContent = (p.blocked_by && p.why === p.blocked_by ? "стоит за: " : "почему: ") + p.why;
     if (p.why_src) why.title = "наблюдено: " + p.why_src;
     node.appendChild(why);
   }
@@ -961,6 +1041,221 @@ function plateNode(p, areaKey) {
   }
   return node;
 }
+
+/* ---------- the card ----------
+   Everything it shows arrived with the plate. The page cannot reach a disk, so
+   a drill-down that fetched its own detail would be a second door past the
+   boundary the whole split exists to hold. */
+
+/* Which plate is open, by task directory rather than by object identity: a live
+   refresh replaces every plate object, and the card has to survive that with
+   the same task in it. */
+let openTask = null;
+
+function row(dl, key, value, src) {
+  if (value === null || value === undefined || value === "") return;
+  const dt = document.createElement("dt"); dt.textContent = key;
+  const dd = document.createElement("dd"); dd.textContent = value;
+  if (src) dd.title = "наблюдено: " + src;
+  dl.appendChild(dt); dl.appendChild(dd);
+}
+
+function section(title, build) {
+  const s = document.createElement("section");
+  const h = document.createElement("h4"); h.textContent = title;
+  s.appendChild(h);
+  const filled = build(s);
+  if (!filled) {
+    const none = document.createElement("div");
+    none.className = "none"; none.textContent = "нечего показать: на диске об этом ничего нет";
+    s.appendChild(none);
+  }
+  return s;
+}
+
+function bytes(n) {
+  if (n === null || n === undefined) return "";
+  if (n < 1024) return n + " Б";
+  if (n < 1024 * 1024) return Math.round(n / 1024) + " КБ";
+  return (n / 1048576).toFixed(1) + " МБ";
+}
+
+function stamp(iso) {
+  if (!iso) return null;
+  const t = Date.parse(iso);
+  return isNaN(t) ? iso : new Date(t).toLocaleString("ru-RU");
+}
+
+function cardBody(p) {
+  const d = p.detail || {};
+  const body = document.createElement("div");
+
+  body.appendChild(section("Где стоит и почему", s => {
+    const dl = document.createElement("dl"); dl.className = "kv";
+    row(dl, "Статус", p.status);
+    row(dl, "Исполнитель", p.actor, p.actor_src);
+    row(dl, "Станция", p.role ? (ROLE_RU[p.role] || p.role) : null, p.role_src);
+    row(dl, "Попытка", p.attempt > 1 ? p.attempt : null);
+    const age = ago(ageOf(p));
+    row(dl, "Без изменений", age, p.since_src);
+    row(dl, p.blocked_by && p.why === p.blocked_by ? "Стоит за" : "Почему", p.why, p.why_src);
+    s.appendChild(dl);
+    return dl.children.length > 0;
+  }));
+
+  body.appendChild(section("Прогон", s => {
+    const dl = document.createElement("dl"); dl.className = "kv";
+    row(dl, "Раннер", d.runner);
+    row(dl, "Рабочий процесс", d.workflow);
+    row(dl, "Песочница", d.sandbox);
+    row(dl, "Репозиторий предмета", d.repo, "поле --repo в .runner/runner.json");
+    /* A live process and a label claiming one are two facts and stay two lines:
+       the contour has been burned by reading one as the other. */
+    row(dl, "Ярлык прогона", d.state);
+    row(dl, "Процесс", p.alive ? "жив" : (p.stale_label ? "мёртв, а ярлык говорит running" : "не запущен"),
+        p.alive ? "pid и стартовый тик ядра совпали с .runner/runner.json" : null);
+    row(dl, "Код возврата", d.exit_code === null || d.exit_code === undefined ? null : String(d.exit_code));
+    row(dl, "Остановлен надзором", d.stop_reason, "watcher_stop_reason в .runner/runner.json");
+    row(dl, "Шаг", d.current_step);
+    if (d.refusal) {
+      row(dl, "Отказ в завершении", d.refusal, "completion_refusal в status.json");
+      row(dl, "Что именно отказано", d.refusal_summary, "completion_refusal в status.json");
+    }
+    s.appendChild(dl);
+    return dl.children.length > 0;
+  }));
+
+  body.appendChild(section("Последняя запись прогресса", s => {
+    const pr = d.progress;
+    if (!pr) return false;
+    const dl = document.createElement("dl"); dl.className = "kv";
+    row(dl, "Что делает", pr.activity);
+    if (pr.total) row(dl, "Сделано", pr.done + " из " + pr.total);
+    /* When it was written is the mtime of the file, never the timestamp the
+       child put inside it: children routinely write local time into a UTC field
+       and the contour has already paid for believing one. */
+    row(dl, "Записано", pr.minutes_ago === null || pr.minutes_ago === undefined
+        ? null : pr.minutes_ago + " мин назад", "mtime файла progress.json");
+    s.appendChild(dl);
+    return dl.children.length > 0;
+  }));
+
+  body.appendChild(section("Вердикт ревью", s => {
+    const r = d.review;
+    if (!r) return false;
+    const dl = document.createElement("dl"); dl.className = "kv";
+    row(dl, "Вердикт", r.verdict, r.src);
+    const by = Object.entries(r.by_severity || {}).map(([k, v]) => k + " " + v).join(", ");
+    row(dl, "Находок", r.findings + (by ? " (" + by + ")" : ""), r.src);
+    s.appendChild(dl);
+    return dl.children.length > 0;
+  }));
+
+  body.appendChild(section("Гейты verification.md", s => {
+    const gates = d.gates || [];
+    if (!gates.length) return false;
+    for (const g of gates) {
+      const line = document.createElement("div");
+      line.className = "gate";
+      const r = document.createElement("span");
+      r.className = "r " + (g.result === "OK" ? "ok" : "bad");
+      r.textContent = g.result;
+      const n = document.createElement("span"); n.textContent = g.gate;
+      line.appendChild(r); line.appendChild(n);
+      s.appendChild(line);
+    }
+    return true;
+  }));
+
+  body.appendChild(section("Доставлено человеку", s => {
+    const dl = document.createElement("dl"); dl.className = "kv";
+    if (d.delivery) {
+      row(dl, "Сообщений", d.delivery.count, d.delivery.src);
+      row(dl, "Последнее", stamp(d.delivery.last_at), d.delivery.src);
+      row(dl, "По событию", d.delivery.last_kind, d.delivery.src);
+    }
+    s.appendChild(dl);
+    return dl.children.length > 0;
+  }));
+
+  body.appendChild(section("Движение артефактов", s => {
+    if (!d.moved) return false;
+    const dl = document.createElement("dl"); dl.className = "kv";
+    row(dl, "Последнее", stamp(d.moved), d.moved_src);
+    row(dl, "Что двигалось", (d.moved_src || "").replace(/^[^:]*:\s*/, ""), d.moved_src);
+    s.appendChild(dl);
+    /* The whole point of the observation: a directory that kept moving after
+       its owner refused its closing step is work that may already be finished
+       and that nobody has been back to. It is said in words, not in a flag. */
+    if ((p.flags || []).includes("work_outside_owner")) {
+      const warn = document.createElement("div");
+      warn.className = "src warn";
+      warn.textContent = "Владелец кончился раньше своего закрывающего шага, а файлы каталога "
+        + "двигались после этого: работа могла доработать снаружи — стоит посмотреть артефакты.";
+      s.appendChild(warn);
+    }
+    return true;
+  }));
+
+  body.appendChild(section("Вопросы задачи", s => {
+    if (!p.questions.length) return false;
+    for (const q of p.questions) {
+      const line = document.createElement("div");
+      line.className = "gate";
+      const r = document.createElement("span"); r.className = "r"; r.textContent = "?";
+      const n = document.createElement("span"); n.textContent = q;
+      line.appendChild(r); line.appendChild(n);
+      s.appendChild(line);
+    }
+    return true;
+  }));
+
+  body.appendChild(section("Файлы каталога задачи", s => {
+    const files = d.files || [];
+    if (!files.length) return false;
+    const box = document.createElement("div");
+    box.className = "files";
+    for (const f of files) {
+      const line = document.createElement("div");
+      const n = document.createElement("span"); n.className = "n"; n.textContent = f.name;
+      const m = document.createElement("span"); m.className = "m";
+      m.textContent = [bytes(f.bytes), stamp(f.at)].filter(Boolean).join(" · ");
+      line.appendChild(n); line.appendChild(m);
+      box.appendChild(line);
+    }
+    s.appendChild(box);
+    const src = document.createElement("div");
+    src.className = "src";
+    /* Names, sizes and times. Opening any of them would be reading the work
+       rather than observing it, and a transcript is never listed at all. */
+    src.textContent = "имена, размеры и время изменения: " + d.dir
+      + " — содержимое не читается, транскрипты не показываются";
+    s.appendChild(src);
+    return true;
+  }));
+
+  return body;
+}
+
+function openCard(p) {
+  openTask = p.task;
+  el("cardnum").textContent = p.id === null ? "—" : "#" + p.id;
+  el("cardname").textContent = p.title;
+  const body = el("cardbody");
+  body.textContent = "";
+  body.appendChild(cardBody(p));
+  body.scrollTop = 0;
+  el("card").classList.add("open");
+}
+
+function closeCard() {
+  openTask = null;
+  el("card").classList.remove("open");
+}
+
+el("cardclose").addEventListener("click", closeCard);
+window.addEventListener("keydown", e => { if (e.key === "Escape" && openTask) closeCard(); });
+el("card").addEventListener("click", e => { if (e.target === el("card")) closeCard(); });
 
 /* Which areas the viewer folded open survives a live refresh, so an update
    never yanks the screen out from under someone reading it. */
@@ -998,6 +1293,12 @@ function areaNode(panel, area) {
   });
   node.appendChild(title);
 
+  if (AREA_RULE[area.key]) {
+    const rule = document.createElement("div");
+    rule.className = "rule"; rule.textContent = AREA_RULE[area.key];
+    node.appendChild(rule);
+  }
+
   const plates = document.createElement("div");
   plates.className = "plates";
   if (!area.count) {
@@ -1013,9 +1314,21 @@ function areaNode(panel, area) {
      tasks. They are questions to the same person; splitting them into a second
      place with a second number is how seventeen of them stayed off the board. */
   for (const q of (area.questions || [])) plates.appendChild(questionNode(q));
+  for (const q of (area.promises || [])) plates.appendChild(promiseNode(q));
   node.appendChild(plates);
   return node;
 }
+
+/* The rule that picked what an area holds, printed with the area. «Надо
+   запланировать» is the one area whose entire content is text chosen by a
+   narrow test, and the test is narrower than the heading: what is observed is
+   that the line names no task, which is not the same claim as «эта работа не
+   начата». A reader who can see the rule can judge the list. */
+const AREA_RULE = {
+  plan: "строки раздела «В работе» продуктов этого направления, в которых не названо ни одной задачи",
+  pickup: "живого прогона нет, гейты не отказали, и ничто на диске эту задачу не держит",
+  queued: "стоит за названным держателем — он в строке каждой плашки",
+};
 
 function questionNode(q) {
   const node = document.createElement("div");
@@ -1032,6 +1345,27 @@ function questionNode(q) {
   row.className = "row";
   const src = tag("вопрос продукта " + q.product);
   src.title = "наблюдено: раздел «Открытые вопросы» в products/" + q.product + "/product.md";
+  row.appendChild(src);
+  node.appendChild(row);
+  return node;
+}
+
+function promiseNode(q) {
+  const node = document.createElement("div");
+  node.className = "plate p-plan q";
+  const head = document.createElement("div");
+  head.className = "head";
+  const num = document.createElement("span");
+  num.className = "num"; num.textContent = "•";
+  const name = document.createElement("span");
+  name.className = "name"; name.textContent = q.text;
+  head.appendChild(num); head.appendChild(name);
+  node.appendChild(head);
+  const row = document.createElement("div");
+  row.className = "row";
+  const src = tag("«В работе» продукта " + q.product);
+  src.title = "наблюдено: раздел «В работе» в products/" + q.product
+    + "/product.md, задача в строке не названа";
   row.appendChild(src);
   node.appendChild(row);
   return node;
@@ -1105,6 +1439,9 @@ function drawStrip(board) {
   const groups = [
     ["Кто работает сейчас", board.now, "who", "никто: живых прогонов нет", board.now_hidden],
     ["Где затор", board.jams, "jam", "заторов нет", board.jams_hidden],
+    /* The first question of every wake-up, so it stands on the first screen
+       beside the other two rather than under a fold. */
+    ["Что подхватить", board.pickup, "pick", "нечего: свободных задач нет", board.pickup_hidden],
   ];
   for (const [label, items, cls, empty, hidden] of groups) {
     const grp = document.createElement("div");
@@ -1146,6 +1483,34 @@ function drawStrip(board) {
     : "ничего";
   grp.appendChild(lbl); grp.appendChild(n);
   strip.appendChild(grp);
+
+  /* The second instance of the product owner. Two pairs of duplicate tasks were
+     created in one hour — 790/792 and 791/793 — because the owner in the chat
+     and the owner woken by the timer each had their own queue and neither could
+     see the other's. Knowing another one is awake is what prevents the third
+     pair, so it stands on the strip and not in a column. */
+  const awake = board.owners_awake || [];
+  const mine = document.createElement("div");
+  mine.className = "grp";
+  const ml = document.createElement("span");
+  ml.className = "lbl"; ml.textContent = "Другой я";
+  mine.appendChild(ml);
+  if (!awake.length) {
+    const none = document.createElement("span");
+    none.className = "none";
+    none.textContent = "никто больше не разбужен";
+    mine.appendChild(none);
+  }
+  for (const owner of awake) {
+    const s = document.createElement("span");
+    s.className = "item jam";
+    const age = ago(ageOf({ since: owner.since, age_seconds: owner.age_seconds }));
+    s.textContent = "продакт разбужен на треде «" + (owner.thread || "?") + "»"
+      + (age ? " · " + age : "") + " — не заводите задачу, не посмотрев его очередь";
+    s.title = "наблюдено: " + owner.src;
+    mine.appendChild(s);
+  }
+  strip.appendChild(mine);
 }
 
 function drawBoard(board, snapshot) {
@@ -1185,8 +1550,39 @@ function drawBoard(board, snapshot) {
   el("boardsub").textContent = "в работе " + (totals.running || 0) +
     " · ждёт решения человека " + (totals.waiting_human || 0) +
     " · заторов " + (totals.stuck || 0) +
+    " · можно подхватить " + (totals.pickup || 0) +
+    " · надо запланировать " + (totals.plan || 0) +
     " · собрано " + new Date(DATA.built_at).toLocaleString("ru-RU");
   el("boardmode").textContent = snapshot.mode === "demo" ? "обезличено" : "";
+}
+
+/* Redraw in place with a fresher document. Live mode used to call
+   `location.reload()`, which is fine for a picture and wrong for a tool: it
+   throws away the open card, the scroll position and the selection every ten
+   seconds, so a person reading a task would be interrupted mid-sentence by a
+   repository going dirty somewhere else. The board is rebuilt from the new
+   payload, the folded areas already survive through `sessionStorage`, and the
+   open card is reopened on the same task if that task is still there. */
+function applyFresh(fresh) {
+  DATA.snapshot = fresh.snapshot;
+  DATA.board = fresh.board;
+  DATA.world = fresh.world;
+  DATA.timeline = fresh.timeline;
+  DATA.built_at = fresh.built_at;
+  DATA.digest = fresh.digest;
+  const wanted = openTask;
+  const scroll = el("columns").scrollTop;
+  drawBoard(DATA.board, DATA.snapshot);
+  el("columns").scrollTop = scroll;
+  if (wanted) {
+    const again = DATA.board.panels
+      .flatMap(p => p.areas).flatMap(a => a.plates)
+      .find(p => p.task === wanted);
+    /* Gone from the board — folded into `Сделано`, or dropped by a cap — is not
+       the same as unchanged, so the card closes rather than showing a state
+       that is no longer the board's. */
+    if (again) openCard(again); else closeCard();
+  }
 }
 
 /* ---------- two screens ---------- */
@@ -1229,7 +1625,7 @@ if (DATA.live_url) {
          timeline. A status change, a run that died, a repository gone dirty —
          none of them append a record, and all of them have to reach the screen
          (finding MEDIUM-1 of review 780). */
-      if (fresh.digest !== DATA.digest) location.reload();
+      if (fresh.digest !== DATA.digest) applyFresh(fresh);
     } catch (err) { /* server gone: keep showing what we have */ }
   }, 10000);
 }

@@ -30,14 +30,19 @@ SCHEMA_VERSION = 1
 # Snapshot: one document describing every thread at one instant.
 # ---------------------------------------------------------------------------
 
-SNAPSHOT_FIELDS = ("schema_version", "mode", "threads", "products")
+SNAPSHOT_FIELDS = ("schema_version", "mode", "threads", "products", "owners_awake")
 THREAD_FIELDS = ("key", "title", "products", "task_count", "tasks", "repos", "channels")
-TASK_FIELDS = ("id", "title", "status", "dir", "run", "gates", "flags", "board")
+TASK_FIELDS = ("id", "title", "status", "dir", "run", "gates", "flags", "board", "detail")
 # `alive_src` says what answered the liveness question, on the same rule as
 # `actor_src`: a run called live has to name what said so, and the answer now
 # comes from the runner that recorded the process rather than from the existence
 # of a PID number (finding MEDIUM-2 of review 786).
-RUN_FIELDS = ("state", "runner", "workflow", "alive", "alive_src", "progress")
+RUN_FIELDS = ("state", "runner", "workflow", "alive", "alive_src", "progress",
+              # `repo` is what the run was pointed at and is what makes «занят
+              # репозиторий» observable rather than assumed; `refusal` is the
+              # contour's own written verdict that an owner stopped before its
+              # closing step, which nothing used to read.
+              "repo", "refusal")
 REPO_FIELDS = ("name", "present")
 CHANNEL_FIELDS = ("channel", "direction", "count")
 
@@ -55,7 +60,9 @@ BOARD_AREAS = (
     "waiting_human",  # a person has to decide; shown even when empty
     "running",        # a process is alive right now
     "stuck",          # a dead run under a living label, a kill, a failed gate
-    "queued",         # nothing is happening and nothing is wrong
+    "pickup",         # nothing running, nothing observably holding it: start it
+    "queued",         # held by something named, and the name is next to it
+    "plan",           # promised in a product record and never made a task
     "done",           # terminal
 )
 
@@ -63,9 +70,22 @@ BOARD_AREA_RU = {
     "waiting_human": "Ждёт решения человека",
     "running": "В работе сейчас",
     "stuck": "Затор",
-    "queued": "В очереди",
+    "pickup": "Можно подхватить",
+    "queued": "В очереди, за чем стоит",
+    "plan": "Надо запланировать",
     "done": "Сделано",
 }
+
+# `pickup` stands above `queued` on purpose, and both were one area called «в
+# очереди» before. That single area answered neither of the two questions the
+# user actually opens the board with — «что можно подхватить прямо сейчас»,
+# which is the first question of every wake-up, and «за чем стоит остальное».
+# The split is one observation: whether anything on disk is holding the task.
+#
+# `plan` holds no tasks at all. It carries promises written in a product record
+# with no task behind them — the place where «посмотреть код companion» stood
+# for two days because the flow had nowhere to put «надо запланировать».
+AREAS_WITHOUT_TASKS = ("plan",)
 
 # Fields of one plate. `actor`, `role` and `why` are nullable on purpose: an
 # empty cell is the honest answer when nothing on disk names the executor or the
@@ -77,7 +97,18 @@ BOARD_AREA_RU = {
 # implying a state transition it never observed (finding MEDIUM-1).
 BOARD_FIELDS = ("area", "actor", "actor_src", "role", "role_src",
                 "happening", "why", "why_src", "since", "since_src",
-                "age_seconds", "attempt")
+                "age_seconds", "attempt",
+                # What is holding a queued task, and what observed it. «В
+                # очереди» without this is a label, not an answer: the user
+                # asked for «за чем именно стоит».
+                "blocked_by", "blocked_by_src")
+
+# What a plate shows when it is opened. Collected by the observer rather than
+# fetched by the page: the renderer may not reach a disk, so a drill-down that
+# went looking for its own detail would be a second door past the boundary the
+# split exists to hold. Everything here is a name, a count or a verdict already
+# written down — no child transcript is read to build it.
+DETAIL_FIELDS = ("review", "delivery", "files", "moved", "moved_age_seconds", "moved_src")
 
 # Task flags promised to the renderer. Each one has to be visible as a shape on
 # the map, so adding a flag here is a change to the picture, not only to data.
@@ -89,6 +120,11 @@ TASK_FLAGS = (
     "killed",       # supervision stopped it: neither working nor done
     "delivered",    # the delivered crate
     "idle",         # nobody is working on it
+    # The owner stopped before its closing step and the directory kept moving
+    # afterwards: work that may have finished outside the dead process. Task 757
+    # sat finished for three and a half hours behind exactly this, and 712
+    # before it, because nothing read the refusal the contour writes itself.
+    "work_outside_owner",
 )
 
 # Two more shapes on the map are not properties of a task and are not stored as
@@ -155,6 +191,7 @@ def validate_snapshot(snapshot: dict) -> dict:
             _require(task, TASK_FIELDS, where)
             _require(task["run"], RUN_FIELDS, f"{where}: run")
             _require(task["board"], BOARD_FIELDS, f"{where}: board")
+            _require(task["detail"], DETAIL_FIELDS, f"{where}: detail")
             if task["board"]["area"] not in BOARD_AREAS:
                 raise ContractError(f"{where}: область {task['board']['area']!r}")
             role = task["board"]["role"]
@@ -168,6 +205,11 @@ def validate_snapshot(snapshot: dict) -> dict:
                                         (role, task["board"]["role_src"], "роль"),
                                         (task["board"]["why"], task["board"]["why_src"], "причина"),
                                         (task["board"]["since"], task["board"]["since_src"], "давность"),
+                                        # «За чем стоит» is the caption a queue
+                                        # invents most readily, so it joins the
+                                        # rule rather than getting an exemption.
+                                        (task["board"]["blocked_by"], task["board"]["blocked_by_src"], "чем задержана"),
+                                        (task["detail"].get("moved"), task["detail"].get("moved_src"), "движение артефактов"),
                                         (task["run"]["alive"], task["run"]["alive_src"], "живость прогона")):
                 if value and not str(source or "").strip():
                     raise ContractError(f"{where}: {what} названа, но не сказано, чем наблюдена")
@@ -184,7 +226,15 @@ def validate_snapshot(snapshot: dict) -> dict:
                 raise ContractError(f"канал: направление {channel['direction']!r}")
 
     for product in snapshot["products"]:
-        _require(product, ("slug", "questions", "effect"), "продукт")
+        _require(product, ("slug", "questions", "effect", "promises"), "продукт")
+    if not isinstance(snapshot["owners_awake"], list):
+        raise ContractError("снимок: owners_awake должен быть списком")
+    for owner in snapshot["owners_awake"]:
+        _require(owner, ("thread", "since", "age_seconds", "src"), "разбуженный продакт")
+        if not str(owner["src"]).strip():
+            # Same rule as everywhere else: a second instance of the product
+            # owner named on the strip has to say what observed it.
+            raise ContractError("разбуженный продакт: не сказано, чем наблюдён")
     return snapshot
 
 

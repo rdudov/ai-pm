@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -39,6 +40,7 @@ from pathlib import Path
 from process_map_schema import SCHEMA_VERSION, STATIONS, scrub, validate_snapshot
 
 HOME = Path(__file__).resolve().parents[1]
+PROC = Path("/proc")
 CONFIG = HOME / "threads.json"
 PRODUCTS = HOME / "products"
 REPO = Path("/opt/projects/companion-agent")
@@ -254,18 +256,107 @@ def run_state(task_dir: Path) -> dict:
             "total": payload.get("total"),
             "minutes_ago": round((time.time() - progress_path.stat().st_mtime) / 60),
         }
+    refusal = status.get("completion_refusal") or {}
     return {
         "state": status.get("state"),
+        # What the run itself says it is doing. `thread_state` printed this line
+        # from its own copy of this reader; there is one copy now.
+        "current_step": status.get("current_step"),
         "runner": status.get("runner") or runner.get("runner"),
         "workflow": status.get("workflow"),
-        "sandbox": runner.get("sandbox_mode"),
+        "sandbox": runner.get("sandbox_mode") or (runner.get("access_grant") or {}).get("sandbox_mode"),
         "stop_reason": runner.get("watcher_stop_reason") or None,
         "exit_code": runner.get("exit_code"),
         "pid": pid if isinstance(pid, int) else None,
         "alive": alive,
         "alive_src": alive_src,
         "progress": progress,
+        # The contour already knows when an owner stopped before its closing
+        # step and says so in writing; nothing used to read it. See `refusal`.
+        "refusal": refusal.get("kind") if isinstance(refusal, dict) else None,
+        "refusal_summary": (refusal.get("summary") or refusal.get("reason")) if isinstance(refusal, dict) else None,
+        "repo": subject_repo(runner),
     }
+
+
+def subject_repo(runner: dict) -> str | None:
+    """The repository this task's run was pointed at, as its own record has it.
+
+    `--repo` of the recorded command is what the runner was actually told, and
+    `access_grant.granted_directories` is what it was actually allowed to write.
+    Both are observations of the same launch, so the command comes first and the
+    grant is the fallback; nothing is derived from the title or the project.
+    """
+    command = runner.get("command") or []
+    if "--repo" in command:
+        index = command.index("--repo") + 1
+        if index < len(command):
+            return command[index]
+    granted = (runner.get("access_grant") or {}).get("granted_directories") or []
+    return granted[0] if granted else None
+
+
+# Files whose movement says nothing about the work: the runner's own log grows
+# with every line a child prints, and a transcript is the one thing the contour
+# forbids reading. Excluding both is what keeps a look at a task directory the
+# same price whatever happened inside it.
+NOT_ARTIFACTS = ("runner.log",)
+TRANSCRIPT = re.compile(r"transcript", re.IGNORECASE)
+
+# Files that are the run's own bookkeeping rather than its work, and the task's
+# own metadata. These are precisely the files the observer already watches — see
+# `AREA_INPUTS` and `run_state` — so counting their movement as «что-то
+# происходит в каталоге» would make the new observation a restatement of the old
+# one. It also makes it wrong in the common direction: accepting a finished task
+# rewrites `task.md`, and eight of the first eleven hits of this rule were that
+# acceptance, not work carrying on outside a dead owner.
+BOOKKEEPING = {"status.json", "progress.json", "task.md", "task_contract.json"}
+
+# Subtrees that are machinery rather than artifacts. A review that cloned its
+# subject into a scratch directory left 16 250 entries under one task, almost
+# all of them git objects and pytest caches, and walking them would make a look
+# at that task fifty times dearer than a look at any other — the one property
+# the contour requires a look not to have. Pruned by name, so the bound holds
+# whatever a future child drops there.
+NOT_ARTIFACT_DIRS = {".git", "__pycache__", ".pytest_cache", ".venv",
+                     "node_modules", ".mypy_cache", ".ruff_cache"}
+
+
+def artifact_movement(task_dir: Path) -> tuple[str | None, int | None, str | None]:
+    """When anything in the task directory last moved, and what moved.
+
+    The hole this closes was observed twice, on 712 and on 757: the owner died,
+    the work carried on in another process, and `status.json`/`progress.json` —
+    the only two files anyone watched — never moved again because there was
+    nobody left to move them. Task 757 sat finished for three and a half hours.
+
+    So the observation is the newest mtime of the *work* in the directory: the
+    run's own bookkeeping is excluded, because those are exactly the files the
+    old observer already watched and restating them would observe nothing new.
+    Names and stat calls only: no file is opened, so the cost is the number of
+    entries, not the volume of work, and no transcript is read here or anywhere
+    else.
+    """
+    newest = (0.0, None)
+    for root, dirs, files in os.walk(task_dir):
+        dirs[:] = [d for d in dirs
+                   if d not in NOT_ARTIFACT_DIRS and d != ".runner" and not TRANSCRIPT.search(d)]
+        for name in files:
+            if name in NOT_ARTIFACTS or name in BOOKKEEPING or TRANSCRIPT.search(name):
+                continue
+            path = Path(root) / name
+            try:
+                mtime = path.stat().st_mtime
+            except OSError:
+                continue
+            if mtime > newest[0]:
+                newest = (mtime, str(path.relative_to(task_dir)))
+    if not newest[1]:
+        return None, None, None
+    mtime, name = newest
+    return (datetime.fromtimestamp(mtime, timezone.utc).isoformat(),
+            max(int(time.time() - mtime), 0),
+            f"самый свежий mtime в каталоге задачи: {name}")
 
 
 def observed_actor(task_dir: Path, run: dict) -> tuple[str | None, str | None]:
@@ -344,7 +435,86 @@ def attempt_count(task_dir: Path) -> int:
     return sum(1 for child in root.iterdir() if child.is_dir())
 
 
-def board_area(status: str | None, flags: list[str], has_questions: bool) -> str:
+VERDICT = re.compile(r"^\s*(?:[-*]\s*)?(?:\**\s*)?Verdict\s*:\s*\**\s*([A-Za-z_-]+)",
+                     re.IGNORECASE | re.MULTILINE)
+SEVERITY = re.compile(r"^#{1,4}\s*(HIGH|MEDIUM|LOW)-\d+", re.MULTILINE)
+
+
+def review_verdict(task_dir: Path) -> dict | None:
+    """The verdict of the review that was written into this task, and its count.
+
+    `findings.md` is where a cross-review lands, and it opens with `Verdict:`
+    and holds one `## HIGH-1`-shaped heading per finding. Both are read from the
+    file the reviewer wrote; nothing is inferred from a task title or a status.
+    """
+    path = task_dir / "findings.md"
+    try:
+        text = path.read_text()
+    except OSError:
+        return None
+    match = VERDICT.search(text)
+    severities = SEVERITY.findall(text)
+    if not match and not severities:
+        return None
+    counts: dict[str, int] = {}
+    for level in severities:
+        counts[level] = counts.get(level, 0) + 1
+    return {
+        "verdict": match.group(1).lower() if match else None,
+        "findings": len(severities),
+        "by_severity": counts,
+        "src": "строка Verdict и заголовки находок в findings.md",
+    }
+
+
+def delivery(task_dir: Path) -> dict | None:
+    """What actually left for a person, from the receipts the sender wrote.
+
+    A report left on disk counts as undelivered, so the card has to say whether
+    anything went out and when the last thing did. One receipt per message
+    actually sent — the tail of the journal, not its whole length in memory.
+    """
+    path = task_dir / "dev-pipeline" / "notification-receipts.jsonl"
+    count = count_lines(path)
+    if not count:
+        return None
+    last = last_json_line(path)
+    return {"count": count, "last_at": last.get("recorded_at"),
+            "last_kind": last.get("kind"),
+            "src": "dev-pipeline/notification-receipts.jsonl"}
+
+
+# Entries of the task directory the card lists. Names, sizes and mtimes only:
+# opening any of them would be reading the work rather than observing it, and a
+# transcript must not be listed at all.
+FILES_ON_CARD = 40
+
+
+def task_files(task_dir: Path) -> list[dict]:
+    """Top-level entries of the task directory, newest first. Names, never content."""
+    entries = []
+    try:
+        children = list(task_dir.iterdir())
+    except OSError:
+        return []
+    for path in children:
+        if TRANSCRIPT.search(path.name):
+            continue
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        entries.append({
+            "name": path.name + ("/" if path.is_dir() else ""),
+            "bytes": None if path.is_dir() else stat.st_size,
+            "at": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
+        })
+    entries.sort(key=lambda e: e["at"], reverse=True)
+    return entries[:FILES_ON_CARD]
+
+
+def board_area(status: str | None, flags: list[str], has_questions: bool,
+               blocked_by: str | None = None) -> str:
     """Which area of the board a task stands in. One rule, one owner.
 
     `has_questions` means a question is open *and still unanswered* — see
@@ -368,9 +538,15 @@ def board_area(status: str | None, flags: list[str], has_questions: bool) -> str
         return "waiting_human"
     if "live" in flags:
         return "running"
-    if {"stale_label", "killed", "gap", "blocked"} & set(flags):
+    if {"stale_label", "killed", "gap", "blocked", "work_outside_owner"} & set(flags):
         return "stuck"
-    return "queued"
+    # Everything below used to be one area called «в очереди», which answered
+    # neither of the two questions a person actually opens the board with.
+    # «Что можно подхватить прямо сейчас» is the first question of every
+    # wake-up, and «за чем стоит остальное» is the second; they are the same
+    # split, taken on one observation — whether anything on disk is holding
+    # this task. Nothing holding it means it can be started now.
+    return "queued" if blocked_by else "pickup"
 
 
 def jam_reason(status_detail: str | None, run: dict, verdicts: list[dict],
@@ -403,6 +579,46 @@ def jam_reason(status_detail: str | None, run: dict, verdicts: list[dict],
         # Unobservable is not dead, and the plate has to say which one it is.
         return run["alive_src"], "сверка пространства имён PID с .runner/runner.json"
     return None, None
+
+
+def queue_reason(task: dict, run: dict, busy_repos: dict) -> tuple[str | None, str | None]:
+    """What is holding this task, when something observably is.
+
+    «В очереди» on its own answers nothing: the user asked for «за чем именно
+    стоит» — busy repository, waiting review, waiting a person, waiting host
+    memory — and asked for the reason to be observed rather than guessed. So
+    each branch below names the file it read, and a task nothing on disk holds
+    returns nothing and lands under «можно подхватить», which is the point.
+
+    `busy_repos` maps a repository path to the task that has a live run in it,
+    and is built once per snapshot: one direction owns its repositories, and a
+    second write-run in a repository somebody is already writing to is the one
+    queue this contour genuinely has.
+    """
+    detail = task.get("status_detail")
+    if detail:
+        return detail, "поле status_detail во frontmatter task.md"
+    repo = run.get("repo")
+    holder = busy_repos.get(repo) if repo else None
+    if holder and holder.get("id") != task.get("id"):
+        return (f"репозиторий {Path(repo).name} занят живым прогоном задачи {holder['id']}",
+                "поле --repo в .runner/runner.json обеих задач и живость прогона держателя")
+    return None, None
+
+
+def busy_repository_map(entries: list[dict]) -> dict:
+    """Repositories that currently have a live run, and whose run it is.
+
+    Built from the same task entries the board is built from, so «занят» means
+    exactly «одна из показанных задач держит его живым прогоном» and cannot
+    drift from what the columns show.
+    """
+    busy: dict[str, dict] = {}
+    for entry in entries:
+        repo = (entry.get("run") or {}).get("repo")
+        if repo and "live" in entry.get("flags", []):
+            busy.setdefault(repo, {"id": entry.get("id"), "title": entry.get("title")})
+    return busy
 
 
 OPEN_QUESTIONS = re.compile(r"^##\s+Open Questions\s*$(.*?)(?=^##\s|\Z)",
@@ -484,6 +700,27 @@ def task_entry(task: dict) -> dict:
     if status not in TERMINAL and not run["alive"] and status:
         flags.append("idle")
 
+    # Work that carried on after its owner died. The contour writes the refusal
+    # down itself — `completion_refusal.kind` with «Work it started may have
+    # continued outside its process» — and until now nobody read it, so 757 sat
+    # finished for three and a half hours and 712 before it. Two observations
+    # have to hold together: the owner refused its closing step, and something
+    # in the directory moved after the run record last did.
+    #
+    # A terminal task is excluded: somebody already looked and accepted it, so
+    # «сходите посмотрите артефакты» is an instruction to redo a decision that
+    # was taken. The signal is for work nobody has been back to.
+    moved, moved_age, moved_src = artifact_movement(task_dir)
+    outside = False
+    if run["refusal"] and not run["alive"] and moved and status not in TERMINAL:
+        try:
+            outside = moved > datetime.fromtimestamp(
+                (task_dir / "status.json").stat().st_mtime, timezone.utc).isoformat()
+        except OSError:
+            outside = False
+    if outside:
+        flags.append("work_outside_owner")
+
     # Only the still-unanswered ones reach the plate and the counter: a settled
     # question on a board of open ones is the same lie as a wrong number.
     questions = pending_questions(open_questions(task_dir))
@@ -504,8 +741,24 @@ def task_entry(task: dict) -> dict:
         "gates": verdicts,
         "flags": flags,
         "questions": questions,
+        # Everything the card shows when a plate is opened. Collected here
+        # because the renderer may not reach a disk, so a drill-down that
+        # fetched its own detail would be a second door into the contour past
+        # the boundary this split exists to hold.
+        "detail": {
+            "review": review_verdict(task_dir),
+            "delivery": delivery(task_dir),
+            "files": task_files(task_dir),
+            "moved": moved,
+            "moved_age_seconds": moved_age,
+            "moved_src": moved_src,
+        },
         "board": {
-            "area": board_area(status, flags, bool(questions)),
+            # Filled by `assign_areas` once every task is known: whether a task
+            # can be picked up depends on what the other tasks are holding.
+            "area": None,
+            "blocked_by": None,
+            "blocked_by_src": None,
             "actor": actor,
             "actor_src": actor_src,
             "role": role,
@@ -525,10 +778,34 @@ def task_entry(task: dict) -> dict:
     }
 
 
+def assign_areas(entries: list[dict], tasks: list[dict]) -> None:
+    """The second pass: which area each task stands in, once all of them are known.
+
+    «Можно подхватить» is not a property of one task read alone — it is the
+    absence of anything holding it, and one of the things that can hold it is
+    another task's live run in the same repository. So the areas are assigned
+    after every task has been observed, never during.
+    """
+    busy = busy_repository_map(entries)
+    for entry, task in zip(entries, tasks):
+        why, why_src = queue_reason(task, entry["run"], busy)
+        entry["board"]["blocked_by"] = why
+        entry["board"]["blocked_by_src"] = why_src
+        entry["board"]["area"] = board_area(
+            entry["status"], entry["flags"], bool(entry["questions"]), why)
+        # A queued task's reason for standing is the thing holding it, and the
+        # plate has one place for «почему». `jam_reason` already filled it from
+        # `status_detail` when there was one; a repository held by a named run
+        # is the case it could not see.
+        if not entry["board"]["why"] and why:
+            entry["board"]["why"] = why
+            entry["board"]["why_src"] = why_src
+
+
 def repo_state(path: str) -> dict:
     repo = Path(path)
     if not (repo / ".git").exists():
-        return {"name": repo.name, "present": False}
+        return {"name": repo.name, "present": False, "path": path}
 
     def git(*args: str) -> str:
         out = subprocess.run(["git", "-C", path, *args], capture_output=True, text=True)
@@ -539,6 +816,10 @@ def repo_state(path: str) -> dict:
     return {
         "name": repo.name,
         "present": True,
+        # The path the thread config names, kept so the one observer can answer
+        # `thread_state`'s callers in their own terms. Structural anonymisation
+        # replaces it like any other path on the way to a shown document.
+        "path": path,
         "branch": git("rev-parse", "--abbrev-ref", "HEAD"),
         "head": git("log", "-1", "--format=%h"),
         "head_subject": git("log", "-1", "--format=%s"),
@@ -625,15 +906,87 @@ def products() -> list[dict]:
             "slug": path.parent.name,
             "questions": [q for q in markdown_section(text, "Открытые вопросы") if not q.startswith(STRUCK)],
             "effect": markdown_section(text, "Журнал эффекта")[:8],
+            "promises": unplanned(markdown_section(text, "В работе")),
         })
     return entries
 
 
-def build(anonymize: bool) -> dict:
+# A reference to a task, as the product record writes one: a bare number in
+# brackets at the end of a claim, or a number named in the sentence.
+TASK_REFERENCE = re.compile(r"(?<!\d)\d{3}(?!\d)")
+
+
+def unplanned(items: list[str]) -> list[str]:
+    """Lines of «В работе» that name no task — work promised and never started.
+
+    This is the fourth question of the board, and it has a price already paid:
+    «ревью кода companion силами Claude… Запрошено пользователем» stood in this
+    section for two days and never became a task, because the flow had no place
+    for «надо запланировать». The section is where the product owner writes what
+    is being done, so a line in it with no task number behind it is a promise
+    nobody is executing.
+
+    The test is deliberately the weak one — whether a task is referenced at all,
+    not whether that task is alive. A number in the line is an observation; that
+    the numbered task actually covers the promise is a reading, and reading the
+    line is not something this collector is allowed to do.
+    """
+    return [item for item in items
+            if not item.startswith(STRUCK) and not TASK_REFERENCE.search(item)]
+
+
+def owner_wakeups() -> list[dict]:
+    """Other instances of the product owner that are awake right now.
+
+    Named by the user as the sixth question after two pairs of duplicate tasks
+    (790/792 and 791/793) were created in one hour: the product owner in the
+    chat and the product owner woken by `product-thread@<тред>.timer` each had
+    their own queue and neither could see the other's. A live tick is the
+    observation that another instance is deciding something.
+
+    Read from `/proc` command lines only — no transcript, no session file, and
+    nothing the other instance says about itself.
+    """
+    awake = []
+    for entry in PROC.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            cmdline = (entry / "cmdline").read_bytes().decode("utf-8", "replace").split("\0")
+            started = entry.stat().st_mtime
+        except OSError:
+            continue
+        if not any("thread_tick.py" in part for part in cmdline):
+            continue
+        thread = next((part for part in reversed(cmdline)
+                       if part and not part.startswith("-") and "thread_tick.py" not in part
+                       and "python" not in part), None)
+        awake.append({
+            "pid": int(entry.name),
+            "thread": thread,
+            "since": datetime.fromtimestamp(started, timezone.utc).isoformat(),
+            "age_seconds": max(int(time.time() - started), 0),
+            "src": "командная строка процесса в /proc",
+        })
+    return sorted(awake, key=lambda w: w["since"])
+
+
+def build(anonymize: bool, only: str | None = None) -> dict:
+    """The one observation of the contour everything else reads.
+
+    `only` narrows it to a single direction. It exists so a scheduled wake-up
+    costs what it used to when it had its own observer: the tick asks about one
+    thread and pays for one thread. What it must not do is answer differently —
+    the same functions produce the same fields either way.
+    """
     config = load_config()
     threads = []
     for key, thread in config["threads"].items():
-        tasks = [task_entry(task) for task in thread_tasks(thread)]
+        if only and key != only:
+            continue
+        source = thread_tasks(thread)
+        tasks = [task_entry(task) for task in source]
+        assign_areas(tasks, source)
         threads.append({
             "key": key,
             "title": thread.get("title", key),
@@ -646,11 +999,16 @@ def build(anonymize: bool) -> dict:
             # four.
             "channels": thread_channels(tasks, is_owner=str(REPO) in thread.get("repos", [])),
         })
+    if only and not threads:
+        raise SystemExit(f"unknown thread: {only}; known: {sorted(config['threads'])}")
     snapshot = {
         "schema_version": SCHEMA_VERSION,
         "mode": "demo" if anonymize else "real",
         "threads": threads,
         "products": products(),
+        # Who else is deciding right now. Not a thread and not a task: it is the
+        # contour watching itself, and it belongs above the columns.
+        "owners_awake": owner_wakeups(),
     }
     if anonymize:
         snapshot = scrub(snapshot)
@@ -665,9 +1023,10 @@ def main() -> None:
                         help="strip absolute paths, mail addresses and numeric identifiers")
     parser.add_argument("--out", type=Path, help="write here instead of stdout")
     parser.add_argument("--summary", action="store_true", help="print counts instead of the document")
+    parser.add_argument("--thread", help="observe one direction instead of all four")
     args = parser.parse_args()
 
-    snapshot = build(args.anonymize)
+    snapshot = build(args.anonymize, args.thread)
     if args.summary:
         for thread in snapshot["threads"]:
             flags: dict[str, int] = {}

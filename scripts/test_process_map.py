@@ -26,17 +26,24 @@ import process_map_state as state
 def a_task(**over) -> dict:
     board = over.pop("board", {})
     run = over.pop("run", None)
+    detail = over.pop("detail", {})
     task = {"id": 1, "title": "Задача", "status": "planned", "status_detail": None,
             "dir": "001-task", "gates": [], "flags": [], "questions": [],
-            "run": {"state": None, "runner": None, "workflow": None, "sandbox": None,
+            "run": {"state": None, "current_step": None, "runner": None,
+                    "workflow": None, "sandbox": None,
                     "stop_reason": None, "exit_code": None, "pid": None,
-                    "alive": False, "alive_src": None, "progress": None},
+                    "alive": False, "alive_src": None, "progress": None,
+                    "refusal": None, "refusal_summary": None, "repo": None},
+            "detail": {"review": None, "delivery": None, "files": [],
+                       "moved": None, "moved_age_seconds": None, "moved_src": None},
             "board": {"area": "queued", "actor": None, "actor_src": None,
                       "role": None, "role_src": None, "happening": None,
                       "why": None, "why_src": None, "since": None, "since_src": None,
-                      "age_seconds": None, "attempt": 0}}
+                      "age_seconds": None, "attempt": 0,
+                      "blocked_by": None, "blocked_by_src": None}}
     task.update(over)
     task["board"].update(board)
+    task["detail"].update(detail)
     if run:
         task["run"].update(run)
     return task
@@ -55,8 +62,10 @@ def a_snapshot(tasks=None, products=None) -> dict:
             "channels": [{"channel": "telegram", "direction": "out", "count": 3},
                          {"channel": "email", "direction": "in", "count": 2}],
         }],
-        "products": [{"slug": "task-agent", "questions": ["Публиковать ли перенос?"],
-                      "effect": ["2026-08-06 — карта показывает ленту"]}],
+        "products": products or [{"slug": "task-agent", "questions": ["Публиковать ли перенос?"],
+                                  "effect": ["2026-08-06 — карта показывает ленту"],
+                                  "promises": ["2026-08-04 — ревью кода companion силами Claude"]}],
+        "owners_awake": [],
     }
 
 
@@ -366,7 +375,10 @@ class ObservedAttribution(unittest.TestCase):
 
     def test_a_plate_with_no_observed_executor_shows_no_executor(self):
         board = render.build_board(a_snapshot([a_task()]))
-        plate = board["panels"][0]["areas"][3]["plates"][0]
+        # By key, never by position: the areas are a contract that grew twice
+        # already, and an index silently pointed this test at another area.
+        area = next(a for a in board["panels"][0]["areas"] if a["key"] == "queued")
+        plate = area["plates"][0]
         self.assertIsNone(plate["actor"])
         self.assertIsNone(plate["role"])
 
@@ -522,7 +534,21 @@ class BoardLayout(unittest.TestCase):
     def test_the_areas_stand_in_the_order_of_urgency(self):
         board = render.build_board(a_snapshot())
         order = [area["key"] for area in board["panels"][0]["areas"]]
-        self.assertEqual(order, ["waiting_human", "running", "stuck", "queued", "done"])
+        self.assertEqual(order, ["waiting_human", "running", "stuck", "pickup",
+                                 "queued", "plan", "done"])
+
+    def test_what_can_be_picked_up_stands_above_what_is_held(self):
+        """The first question of a wake-up outranks the reference list below it.
+
+        «В очереди» used to be one area and answered neither «что можно
+        подхватить прямо сейчас» nor «за чем стоит остальное». Order is urgency
+        here, so the startable work stands above the held work, and both above
+        the promises nobody has made a task of yet.
+        """
+        order = list(schema.BOARD_AREAS)
+        self.assertLess(order.index("pickup"), order.index("queued"))
+        self.assertLess(order.index("queued"), order.index("plan"))
+        self.assertLess(order.index("plan"), order.index("done"))
 
     def test_the_area_waiting_for_a_person_is_present_even_when_empty(self):
         # It is the whole answer to one of the three acceptance questions: an
@@ -607,8 +633,18 @@ class BoardArea(unittest.TestCase):
     def test_a_finished_task_is_done_whatever_its_flags(self):
         self.assertEqual(state.board_area("completed", ["gap"], False), "done")
 
-    def test_nothing_happening_and_nothing_wrong_is_a_queue_not_work(self):
-        self.assertEqual(state.board_area("planned", ["idle"], False), "queued")
+    def test_nothing_holding_it_means_it_can_be_picked_up(self):
+        # This used to answer «в очереди», which is what the single queue area
+        # said about every idle task and is why «что можно подхватить прямо
+        # сейчас» had no answer at all. Nothing observably holding a task is the
+        # observation that it can be started now.
+        self.assertEqual(state.board_area("planned", ["idle"], False, None), "pickup")
+
+    def test_a_named_holder_puts_it_in_the_queue_behind_that_holder(self):
+        self.assertEqual(
+            state.board_area("planned", ["idle"], False,
+                             "репозиторий moex-strategy-lab занят живым прогоном задачи 783"),
+            "queued")
 
 
 class WaitingForAPerson(unittest.TestCase):
@@ -741,7 +777,7 @@ class JamReason(unittest.TestCase):
                               "world": render.build_world(a_snapshot(), []),
                               "built_at": "2026-08-06T12:00:00+00:00",
                               "live_url": None, "digest": "d"})
-        self.assertIn('why.textContent = "почему: " + p.why', html)
+        self.assertIn('p.why === p.blocked_by ? "стоит за: " : "почему: ") + p.why', html)
         self.assertIn('w.textContent = " — " + why', html)
 
     def test_the_strip_shows_only_the_jams_whose_reason_fits_whole(self):
@@ -904,6 +940,351 @@ class OfflineRecording(unittest.TestCase):
         # The timeline from the previous version stays, one button away.
         self.assertIn("Карта во времени", html)
         self.assertIn('sessionStorage.getItem("screen") !== "map"', html)
+
+
+def a_page(snapshot=None) -> str:
+    """The page as it is delivered, built from one snapshot."""
+    snapshot = snapshot or a_snapshot()
+    return render.render({"snapshot": snapshot, "timeline": [],
+                          "board": render.build_board(snapshot),
+                          "world": render.build_world(snapshot, []),
+                          "built_at": "2026-08-06T12:00:00+00:00",
+                          "live_url": None, "digest": "d"})
+
+
+class WorkOutsideDeadOwner(unittest.TestCase):
+    """Task 788, absorbed here: work that carried on after its owner died.
+
+    Observed twice before it was believed. On 757 the owner run ended at 08:28
+    with «2 of 20» published, the measurement finished in another process at
+    08:48, and the product owner found out at 12:00 by going to look by hand —
+    three and a half hours. On 712 the same thing. Both observers watched
+    `status.json` and `progress.json`, and both files stopped moving at the
+    moment there was nobody left to move them, so a silent tick was honest and
+    useless at once.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.addCleanup(self.tmp.cleanup)
+
+    def touch(self, name: str, when: float, body: str = "x") -> Path:
+        path = self.dir / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body)
+        os.utime(path, (when, when))
+        return path
+
+    def test_an_artifact_moving_is_observed_and_the_file_is_named(self):
+        self.touch("status.json", 1000, "{}")
+        self.touch("evidence/matrix-execution.json", 2000)
+        moved, age, src = state.artifact_movement(self.dir)
+        self.assertIsNotNone(moved)
+        self.assertIn("matrix-execution.json", src)
+        self.assertGreater(age, 0)
+
+    def test_the_run_s_own_bookkeeping_is_not_artifact_movement(self):
+        """Accepting a finished task rewrites `task.md`, and that is not work.
+
+        The first cut of this rule counted any mtime in the directory and fired
+        on eleven tasks, eight of which had simply been accepted by a person
+        afterwards. `status.json`, `progress.json`, `task.md` and `.runner/` are
+        precisely the files the old observer already watched, so counting them
+        would restate the old observation rather than add one.
+        """
+        self.touch("verification.md", 1000)
+        for bookkeeping in ("status.json", "progress.json", "task.md",
+                            "task_contract.json", ".runner/runner.json"):
+            self.touch(bookkeeping, 9000, "{}")
+        moved, _, src = state.artifact_movement(self.dir)
+        self.assertIn("verification.md", src)
+
+    def test_no_transcript_is_ever_looked_at(self):
+        self.touch("notes.md", 1000)
+        self.touch("transcripts/child.jsonl", 9000)
+        self.touch("session-transcript.txt", 9000)
+        _, _, src = state.artifact_movement(self.dir)
+        self.assertIn("notes.md", src)
+
+    def test_a_cloned_subject_does_not_make_one_task_fifty_times_dearer(self):
+        """A look must cost the same whatever happened inside the task.
+
+        Review 734 cloned its subject into the task directory and left 16 250
+        entries there, nearly all of them git objects and pytest caches. Walking
+        them would give that one task a look fifty times the price of any other,
+        which is the one property the contour requires a look not to have.
+        """
+        self.touch("findings.md", 1000)
+        for i in range(200):
+            self.touch(f"subject/.git/objects/{i:02x}/{i}", 9000)
+            self.touch(f"subject/.pytest_cache/v/{i}", 9000)
+        _, _, src = state.artifact_movement(self.dir)
+        self.assertIn("findings.md", src)
+
+    def test_the_refusal_the_contour_writes_itself_is_read(self):
+        # `completion_refusal.kind` has been in `status.json` all along, with
+        # the words «Work it started may have continued outside its process» in
+        # its summary, and nothing read it.
+        self.touch("status.json", 1000, json.dumps({
+            "state": "blocked",
+            "completion_refusal": {"kind": "owner_ended_after_incomplete_published_progress",
+                                   "summary": "Owner run ended before its closing step"}}))
+        run = state.run_state(self.dir)
+        self.assertEqual(run["refusal"], "owner_ended_after_incomplete_published_progress")
+        self.assertIn("closing step", run["refusal_summary"])
+
+    def test_the_flag_is_declared_and_puts_the_task_in_the_jam_area(self):
+        self.assertIn("work_outside_owner", schema.TASK_FLAGS)
+        self.assertEqual(state.board_area("planned", ["work_outside_owner"], False, None), "stuck")
+
+    def test_an_accepted_task_is_not_dragged_back_for_a_second_look(self):
+        # Somebody already looked at a terminal task and accepted it, so
+        # «сходите посмотрите артефакты» would ask for a decision to be retaken.
+        self.assertEqual(state.board_area("completed", ["work_outside_owner"], False, None), "done")
+
+
+class WhatCanBePickedUp(unittest.TestCase):
+    """The first question of every wake-up, which the board could not answer."""
+
+    def test_a_repository_held_by_a_live_run_is_the_named_holder(self):
+        entries = [{"id": 783, "title": "Живая", "flags": ["live"],
+                    "run": {"repo": "/opt/projects/moex-strategy-lab"}}]
+        busy = state.busy_repository_map(entries)
+        why, src = queue_why({"id": 722}, "/opt/projects/moex-strategy-lab", busy)
+        self.assertIn("moex-strategy-lab", why)
+        self.assertIn("783", why)
+        self.assertTrue(src.strip())
+
+    def test_a_task_is_not_held_by_its_own_live_run(self):
+        entries = [{"id": 783, "title": "Живая", "flags": ["live"],
+                    "run": {"repo": "/opt/projects/moex-strategy-lab"}}]
+        busy = state.busy_repository_map(entries)
+        why, _ = queue_why({"id": 783}, "/opt/projects/moex-strategy-lab", busy)
+        self.assertIsNone(why)
+
+    def test_a_dead_run_does_not_hold_a_repository(self):
+        entries = [{"id": 783, "title": "Мёртвая", "flags": ["idle"],
+                    "run": {"repo": "/opt/projects/moex-strategy-lab"}}]
+        self.assertEqual(state.busy_repository_map(entries), {})
+
+    def test_the_frontmatter_reason_is_a_holder_and_names_its_source(self):
+        why, src = state.queue_reason(
+            {"id": 686, "status_detail": "queued_behind_active_worktree_writers_669_689"},
+            {"repo": None}, {})
+        self.assertEqual(why, "queued_behind_active_worktree_writers_669_689")
+        self.assertIn("status_detail", src)
+
+    def test_a_holder_named_without_a_source_cannot_reach_the_board(self):
+        broken = a_snapshot([a_task(board={"blocked_by": "занят репозиторий",
+                                           "blocked_by_src": None})])
+        with self.assertRaises(schema.ContractError):
+            schema.validate_snapshot(broken)
+
+    def test_the_strip_answers_it_on_the_first_screen(self):
+        board = render.build_board(a_snapshot([a_task(board={"area": "pickup"})]))
+        self.assertEqual([p["id"] for p in board["pickup"]], [1])
+        self.assertIn("Что подхватить", a_page())
+
+    def test_the_area_says_by_what_rule_it_chose_its_contents(self):
+        # A heading is a claim; the rule behind it is narrower than the heading,
+        # and a reader who cannot see the rule reads the heading as a verdict.
+        page = a_page()
+        self.assertIn("ничто на диске эту задачу не держит", page)
+        self.assertIn("не названо ни одной задачи", page)
+
+
+def queue_why(task, repo, busy):
+    """`queue_reason` with the run reduced to the one field it reads."""
+    return state.queue_reason(task, {"repo": repo}, busy)
+
+
+class WhatNeedsPlanning(unittest.TestCase):
+    """The fourth question, and the two days it already cost.
+
+    «ревью кода companion силами Claude… Запрошено пользователем» stood in the
+    `## В работе` section of the product record for two days and never became a
+    task, because the flow had nowhere to put «надо запланировать».
+    """
+
+    def test_a_line_naming_a_task_is_not_an_unkept_promise(self):
+        self.assertEqual(state.unplanned([
+            "2026-08-05 — **`/task_index` в Max: код починен, но не выкачен (736)**"]), [])
+
+    def test_a_line_naming_no_task_is_one(self):
+        promise = "2026-08-04 — ревью кода companion силами Claude: код старый"
+        self.assertEqual(state.unplanned([promise]), [promise])
+
+    def test_a_struck_through_line_is_settled(self):
+        self.assertEqual(state.unplanned(["~~сделано и закрыто~~"]), [])
+
+    def test_the_promises_stand_in_their_own_area_and_are_counted_there(self):
+        board = render.build_board(a_snapshot())
+        area = next(a for a in board["panels"][0]["areas"] if a["key"] == "plan")
+        self.assertEqual(len(area["promises"]), 1)
+        self.assertEqual(area["count"], 1)
+        # No task can stand here: a promise with a task behind it is a task.
+        self.assertEqual(area["plates"], [])
+
+    def test_a_promise_of_a_product_no_direction_owns_is_not_invented_onto_a_panel(self):
+        snapshot = a_snapshot(products=[{"slug": "moex-strategy-lab", "questions": [],
+                                         "effect": [], "promises": ["чужое обещание"]}])
+        board = render.build_board(snapshot)
+        area = next(a for a in board["panels"][0]["areas"] if a["key"] == "plan")
+        self.assertEqual(area["promises"], [])
+
+
+class TheOtherProductOwner(unittest.TestCase):
+    """The sixth question: two instances of the product owner, one queue.
+
+    On 2026-08-06 the owner in the chat and the owner woken by
+    `product-thread@<тред>.timer` created two pairs of duplicate tasks —
+    790/792 and 791/793 — within the hour, because neither could see the
+    other's queue.
+    """
+
+    def test_a_named_instance_without_an_observation_is_refused(self):
+        broken = a_snapshot()
+        broken["owners_awake"] = [{"thread": "moex", "since": "2026-08-06T12:00:00+00:00",
+                                   "age_seconds": 60, "src": "  "}]
+        with self.assertRaises(schema.ContractError):
+            schema.validate_snapshot(broken)
+
+    def test_it_is_observed_from_a_command_line_and_never_from_a_transcript(self):
+        source = Path(state.__file__).read_text()
+        body = source[source.index("def owner_wakeups"):source.index("def build(")]
+        self.assertIn("/proc", body + str(state.PROC))
+        for forbidden in ("transcript", "session.jsonl", ".claude/projects"):
+            self.assertNotIn(forbidden, body)
+
+    def test_this_very_wake_up_mechanism_is_the_one_observed(self):
+        # Whatever else changes, the thing being looked for is the tick script,
+        # because that is what the timer starts.
+        self.assertIn("thread_tick.py", Path(state.__file__).read_text())
+
+    def test_the_strip_warns_before_a_task_is_created_not_after(self):
+        snapshot = a_snapshot()
+        snapshot["owners_awake"] = [{"thread": "moex", "since": "2026-08-06T12:00:00+00:00",
+                                     "age_seconds": 60, "src": "командная строка процесса в /proc"}]
+        board = render.build_board(snapshot)
+        self.assertEqual(len(board["owners_awake"]), 1)
+        self.assertIn("не заводите задачу, не посмотрев его очередь", a_page(snapshot))
+
+
+class DrillDown(unittest.TestCase):
+    """Opening a plate without leaving the page, and without a second door in."""
+
+    def test_the_card_travels_with_the_plate_and_fetches_nothing(self):
+        # The page has no way to reach a disk and must not grow one: a card that
+        # fetched its own detail would be a second door past the boundary the
+        # whole split exists to hold.
+        page = a_page()
+        body = page[page.index("if (DATA.live_url)"):]
+        self.assertEqual(page.count("fetch("), body.count("fetch("))
+        self.assertIn("function openCard", page)
+        self.assertNotIn("fetch(", page[page.index("function openCard"):page.index("function closeCard")])
+
+    def test_everything_the_user_asked_the_card_for_is_on_it(self):
+        page = a_page()
+        for asked in ("Вердикт ревью", "Гейты verification.md",
+                      "Последняя запись прогресса", "Прогон",
+                      "Доставлено человеку", "Движение артефактов",
+                      "Файлы каталога задачи"):
+            self.assertIn(asked, page, asked)
+
+    def test_the_card_lists_names_and_never_content(self):
+        page = a_page()
+        self.assertIn("содержимое не читается, транскрипты не показываются", page)
+
+    def test_the_detail_a_collector_produces_is_the_detail_the_card_expects(self):
+        detail = render.plate(a_task())["detail"]
+        for field in schema.DETAIL_FIELDS:
+            self.assertIn(field, detail)
+        for field in ("gates", "repo", "progress", "refusal", "workflow"):
+            self.assertIn(field, detail)
+
+    def test_a_movement_named_without_a_source_is_refused(self):
+        broken = a_snapshot([a_task(detail={"moved": "2026-08-06T12:00:00+00:00",
+                                            "moved_src": None})])
+        with self.assertRaises(schema.ContractError):
+            schema.validate_snapshot(broken)
+
+
+class LiveWithoutLosingThePlace(unittest.TestCase):
+    def test_a_refresh_redraws_in_place_instead_of_reloading(self):
+        """`location.reload()` is right for a picture and wrong for a tool.
+
+        Live mode polls every ten seconds, so a reload throws away the open
+        card, the scroll position and the fold state of every area each time a
+        repository somewhere else goes dirty — that is, it interrupts the person
+        reading a task in order to show them something they were not looking at.
+        """
+        page = a_page()
+        self.assertIn("applyFresh(fresh)", page)
+        self.assertNotIn("location.reload()", page)
+
+    def test_the_open_card_survives_a_refresh_on_the_same_task(self):
+        page = a_page()
+        redraw = page[page.index("function applyFresh"):page.index("/* ---------- two screens")]
+        self.assertIn("p.task === wanted", redraw)
+        self.assertIn("else closeCard()", redraw)
+
+    def test_an_age_that_merely_ticks_does_not_trigger_a_redraw(self):
+        # Every derived age has to be out of the digest or live mode redraws
+        # every ten seconds forever and says nothing.
+        self.assertIn("moved_age_seconds", render.TICKING)
+        data = {"snapshot": a_snapshot([a_task(
+            detail={"moved": "2026-08-06T12:00:00+00:00", "moved_src": "mtime",
+                    "moved_age_seconds": 10})])}
+        other = {"snapshot": a_snapshot([a_task(
+            detail={"moved": "2026-08-06T12:00:00+00:00", "moved_src": "mtime",
+                    "moved_age_seconds": 900})])}
+        self.assertEqual(render.without_ticking(data), render.without_ticking(other))
+
+
+class OneObserver(unittest.TestCase):
+    """Two observers of one disk is why there was no trustworthy source.
+
+    `thread_state.py` had its own `pid_alive`, its own reader of `status.json`
+    and `progress.json`, its own `repo_state` and its own idea of «требует
+    внимания». The wake-up and the board could therefore disagree about
+    liveness, freshness and status, and neither could be checked against the
+    other because neither was the original.
+    """
+
+    def source(self) -> str:
+        return Path(state.HOME / "scripts" / "thread_state.py").read_text()
+
+    def test_the_wake_up_reads_the_collector_rather_than_the_disk(self):
+        source = self.source()
+        self.assertIn("import process_map_state as observer", source)
+        self.assertIn("observer.build(False, only=name)", source)
+
+    def test_there_is_no_second_answer_to_whether_a_process_is_alive(self):
+        # `os.kill(pid, 0)` answers «some process holds this number», and PIDs
+        # are reused: after a wrap an unrelated process counted as a live run.
+        source = self.source()
+        self.assertNotIn("os.kill", source)
+        self.assertNotIn("def pid_alive", source)
+
+    def test_there_is_no_second_reader_of_the_run_files(self):
+        source = self.source()
+        for gone in ("status.json", "progress.json", "runner.json"):
+            self.assertNotIn(f'/ "{gone}"', source)
+
+    def test_there_is_no_second_git_reader(self):
+        self.assertNotIn("subprocess.run", self.source())
+
+    def test_one_direction_can_be_observed_without_paying_for_four(self):
+        # A wake-up asks about one thread and must pay for one thread, or the
+        # single observer would make every tick four times dearer.
+        source = Path(state.__file__).read_text()
+        self.assertIn("def build(anonymize: bool, only: str | None = None)", source)
+        self.assertIn("if only and key != only:", source)
+
+    def test_an_unknown_thread_is_still_refused_loudly(self):
+        with self.assertRaises(SystemExit):
+            state.build(False, only="no-such-thread")
 
 
 if __name__ == "__main__":
