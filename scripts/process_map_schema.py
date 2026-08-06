@@ -32,7 +32,11 @@ SCHEMA_VERSION = 1
 
 SNAPSHOT_FIELDS = ("schema_version", "mode", "threads", "products", "owners_awake")
 THREAD_FIELDS = ("key", "title", "products", "task_count", "tasks", "repos", "channels")
-TASK_FIELDS = ("id", "title", "status", "dir", "run", "gates", "flags", "board", "detail")
+TASK_FIELDS = ("id", "title", "status", "dir", "run", "gates", "flags", "board", "detail",
+               # Whose question it is, kept apart in the document rather than
+               # rederived by every reader: the areas, the counter above the
+               # columns and the tests must not be able to disagree about it.
+               "questions", "asked_user", "our_questions")
 # `alive_src` says what answered the liveness question, on the same rule as
 # `actor_src`: a run called live has to name what said so, and the answer now
 # comes from the runner that recorded the process rather than from the existence
@@ -57,23 +61,27 @@ MODES = ("demo", "real")
 # and always visible is the whole answer to one of the three acceptance
 # questions, so a renderer may not reorder it silently.
 BOARD_AREAS = (
-    "waiting_human",  # a person has to decide; shown even when empty
+    "waiting_human",  # the *user* was asked in writing and has not answered
     "running",        # a process is alive right now
     "stuck",          # a dead run under a living label, a kill, a failed gate
+    "undelivered",    # finished, a document exists, nothing observed it delivered
+    "product_owner",  # our own open question: the product owner owes the answer
     "pickup",         # nothing running, nothing observably holding it: start it
     "queued",         # held by something named, and the name is next to it
     "plan",           # promised in a product record and never made a task
-    "done",           # terminal
+    "done",           # terminal, and the result reached a person
 )
 
 BOARD_AREA_RU = {
-    "waiting_human": "Ждёт решения человека",
+    "waiting_human": "Ждёт решения пользователя",
     "running": "В работе сейчас",
     "stuck": "Затор",
+    "undelivered": "Сделано, но не доставлено",
+    "product_owner": "Решает продакт",
     "pickup": "Можно подхватить",
     "queued": "В очереди, за чем стоит",
     "plan": "Надо запланировать",
-    "done": "Сделано",
+    "done": "Сделано и доставлено",
 }
 
 # `pickup` stands above `queued` on purpose, and both were one area called «в
@@ -86,6 +94,32 @@ BOARD_AREA_RU = {
 # which no task could be observed — the place where «посмотреть код companion»
 # stood for two days because the flow had nowhere to put «надо запланировать».
 AREAS_WITHOUT_TASKS = ("plan",)
+
+# `waiting_human` and `product_owner` are one split, not two independent areas,
+# and the split is the whole of Part 1 of task 817: on the live state of
+# 2026-08-06 the first area held sixteen entries and the user owned three of
+# them. The other thirteen were our own product decisions, questions to an
+# executor, a repair already shipped, and questions the user had answered in
+# writing. Nothing is hidden by the split — everything that left the first area
+# stands in the second, in front of the person who actually owes the decision.
+#
+# Which side a question falls on is decided in `process_map_state.question_entry`
+# and nowhere else. Two observations: a written mark that the question went to
+# the user, with the date, the channel and the identifier of the message; and no
+# answer observed since, neither a letter of the user in the same thread nor a
+# decision written into the line.
+#
+# `undelivered` is Part 3, and it exists because a task can be finished and its
+# result still never seen: 783 left a 441 KB report in `deliverables/` and sent
+# two receipts, both about the life of the run.
+OWED_BY = ("user", "product")
+
+# One open question, wherever it was written down. `asked_src` is required of a
+# question owed by the user, on the same rule as `actor_src`: an area that tells
+# a person they are blocking work has to be able to say what put the question in
+# front of them and when.
+QUESTION_FIELDS = ("text", "owner", "asked_at", "channel", "ref",
+                   "asked_src", "answer_src", "note")
 
 # One line of that area. `checked` says what the line was compared against, and
 # it is required for the same reason `actor_src` is: the area may report a failed
@@ -116,7 +150,15 @@ BOARD_FIELDS = ("area", "actor", "actor_src", "role", "role_src",
 # went looking for its own detail would be a second door past the boundary the
 # split exists to hold. Everything here is a name, a count or a verdict already
 # written down — no child transcript is read to build it.
-DETAIL_FIELDS = ("review", "delivery", "files", "moved", "moved_age_seconds", "moved_src")
+DETAIL_FIELDS = ("review", "delivery", "files", "moved", "moved_age_seconds", "moved_src",
+                 # The document made for a person and whether anything observed
+                 # it reaching them. `None` means the task made no document.
+                 "handoff")
+
+# What a handoff observation has to carry. `delivered_src` is required whichever
+# way it came out: «доставлено» and «не доставлено» are both claims about the
+# world, and the area that prints them has to say what it read.
+HANDOFF_FIELDS = ("name", "bytes", "count", "src", "delivered", "delivered_src")
 
 # Task flags promised to the renderer. Each one has to be visible as a shape on
 # the map, so adding a flag here is a change to the picture, not only to data.
@@ -180,6 +222,26 @@ def _require(payload: dict, fields, where: str) -> None:
         raise ContractError(f"{where}: отсутствуют поля {missing}")
 
 
+def validate_question(question: dict, where: str) -> dict:
+    """Check one open question; return it unchanged or raise ContractError.
+
+    A question owed by the user carries the mark that put it in front of them.
+    Without that the area is back to what it was: a list of everything the
+    contour had written down anywhere, presented to a person as their debt.
+    """
+    if not isinstance(question, dict):
+        raise ContractError(f"{where}: ожидался объект с владельцем, а не строка")
+    _require(question, QUESTION_FIELDS, where)
+    if question["owner"] not in OWED_BY:
+        raise ContractError(f"{where}: владелец {question['owner']!r}")
+    if not str(question["text"]).strip():
+        raise ContractError(f"{where}: пустой текст")
+    if question["owner"] == "user" and not str(question["asked_src"] or "").strip():
+        raise ContractError(f"{where}: вопрос отнесён пользователю, "
+                            "но не сказано, чем наблюдено, что его спросили")
+    return question
+
+
 def validate_snapshot(snapshot: dict) -> dict:
     """Check a collector snapshot; return it unchanged or raise ContractError."""
     if not isinstance(snapshot, dict):
@@ -224,6 +286,23 @@ def validate_snapshot(snapshot: dict) -> dict:
             unknown = [flag for flag in task["flags"] if flag not in TASK_FLAGS]
             if unknown:
                 raise ContractError(f"{where}: неизвестные флаги {unknown}")
+            for question in task["questions"]:
+                validate_question(question, f"{where}: вопрос")
+            # The split is data, so it has to agree with the questions it was
+            # split from. Two lists that can drift are two answers to «чей это
+            # вопрос», and the area exists precisely because that answer was
+            # wrong for thirteen of sixteen entries.
+            for owner, field in (("user", "asked_user"), ("product", "our_questions")):
+                mine = [q for q in task["questions"] if q.get("owner") == owner]
+                if task[field] != mine:
+                    raise ContractError(
+                        f"{where}: {field} расходится с разбором questions по владельцу")
+            hand = task["detail"].get("handoff")
+            if hand is not None:
+                _require(hand, HANDOFF_FIELDS, f"{where}: документ человеку")
+                if not str(hand["delivered_src"]).strip():
+                    raise ContractError(
+                        f"{where}: доставка названа, но не сказано, чем наблюдена")
         for repo in thread["repos"]:
             _require(repo, REPO_FIELDS, f"репозиторий {repo.get('name')!r}")
         for channel in thread["channels"]:
@@ -234,7 +313,14 @@ def validate_snapshot(snapshot: dict) -> dict:
                 raise ContractError(f"канал: направление {channel['direction']!r}")
 
     for product in snapshot["products"]:
-        _require(product, ("slug", "questions", "effect", "promises"), "продукт")
+        _require(product, ("slug", "questions", "own_questions", "effect", "promises"), "продукт")
+        for owner, field in (("user", "questions"), ("product", "own_questions")):
+            for question in product[field]:
+                validate_question(question, f"вопрос продукта {product['slug']!r}")
+                if question["owner"] != owner:
+                    raise ContractError(
+                        f"вопрос продукта {product['slug']!r}: лежит в {field}, "
+                        f"а владелец {question['owner']!r}")
         for promise in product["promises"]:
             where = f"строка «В работе» продукта {product['slug']!r}"
             if not isinstance(promise, dict):

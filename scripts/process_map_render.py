@@ -173,11 +173,12 @@ def build_world(snapshot: dict, timeline: list[dict]) -> dict:
         index = by_product.get(product["slug"])
         if index is None:
             continue
-        areas[index].setdefault("questions", []).extend(product["questions"])
+        areas[index].setdefault("questions", []).extend(
+            q["text"] for q in product["questions"])
     for area in areas:
         area.setdefault("questions", [])
 
-    waiting = [{"text": question, "src": product["slug"]}
+    waiting = [{"text": question["text"], "src": product["slug"]}
                for product in snapshot["products"] for question in product["questions"]]
     done = [{"text": entry, "src": product["slug"]}
             for product in snapshot["products"] for entry in product["effect"]]
@@ -205,6 +206,9 @@ JAMS_IN_STRIP = 4
 # «Что подхватить» is a shortlist to choose from, not a catalogue: the whole
 # area stands in the columns below and the strip says how many it left there.
 PICKUP_IN_STRIP = 3
+# «Сделано, но не доставлено» is a shortlist too: the point is that the person
+# learns such a thing exists at all, and the area below carries the rest.
+UNDELIVERED_IN_STRIP = 3
 
 # Characters of name plus reason one strip group may take. The count is the whole
 # mechanism that keeps the strip short: the page shows every reason it prints in
@@ -285,6 +289,12 @@ def plate(task: dict) -> dict:
         "stale_label": "stale_label" in task["flags"],
         "attempt": board["attempt"],
         "questions": task.get("questions") or [],
+        # Kept apart on the plate for the same reason they are kept apart in the
+        # document: «спросили тебя и ты не ответил» and «мы ещё не решили» are
+        # two sentences, and merging them is what put thirteen of our own
+        # questions in front of the user.
+        "asked_user": task.get("asked_user") or [],
+        "our_questions": task.get("our_questions") or [],
         "flags": task["flags"],
         # What is holding a queued task. «В очереди» on its own is a label; the
         # user asked for «за чем именно стоит», and the answer is observed.
@@ -318,8 +328,8 @@ def board_age(tasks: list[dict]) -> int | None:
     return max(ages) if ages else None
 
 
-def product_questions(snapshot: dict, thread: dict) -> list[dict]:
-    """The canonical questions of the products this direction owns.
+def product_questions(snapshot: dict, thread: dict, owner: str = "user") -> list[dict]:
+    """The canonical questions of the products this direction owns, by owner.
 
     `## Открытые вопросы` of a product is the one place written specifically to
     hold questions for the user, and the board used to ignore it completely: the
@@ -331,11 +341,16 @@ def product_questions(snapshot: dict, thread: dict) -> list[dict]:
     added into the same count. A question is a question wherever it was written
     down; two competing counters of one concept would be the defect again under
     a nicer name.
+
+    Which area, though, depends on who owes the answer, and the collector has
+    already decided that — `questions` are the user's, `own_questions` are ours.
+    This function only carries the decision to the panel that owns the product.
     """
     mine = set(thread.get("products") or [])
-    return [{"text": question, "product": product["slug"]}
+    field = "questions" if owner == "user" else "own_questions"
+    return [{**question, "product": product["slug"]}
             for product in snapshot["products"] if product["slug"] in mine
-            for question in product["questions"]]
+            for question in product[field]]
 
 
 def product_promises(snapshot: dict, thread: dict) -> list[dict]:
@@ -370,7 +385,8 @@ def build_board(snapshot: dict) -> dict:
     panels = []
     for thread in snapshot["threads"]:
         plates = [plate(task) for task in thread["tasks"]]
-        questions = product_questions(snapshot, thread)
+        questions = product_questions(snapshot, thread, "user")
+        ours = product_questions(snapshot, thread, "product")
         promises = product_promises(snapshot, thread)
         areas = []
         for key in BOARD_AREAS:
@@ -380,9 +396,17 @@ def build_board(snapshot: dict) -> dict:
             # the instant rather than on the age derived from it — the age is a
             # rounded number of seconds, so two plates a fraction apart would
             # swap places between two collections and look like a change.
-            mine.sort(key=lambda p: (p["since"] or "9999", -(p["id"] or 0)))
+            mine.sort(key=lambda p: (p["since"] or "9999", -(p["id"] or 0)),
+                      # «Сделано, но не доставлено» is the one area where time in
+                      # the state is not the problem: an old finished task was
+                      # either handed over some other way or has stopped
+                      # mattering, and the document somebody is waiting for right
+                      # now is the freshest one. So this area alone reads newest
+                      # first, and the strip below sorts it the same way.
+                      reverse=key == "undelivered")
             shown = mine[:PER_BOARD_AREA]
-            asked = questions if key == "waiting_human" else []
+            asked = questions if key == "waiting_human" else (
+                ours if key == "product_owner" else [])
             # «Надо запланировать» carries no tasks by construction: a line with
             # an observed task behind it is that task and stands in one of the
             # areas above. The area is the only one whose whole content is text
@@ -432,6 +456,10 @@ def build_board(snapshot: dict) -> dict:
             if area["key"] == "pickup":
                 pickup += [{**p, "thread": panel["title"]} for p in area["plates"]]
     waiting_areas = [a for p in panels for a in p["areas"] if a["key"] == "waiting_human"]
+    ours_areas = [a for p in panels for a in p["areas"] if a["key"] == "product_owner"]
+    undelivered = [{**p, "thread": panel["title"]}
+                   for panel in panels for a in panel["areas"]
+                   if a["key"] == "undelivered" for p in a["plates"]]
     now_shown, now_hidden = strip_group(now, NOW_IN_STRIP)
     jams_shown, jams_hidden = strip_group(
         sorted(jams, key=lambda p: -(p["age_seconds"] or 0)), JAMS_IN_STRIP)
@@ -439,6 +467,10 @@ def build_board(snapshot: dict) -> dict:
     # likely to have been forgotten, which is the whole reason the area exists.
     pickup_shown, pickup_hidden = strip_group(
         sorted(pickup, key=lambda p: -(p["age_seconds"] or 0)), PICKUP_IN_STRIP)
+    # Newest first, unlike every other group: see the sort in the area above.
+    undelivered_shown, undelivered_hidden = strip_group(
+        sorted(undelivered, key=lambda p: (p["since"] or ""), reverse=True),
+        UNDELIVERED_IN_STRIP)
     return {
         "panels": panels,
         "areas": [{"key": k, "title": BOARD_AREA_RU[k]} for k in BOARD_AREAS],
@@ -463,6 +495,18 @@ def build_board(snapshot: dict) -> dict:
         "waiting": sum(a["count"] for a in waiting_areas),
         "waiting_tasks": sum(len(a["plates"]) + a["hidden"] for a in waiting_areas),
         "waiting_questions": sum(len(a["questions"]) for a in waiting_areas),
+        # Ours, counted next to theirs on the same line. The split has to be
+        # visible as a split: a number that merely got smaller reads as questions
+        # having been dropped, and they were not — they moved to the area of the
+        # person who owes them.
+        "ours": sum(a["count"] for a in ours_areas),
+        # Finished work whose document nobody was shown. The strip names it
+        # because an hour of a 441 KB report lying on the server is exactly what
+        # nobody was looking at (task 783).
+        "undelivered": undelivered_shown,
+        "undelivered_hidden": undelivered_hidden,
+        "undelivered_total": sum(a["count"] for p in panels for a in p["areas"]
+                                 if a["key"] == "undelivered"),
     }
 
 

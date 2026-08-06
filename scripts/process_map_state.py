@@ -35,6 +35,7 @@ import subprocess
 import sys
 import time
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 
 from process_map_schema import SCHEMA_VERSION, STATIONS, scrub, validate_snapshot
@@ -48,6 +49,8 @@ TASKS_INDEX = REPO / "skills" / "task-creator" / "scripts" / "tasks_index.py"
 RUNNER_SCRIPTS = REPO / "skills" / "task-runner" / "scripts"
 PYTHON = REPO / ".venv" / "bin" / "python"
 MAIL_ROOT = REPO / ".state" / "gmail" / "product-owner"
+MAIL_INBOX = MAIL_ROOT / "inbox"
+MAIL_SENT = MAIL_ROOT / "sent"
 
 # Terminal statuses never carry a live figure on the map, however loud the label.
 TERMINAL = {"completed", "cancelled", "superseded"}
@@ -494,6 +497,116 @@ def delivery(task_dir: Path) -> dict | None:
             "src": "dev-pipeline/notification-receipts.jsonl"}
 
 
+# ---------------------------------------------------------------------------
+# «Сделано, но человеку не показано»
+# ---------------------------------------------------------------------------
+#
+# Task 783 finished at 16:14 with a 441 KB report for the user in its
+# `deliverables/`, and the report sat on the server for about an hour. Nothing
+# was broken: the run had sent its receipts, and both of them were about the
+# life of the run — «работа началась» and «работа кончилась». The result itself
+# was never sent, and nobody noticed until the user said «по выполненным задачам
+# я не видел документов в почте или в телеграме».
+#
+# That is exactly the gap this area watches, and it is observable without
+# reading a single document: a finished task, a file made for a person, and no
+# receipt that the person got it.
+
+# What the run's own notifications say. Every receipt in the whole repository is
+# one of these — 117 `attempt_started`, 73 `attempt_completed`, 41
+# `attempt_completed_rejected`, 2 `attempt_failed` — so «квитанция есть» has
+# never once meant «документ доставлен». A kind outside this set is about
+# something other than the life of the run and is taken as delivery evidence,
+# because refusing to believe an unknown receipt would be inventing an alarm.
+LIFECYCLE_RECEIPTS = frozenset({
+    "attempt_started", "attempt_completed", "attempt_completed_rejected",
+    "attempt_failed", "run_started", "run_completed", "run_failed",
+    "process_started", "native_session_discovered", "checkpoint_completed",
+    "increment_completed", "increment_ready_for_review", "review_started",
+    "review_completed", "blocked_on_user_decision",
+})
+
+# The manifest lists the deliverables; it is not itself a document for a person.
+NOT_A_DOCUMENT = {"manifest.json"}
+
+
+def human_document(task_dir: Path) -> dict | None:
+    """A file this task made for a person, by name and size and nothing else.
+
+    Two places, both named by the task: anything in `deliverables/`, and an
+    `*.html` at the top of the task directory — the shape a report has when a
+    run wrote it straight into its own directory. No file is opened.
+    """
+    found: list[Path] = []
+    box = task_dir / "deliverables"
+    if box.is_dir():
+        try:
+            found += [p for p in sorted(box.iterdir())
+                      if p.is_file() and p.name not in NOT_A_DOCUMENT]
+        except OSError:
+            pass
+    try:
+        found += sorted(task_dir.glob("*.html"))
+    except OSError:
+        pass
+    if not found:
+        return None
+    biggest = max(found, key=lambda p: p.stat().st_size if p.exists() else 0)
+    try:
+        size = biggest.stat().st_size
+    except OSError:
+        size = None
+    return {"name": str(biggest.relative_to(task_dir)), "bytes": size,
+            "count": len(found),
+            "src": "файл в deliverables/ или *.html в каталоге задачи"}
+
+
+def delivery_receipt(task_dir: Path) -> dict | None:
+    """A receipt about a document rather than about the life of the run."""
+    path = task_dir / "dev-pipeline" / "notification-receipts.jsonl"
+    try:
+        text = path.read_text()
+    except OSError:
+        return None
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        kind = payload.get("kind")
+        if kind and kind not in LIFECYCLE_RECEIPTS and payload.get("message_id"):
+            return {"kind": kind, "at": payload.get("recorded_at")}
+    return None
+
+
+def handoff(task_dir: Path) -> dict | None:
+    """Whether the document this task made ever reached a person, and what said so.
+
+    Nothing made for a person means nothing to hand over, and the task is not in
+    this area at all. Where there is a document, exactly two observations can
+    close it: the delivery note the contour writes itself, and a receipt that is
+    not one of the run's own lifecycle events.
+    """
+    document = human_document(task_dir)
+    if not document:
+        return None
+    note = task_dir / "delivery.md"
+    if note.is_file():
+        return {**document, "delivered": True,
+                "delivered_src": "файл delivery.md в каталоге задачи"}
+    receipt = delivery_receipt(task_dir)
+    if receipt:
+        return {**document, "delivered": True,
+                "delivered_src": f"квитанция {receipt['kind']} с идентификатором сообщения "
+                                 f"в dev-pipeline/notification-receipts.jsonl"}
+    return {**document, "delivered": False,
+            "delivered_src": "delivery.md нет, а квитанции задачи несут только события "
+                             "жизненного цикла прогона — доставки документа среди них нет"}
+
+
 # Entries of the task directory the card lists. Names, sizes and mtimes only:
 # opening any of them would be reading the work rather than observing it, and a
 # transcript must not be listed at all.
@@ -523,33 +636,44 @@ def task_files(task_dir: Path) -> list[dict]:
     return entries[:FILES_ON_CARD]
 
 
-def board_area(status: str | None, flags: list[str], has_questions: bool,
-               blocked_by: str | None = None) -> str:
+def board_area(status: str | None, flags: list[str], asked_user: bool,
+               blocked_by: str | None = None, ours: bool = False,
+               undelivered: bool = False) -> str:
     """Which area of the board a task stands in. One rule, one owner.
 
-    `has_questions` means a question is open *and still unanswered* — see
-    `pending_questions`, which owns that judgement. It used to mean «the
-    Open Questions heading has any bullet under it», and `blocked` was accepted
-    as a second, silent synonym for waiting on a person, which put technical
-    blockages, an already-migrated repair, a bullet saying there is no choice to
-    make and a question answered in its own sentence under «ждёт решения
-    человека» (finding HIGH-1 of review 786).
+    `asked_user` means a question was put to the user in writing and no answer
+    has been observed since — see `question_entry`, which owns that judgement. It
+    used to mean «any open question at all», and `blocked` was accepted as a
+    second, silent synonym for waiting on a person; between them they put
+    technical blockages, an already-migrated repair, our own product decisions
+    and questions the user had answered in writing under «ждёт решения человека»
+    (finding HIGH-1 of review 786, and the user's own count of 2026-08-06: of
+    sixteen entries, three were his).
 
-    A blocked task is now what it is: work that stands and cannot move — a jam,
-    with its reason next to it. Someone may well have to unblock it, but that is
-    not the same statement as «a person owes an answer», and the board answers
-    the second question, not the first.
+    A blocked task is what it is: work that stands and cannot move — a jam, with
+    its reason next to it. Our own open question is what it is too: a decision
+    the product owner owes, standing in «Решает продакт» where the person who
+    owes it will see it.
+
+    A finished task whose document never reached anyone is not «Сделано». It is
+    the case of 783 — a 441 KB report that lay on the server for an hour behind
+    two receipts about the life of the run — and it gets its own area.
     """
     if status in TERMINAL:
-        return "done"
-    # A person owing an answer comes first: it is the whole of one acceptance
+        return "undelivered" if undelivered else "done"
+    # The user owing an answer comes first: it is the whole of one acceptance
     # question, and an answer nobody gives blocks everything behind it.
-    if has_questions:
+    if asked_user:
         return "waiting_human"
     if "live" in flags:
         return "running"
     if {"stale_label", "killed", "gap", "blocked", "work_outside_owner"} & set(flags):
         return "stuck"
+    # Our own question stands below the live run and the jam — those are facts
+    # about the work, and this is a fact about a decision — but above «можно
+    # подхватить»: a task nobody has decided about is not free to start.
+    if ours:
+        return "product_owner"
     # Everything below used to be one area called «в очереди», which answered
     # neither of the two questions a person actually opens the board with.
     # «Что можно подхватить прямо сейчас» is the first question of every
@@ -666,8 +790,8 @@ def open_questions(task_dir: Path) -> list[str]:
     return [item for item in items if item.lower() not in {"none", "нет"}]
 
 
-def pending_questions(items: list[str]) -> list[str]:
-    """The one owner of «a person still owes an answer here».
+def unsettled_questions(items: list[str]) -> list[str]:
+    """Bullets that ask something and are not settled in their own sentence.
 
     A heading is a place, not a claim. `## Open Questions` holds whatever its
     author put there, and in this contour that includes notes with no question in
@@ -676,17 +800,197 @@ def pending_questions(items: list[str]) -> list[str]:
     the heading counted all three as people-blocking work (finding HIGH-1 of
     review 786).
 
-    What is observable in the text itself is exactly two things: whether it asks
-    anything, and whether the answer is already written next to it. Both are used
-    here and nowhere else — the collector, the board, the counter above the
-    columns and the tests all come through this function, so «ждёт решения
-    человека» has one meaning on the whole screen.
+    This answers «is this an open question at all», and that is all it answers.
+    Whose question it is — the user's or ours — is a second question with a second
+    owner, `question_entry`, because the two used to be one and the board read
+    every open question of ours as work the user was blocking.
     """
     return [item for item in items
             if "?" in item and not ANSWERED_HERE.search(item) and STRUCK not in item]
 
 
-def task_entry(task: dict) -> dict:
+# ---------------------------------------------------------------------------
+# «Ждёт решения человека» обязано значить «ждёт пользователя»
+# ---------------------------------------------------------------------------
+#
+# The area used to hold every open question the contour had written down
+# anywhere, and on the live state of 2026-08-06 it held sixteen entries of which
+# three belonged to the user. The other thirteen were our own product decisions,
+# questions to an executor about their environment, a repair already made, and
+# questions the user had already answered in writing. A board that tells a person
+# they are blocking thirteen things they never saw is worse than a board with no
+# such area: it was contradicted by the same contour's own letters, which told
+# the user nothing was required of them.
+#
+# So the area is bounded by two observations and nothing else, both taken from
+# text and files rather than from a heading:
+#
+#   1. the question carries a written mark that it went to the user, with the
+#      date and the channel it went through, and the identifier of the message;
+#   2. no answer has been observed since — neither a letter from the user in that
+#      same thread, nor a decision recorded in the product record itself.
+#
+# Everything else is ours. It is not hidden: it stands in its own area, «Решает
+# продакт», next to the person who actually owes the decision.
+
+ASKED = re.compile(
+    r"спрошено\s+у\s+пользовател\w*\s+(\d{4}-\d{2}-\d{2})\s*,\s*"
+    r"(письм\w*|почт\w*|telegram|телеграм\w*)\s*[«\"'`]*\s*([0-9A-Za-z_-]{2,})",
+    re.IGNORECASE)
+
+# The user's own answer, written into the line by whoever read it. The product
+# records already close a question this way — «**Закрыт 2026-08-06 письмом
+# пользователя**» — so the convention is honoured rather than replaced.
+ANSWERED_BY_USER = re.compile(
+    r"(?:закрыт\w*|отвеч\w*|уточн\w*)[^.\n]{0,80}?пользовател", re.IGNORECASE)
+
+EMAIL_WORDS = ("письм", "почт")
+
+
+def asked_of_user(text: str) -> dict | None:
+    """The written mark that this question was put to the user, and what it says.
+
+    Date, channel and message identifier or nothing. A question without the mark
+    is not «probably asked»: it is ours, and the board says so.
+    """
+    match = ASKED.search(text)
+    if not match:
+        return None
+    at, channel, ref = match.group(1), match.group(2).lower(), match.group(3)
+    kind = "email" if channel.startswith(EMAIL_WORDS) else "telegram"
+    return {"at": at, "channel": kind, "ref": ref,
+            "src": f"пометка «спрошено у пользователя {at}, "
+                   f"{'письмо' if kind == 'email' else 'Telegram'} {ref}» в самой строке"}
+
+
+def thread_key(subject: str) -> str:
+    """One name for a mail thread, whatever prefix a client put in front of it."""
+    text = subject or ""
+    while True:
+        stripped = re.sub(r"^\s*(re|fwd|fw|пересылка|отв)\s*(\[\d+\])?\s*:\s*", "",
+                          text, flags=re.IGNORECASE)
+        if stripped == text:
+            break
+        text = stripped
+    return normal(text)
+
+
+def mail_message(path: Path) -> dict | None:
+    """One stored message: its identifier, its thread and when it arrived."""
+    payload = read_json(path / "metadata.json")
+    if not payload.get("message_id"):
+        return None
+    try:
+        at = parsedate_to_datetime(payload.get("date") or "")
+    except (TypeError, ValueError):
+        at = None
+    if at is not None and at.tzinfo is None:
+        at = at.replace(tzinfo=timezone.utc)
+    return {"id": payload["message_id"], "thread": thread_key(payload.get("subject") or ""),
+            "at": at, "subject": payload.get("subject") or ""}
+
+
+def mailbox() -> dict:
+    """The product owner's mail as two facts: which thread a message is in, and
+    when the user last wrote into each thread.
+
+    Read once per snapshot from `metadata.json` files that are already on disk —
+    no network, no message body, and the same cost whatever was discussed. `sent`
+    is what makes an outgoing question resolvable to a thread at all; `inbox` is
+    where the answer lands.
+    """
+    threads: dict[str, str] = {}
+    replies: dict[str, datetime] = {}
+    for box, incoming in ((MAIL_SENT, False), (MAIL_INBOX, True)):
+        if not box.is_dir():
+            continue
+        for entry in box.iterdir():
+            if not entry.is_dir():
+                continue
+            message = mail_message(entry)
+            if not message:
+                continue
+            threads[message["id"]] = message["thread"]
+            if incoming and message["at"]:
+                current = replies.get(message["thread"])
+                if current is None or message["at"] > current:
+                    replies[message["thread"]] = message["at"]
+    return {"threads": threads, "replies": replies,
+            "sent_known": MAIL_SENT.is_dir()}
+
+
+def answer_observed(asked: dict, mail: dict) -> dict:
+    """Whether the user has answered since the question went out, and what said so.
+
+    Three outcomes, and the difference between them is printed on the plate,
+    because the honest failure here is claiming silence that was never listened
+    for. A question whose thread cannot be resolved is not «unanswered»: it is a
+    question whose answer this observer cannot see, and it stays in the area only
+    because the product record still carries it as open.
+    """
+    if asked["channel"] != "email":
+        return {"answered": False, "src": None,
+                "note": "ответ в Telegram с диска не наблюдается: хранилища сообщений "
+                        "пользователя нет — вопрос уходит из области по продуктовой записи"}
+    thread = mail["threads"].get(asked["ref"])
+    if not thread:
+        return {"answered": False, "src": None,
+                "note": f"письмо {asked['ref']} не найдено в почтовом хранилище продакта: "
+                        "тред не восстановлен, ответ отслеживается только по продуктовой записи"}
+    reply = mail["replies"].get(thread)
+    if reply is None:
+        return {"answered": False, "src": None,
+                "note": f"в треде письма {asked['ref']} писем от пользователя нет"}
+    try:
+        sent_at = datetime.fromisoformat(asked["at"]).replace(tzinfo=timezone.utc)
+    except ValueError:
+        return {"answered": False, "src": None,
+                "note": f"дата вопроса {asked['at']!r} не читается как дата"}
+    if reply.date() < sent_at.date():
+        return {"answered": False, "src": None,
+                "note": f"последнее письмо пользователя в треде — {reply.date().isoformat()}, "
+                        f"раньше вопроса от {asked['at']}"}
+    return {"answered": True,
+            "src": f"письмо пользователя в том же треде от {reply.date().isoformat()}, "
+                   f"не раньше вопроса от {asked['at']}",
+            "note": None}
+
+
+def question_entry(text: str, mail: dict) -> dict:
+    """One open question with its owner, and with what decided the ownership.
+
+    `user` — asked, in writing, through a named channel, and no answer observed
+    since. `product` — everything else, including a question the user has already
+    answered while nobody wrote the decision down: that one now waits on us, not
+    on them, which is exactly the distinction the board was missing.
+    """
+    asked = asked_of_user(text)
+    if not asked:
+        return {"text": text, "owner": "product", "asked_at": None, "channel": None,
+                "ref": None, "asked_src": None, "answer_src": None,
+                "note": "не помечено как спрошенное у пользователя — это наш вопрос"}
+    answer = answer_observed(asked, mail)
+    if answer["answered"] or ANSWERED_BY_USER.search(text):
+        return {"text": text, "owner": "product", "asked_at": asked["at"],
+                "channel": asked["channel"], "ref": asked["ref"],
+                "asked_src": asked["src"],
+                "answer_src": answer["src"] or "ответ пользователя записан в самой строке",
+                "note": "пользователь ответил: решение осталось незаписанным"}
+    return {"text": text, "owner": "user", "asked_at": asked["at"],
+            "channel": asked["channel"], "ref": asked["ref"],
+            "asked_src": asked["src"], "answer_src": None, "note": answer["note"]}
+
+
+def questions_of(items: list[str], mail: dict) -> list[dict]:
+    """Every open question of a place, each with its observed owner."""
+    return [question_entry(item, mail) for item in items]
+
+
+def owed_by(entries: list[dict], owner: str) -> list[dict]:
+    return [entry for entry in entries if entry["owner"] == owner]
+
+
+def task_entry(task: dict, mail: dict) -> dict:
     task_dir = REPO / task["path"]
     run = run_state(task_dir)
     verdicts = gates(task_dir)
@@ -731,9 +1035,14 @@ def task_entry(task: dict) -> dict:
     if outside:
         flags.append("work_outside_owner")
 
-    # Only the still-unanswered ones reach the plate and the counter: a settled
-    # question on a board of open ones is the same lie as a wrong number.
-    questions = pending_questions(open_questions(task_dir))
+    # Whose question it is decides which area the task stands in. A task's
+    # `## Open Questions` is our own working list — that is what the section is
+    # for — so a bullet reaches «ждёт решения человека» only when it carries the
+    # written mark that it went to the user and no answer has been observed since.
+    questions = questions_of(unsettled_questions(open_questions(task_dir)), mail)
+    asked_user = owed_by(questions, "user")
+    ours = owed_by(questions, "product")
+    hand = handoff(task_dir)
     actor, actor_src = observed_actor(task_dir, run)
     role, role_src = observed_role(task_dir)
     since, age, since_src = state_age(task_dir)
@@ -751,6 +1060,11 @@ def task_entry(task: dict) -> dict:
         "gates": verdicts,
         "flags": flags,
         "questions": questions,
+        # The split, kept as data rather than recomputed by every reader: the
+        # counter above the columns, the areas and the tests must not be able to
+        # disagree about whose question it is.
+        "asked_user": asked_user,
+        "our_questions": ours,
         # Everything the card shows when a plate is opened. Collected here
         # because the renderer may not reach a disk, so a drill-down that
         # fetched its own detail would be a second door into the contour past
@@ -762,6 +1076,9 @@ def task_entry(task: dict) -> dict:
             "moved": moved,
             "moved_age_seconds": moved_age,
             "moved_src": moved_src,
+            # The document this task made for a person, and whether anything
+            # observed it reaching them. `None` means the task made no document.
+            "handoff": hand,
         },
         "board": {
             # Filled by `assign_areas` once every task is known: whether a task
@@ -801,8 +1118,11 @@ def assign_areas(entries: list[dict], tasks: list[dict]) -> None:
         why, why_src = queue_reason(task, entry["run"], busy)
         entry["board"]["blocked_by"] = why
         entry["board"]["blocked_by_src"] = why_src
+        hand = entry["detail"].get("handoff") or {}
         entry["board"]["area"] = board_area(
-            entry["status"], entry["flags"], bool(entry["questions"]), why)
+            entry["status"], entry["flags"], bool(entry["asked_user"]), why,
+            ours=bool(entry["our_questions"]),
+            undelivered=bool(hand) and not hand.get("delivered"))
         # A queued task's reason for standing is the thing holding it, and the
         # plate has one place for «почему». `jam_reason` already filled it from
         # `status_detail` when there was one; a repository held by a named run
@@ -891,21 +1211,23 @@ def markdown_section(text: str, heading: str) -> list[str]:
     return items
 
 
-def products(catalogue: list[dict] | None = None) -> list[dict]:
-    """Products, with the canonical list of questions the user owes an answer to.
+def products(catalogue: list[dict] | None = None, mail: dict | None = None) -> list[dict]:
+    """Products, with their open questions split by who actually owes the answer.
 
-    Deliberately *not* filtered through `pending_questions`, and the difference
-    is the point. `## Открытые вопросы` of a product is a curated list: only
-    questions are written into it, and it has its own closure convention — the
-    product owner strikes a settled one through and writes when and by what it
-    was closed. Honouring that convention is the whole test here.
+    `## Открытые вопросы` of a product is a curated list: only questions are
+    written into it, and it has its own closure convention — the product owner
+    strikes a settled one through and writes when and by what it was closed. That
+    convention is honoured, so a struck line is gone from both lists.
 
-    A task's `## Open Questions` has neither property, which is why it needs the
-    stricter reading. Applying the strict reading here instead would drop four
-    real product questions that happen to be phrased as statements («Какие из
-    находок 706 превращаем в работу»), and dropping a question the user is
-    actually waiting on is the more expensive error of the two.
+    What is *not* assumed any more is that an open product question is a question
+    to the user. Most of them are ours: which of the findings of 706 become work,
+    whether the `repo-health` gate is narrowed, whether a stopped migration is
+    acceptable. They are decisions of the product owner, and putting them in
+    front of the user is how the area came to hold sixteen entries of which three
+    were his. `question_entry` owns the split for both places, so a task question
+    and a product question are judged by one rule.
     """
+    mail = mailbox() if mail is None else mail
     # The pool a promise is matched against is the whole catalogue, not the
     # tasks of one direction: a promise written in a product record may have
     # become a task under any project, and matching against a narrower pool
@@ -917,9 +1239,16 @@ def products(catalogue: list[dict] | None = None) -> list[dict]:
             text = path.read_text()
         except OSError:
             continue
+        asked = questions_of(
+            [q for q in markdown_section(text, "Открытые вопросы") if not q.startswith(STRUCK)],
+            mail)
         entries.append({
             "slug": path.parent.name,
-            "questions": [q for q in markdown_section(text, "Открытые вопросы") if not q.startswith(STRUCK)],
+            "questions": owed_by(asked, "user"),
+            # Ours, and shown as ours. Hiding them would trade one wrong answer
+            # for another: they are real open decisions, and the person who owes
+            # them is the product owner.
+            "own_questions": owed_by(asked, "product"),
             "effect": markdown_section(text, "Журнал эффекта")[:8],
             "promises": unplanned(markdown_section(text, "В работе"), catalogue),
         })
@@ -1177,12 +1506,15 @@ def build(anonymize: bool, only: str | None = None) -> dict:
     """
     config = load_config()
     catalogue = task_catalogue()
+    # Read once: whose question is still unanswered is asked of every task and
+    # every product, and the mailbox may not answer it differently between them.
+    mail = mailbox()
     threads = []
     for key, thread in config["threads"].items():
         if only and key != only:
             continue
         source = thread_tasks(thread)
-        tasks = [task_entry(task) for task in source]
+        tasks = [task_entry(task, mail) for task in source]
         assign_areas(tasks, source)
         threads.append({
             "key": key,
@@ -1202,7 +1534,7 @@ def build(anonymize: bool, only: str | None = None) -> dict:
         "schema_version": SCHEMA_VERSION,
         "mode": "demo" if anonymize else "real",
         "threads": threads,
-        "products": products(catalogue),
+        "products": products(catalogue, mail),
         # Who else is deciding right now. Not a thread and not a task: it is the
         # contour watching itself, and it belongs above the columns.
         "owners_awake": owner_wakeups(),
@@ -1249,6 +1581,35 @@ def plan_links() -> None:
                   + (f"; номера-ссылки {numbers} в каталоге не найдены" if numbers else ""))
 
 
+def questions_report() -> None:
+    """Every open question of every product, with its owner and the evidence.
+
+    The board shows one side of this — what the user still owes. Judging the area
+    means seeing the other side too: which question was held back as ours, and by
+    which observation. The previous rule shipped without such a view and stood
+    until a person counted the sixteen entries by hand.
+    """
+    mail = mailbox()
+    print(f"почта продакта: тредов известно {len(mail['threads'])}, "
+          f"каталог sent {'есть' if mail['sent_known'] else 'отсутствует'}")
+    for path in sorted(PRODUCTS.glob("*/product.md")):
+        try:
+            text = path.read_text()
+        except OSError:
+            continue
+        items = [q for q in markdown_section(text, "Открытые вопросы")
+                 if not q.startswith(STRUCK)]
+        print(f"\n=== {path.parent.name}: открытых строк — {len(items)}")
+        for entry in questions_of(items, mail):
+            head = " ".join(entry["text"].split())[:110]
+            print(f"  [{'ЖДЁТ ПОЛЬЗОВАТЕЛЯ' if entry['owner'] == 'user' else 'решает продакт'}] {head}")
+            for label, value in (("спрошено", entry["asked_src"]),
+                                 ("ответ", entry["answer_src"]),
+                                 ("прим.", entry["note"])):
+                if value:
+                    print(f"      {label}: {value}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--anonymize", action="store_true",
@@ -1258,10 +1619,14 @@ def main() -> None:
     parser.add_argument("--thread", help="observe one direction instead of all four")
     parser.add_argument("--plan-links", action="store_true",
                         help="судьба каждой строки «В работе»: с какой задачей связана и чем")
+    parser.add_argument("--questions", action="store_true",
+                        help="судьба каждого открытого вопроса: чей он и чем это наблюдено")
     args = parser.parse_args()
 
     if args.plan_links:
         return plan_links()
+    if args.questions:
+        return questions_report()
 
     snapshot = build(args.anonymize, args.thread)
     if args.summary:

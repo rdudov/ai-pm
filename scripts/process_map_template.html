@@ -5,22 +5,45 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Карта процессной работы</title>
 <style>
+  /* ---------- light by default ----------
+     The board is a working screen someone reads in daylight, and the user asked
+     for it plainly: «Давай доску сделаем в светлой теме». So light is not a
+     theme switch with a default — it is the page. The one dark surface left is
+     the isometric map, which is a drawn world rather than a document: its ground
+     is painted dark on a canvas, so its own chrome has to stay dark to be
+     readable over it. That is the `body.mapmode` block far below, and it applies
+     only while the second screen is open. */
   :root {
-    --ink: #e8ecf5; --dim: #97a3bb; --edge: #1d2536;
-    --bg0: #070b14; --bg1: #0e1524; --panel: rgba(14,21,36,.86);
-    --live: #4ade80; --blocked: #f87171; --killed: #a78bfa;
-    --stale: #fbbf24; --gap: #fb923c; --done: #38bdf8; --idle: #64748b;
+    --ink: #16202e; --dim: #55647a; --edge: #d3dae4;
+    --bg0: #f2f5f9; --bg1: #ffffff; --panel: rgba(255,255,255,.94);
+    --live: #16794a; --blocked: #b3261e; --killed: #6234c9;
+    --stale: #8a5300; --gap: #a2470a; --done: #0a6ba6; --idle: #6b7a8d;
     /* «Можно подхватить» and «надо запланировать» are invitations, not alarms,
        so they get their own two hues instead of borrowing a warning colour. */
-    --pick: #22d3ee; --plan: #c084fc;
+    --pick: #0a7285; --plan: #6b31b8;
+    /* Our own decisions, and finished work nobody was shown. Neither is the
+       user's problem, so neither borrows the colour of a question to them:
+       «Решает продакт» is deliberately neutral, «Сделано, но не доставлено» is
+       warm because a document lying on a server is a thing to go and fix. */
+    --ours: #46556b; --undelivered: #b04a05;
+    --plate: #ffffff; --plate-hover: #f6f9fd; --surface: #fbfcfe;
   }
   * { box-sizing: border-box; }
-  html, body { margin: 0; height: 100%; overflow: hidden; }
+  html { margin: 0; }
+  /* The page scrolls. Nothing is squeezed to fit one screen: the user asked for
+     exactly this — «не надо стараться всё упихнуть в экран, мне подойдёт, если
+     будет скролл. А то так ничего не понятно: микроплашки с микроскроллом». So
+     there is one scrollbar on the document and none inside a plate, an area or
+     a column, and a long text makes its plate taller instead of hiding its tail. */
   body {
-    background: radial-gradient(120% 90% at 50% 0%, var(--bg1), var(--bg0));
-    color: var(--ink); font: 14px/1.45 "Inter", "Segoe UI", system-ui, sans-serif;
+    margin: 0; min-height: 100%;
+    background: var(--bg0);
+    color: var(--ink); font: 14.5px/1.5 "Inter", "Segoe UI", system-ui, sans-serif;
     -webkit-font-smoothing: antialiased;
   }
+  /* The map is the one screen that must not scroll: it is a canvas fitted to the
+     window, and a scrollbar on it would move the page under a drag. */
+  body.mapmode { height: 100%; overflow: hidden; }
   #stage { position: fixed; inset: 0; }
   canvas { display: block; width: 100%; height: 100%; cursor: grab; }
   canvas.dragging { cursor: grabbing; }
@@ -61,27 +84,36 @@
   #nowtext { font-size: 14px; font-weight: 550; }
   #nowsrc { color: var(--dim); font-size: 12px; }
   #controls { display: flex; gap: 12px; align-items: center; }
-  button { background: #162034; color: var(--ink); border: 1px solid var(--edge);
+  button { background: var(--plate); color: var(--ink); border: 1px solid var(--edge);
            border-radius: 9px; padding: 7px 13px; font: inherit; cursor: pointer; }
-  button:hover { background: #1d2a45; }
-  button.primary { background: #1e4f38; border-color: #2f7a55; }
+  button:hover { background: var(--plate-hover); }
+  button.primary { background: #e4f3ea; border-color: #9ed3b6; color: var(--live); }
   #scrub { flex: 1; accent-color: var(--live); height: 22px; }
   #clock { font-variant-numeric: tabular-nums; color: var(--dim); font-size: 12.5px; min-width: 128px; text-align: right; }
-  select { background: #162034; color: var(--ink); border: 1px solid var(--edge);
+  select { background: var(--plate); color: var(--ink); border: 1px solid var(--edge);
            border-radius: 9px; padding: 6px 8px; font: inherit; }
 
   /* ---------- board: the default screen ----------
-     Plain plates on purpose. The task is explicit that styling waits until the
-     structure reads, so this is typography and spacing and nothing else. */
-  #board { position: fixed; inset: 0; overflow: hidden; display: flex; flex-direction: column; }
-  #boardhead { padding: 12px 18px 8px; display: flex; gap: 14px; align-items: baseline; flex-wrap: wrap;
+     In the normal flow of the document, not pinned to the viewport. The board
+     used to be `position: fixed; inset: 0` with `overflow: hidden`, and every
+     nested scrollbar on the page followed from that one decision: seven areas
+     sharing a fixed column height, each crushed to its minimum, each with its
+     own scrollbar — «микроплашки с микроскроллом». Now the page is as tall as
+     what it has to say. */
+  #board { display: flex; flex-direction: column; }
+  /* The heading and the strip stay in view while the columns scroll past them:
+     «кто работает, где затор, что ждёт человека» are the first-screen answers,
+     and keeping them is what the room freed by scrolling is for. */
+  #boardhead { position: sticky; top: 0; z-index: 6; background: var(--bg1);
+               padding: 12px 18px 8px; display: flex; gap: 14px; align-items: baseline; flex-wrap: wrap;
                border-bottom: 1px solid var(--edge); }
   #boardhead h1 { margin: 0; font-size: 17px; font-weight: 650; }
   #boardhead .sub { color: var(--dim); font-size: 12.5px; }
   /* The strip above the columns: who is working and where the jam is, by name.
      Both answers have to be readable without scrolling anything. */
-  #strip { display: flex; gap: 4px 22px; padding: 7px 18px; border-bottom: 1px solid var(--edge);
-           flex-wrap: wrap; font-size: 12.5px; align-items: baseline; }
+  #strip { display: flex; gap: 4px 22px; padding: 9px 18px; border-bottom: 1px solid var(--edge);
+           background: var(--bg1);
+           flex-wrap: wrap; font-size: 13px; align-items: baseline; }
   #strip .grp { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; max-width: 100%; }
   #strip .lbl { color: var(--dim); font-size: 11px; letter-spacing: .07em; text-transform: uppercase; }
   #strip .who { color: var(--live); }
@@ -111,53 +143,42 @@
   /* What the strip did not take. A silent cap reads as «показано всё». */
   #strip .more { color: var(--dim); }
   #strip .grp { flex: 1 1 100%; }
-  /* The safety valve, not the mechanism. What keeps the strip short is the
-     character budget in the renderer, which shows fewer names rather than
-     cutting the ones it shows; this only stops an unusually loud contour from
-     taking the whole window and leaving the columns nothing. */
-  #strip { max-height: 24vh; overflow-y: auto; }
+  #strip .ours { color: var(--ours); }
+  #strip .undelivered { color: var(--undelivered); }
+  /* The strip has no height cap and no scrollbar of its own any more. What keeps
+     it short is the character budget in the renderer, which shows fewer names
+     rather than cutting the ones it shows; a cap here would have been a second
+     mechanism doing the same job badly — and a scrollbar inside a header is
+     exactly the «микроскролл» the user asked to be rid of. */
 
-  #columns { flex: 1; display: grid; grid-template-columns: repeat(4, 1fr);
-             gap: 12px; padding: 12px 14px 14px; overflow: hidden; min-height: 0; }
-  .col { display: flex; flex-direction: column; min-height: 0; min-width: 0;
-         border: 1px solid var(--edge); border-radius: 12px; background: rgba(14,21,36,.5); }
+  #columns { display: grid; grid-template-columns: repeat(4, 1fr);
+             gap: 14px; padding: 14px; align-items: start; }
+  .col { display: flex; flex-direction: column; min-width: 0;
+         border: 1px solid var(--edge); border-radius: 12px; background: var(--surface);
+         box-shadow: 0 1px 2px rgba(22,32,46,.05); }
   .colhead { padding: 10px 12px 8px; border-bottom: 1px solid var(--edge); }
   .colhead h2 { margin: 0; font-size: 13.5px; font-weight: 620; }
   .colhead .meta { color: var(--dim); font-size: 11.5px; margin-top: 3px; }
-  /* The column does not scroll as one piece; each area scrolls inside itself.
-     Review 786 found «Затор» sitting below a filled «Ждёт решения человека» at
-     1440×900, so a whole acceptance question was answered only by scrolling a
-     column. Five headings with their counts and their oldest age now always
-     stand on the first screen, and the plates of an area move within it. */
-  /* The column scrolls only as a last resort. Seven areas of headings and rules
-     do not always fit a 900-tall window, and when they did not, every area was
-     crushed to twelve pixels and the plates laid out on top of the area below —
-     a board whose plates could not be clicked at all, found by driving the page
-     rather than by looking at it. A scroll here is the safety valve; the
-     `min-height` on the area below is what keeps it from ever being needed for
-     the headings themselves. */
-  .colbody { overflow-y: auto; overflow-x: hidden; display: flex; flex-direction: column;
-             gap: 10px; padding: 8px 9px 12px; flex: 1; min-height: 0; }
+  /* Neither the column nor an area scrolls inside itself any more. The two
+     previous versions of this file both tried to divide a fixed window height
+     between nine areas — first by letting each area scroll, then by adding a
+     scrollbar to the column as a safety valve — and both produced the screen the
+     user described: plates too small to read, each with its own tiny scrollbar.
+     The room comes from the page instead, so an area is exactly as tall as what
+     it holds and nothing inside it is ever out of view. */
+  .colbody { display: flex; flex-direction: column;
+             gap: 14px; padding: 10px 11px 14px; }
 
-  /* `min-height` is the whole fix: a flex item with `min-height: 0` may be
-     crushed below its own content, and seven of them in a fixed column were.
-     One heading with its count and its oldest age is the floor, so the answer
-     «сколько их и как давно» survives however many areas there are. */
-  .area { display: flex; flex-direction: column; min-height: 30px; flex: 1 1 0; }
-  /* The two areas that answer an acceptance question outright get the room:
-     what a person owes an answer to, and what can be started right now. A
-     folded area costs its heading and nothing else. */
-  .area.a-waiting_human, .area.a-pickup { flex: 2 1 0; }
-  .area.shut, .area.void { flex: none; }
+  .area { display: flex; flex-direction: column; }
   /* An empty area needs its heading, not its rule: «пусто» under a heading is
      already the whole answer, and the rule would cost three lines the areas
      with something to show need more. */
   .area.void .rule { display: none; }
-  .area .plates { overflow: auto; min-height: 0; flex: 1; }
-  .area > h3 { margin: 0 0 6px; font-size: 11px; letter-spacing: .07em; text-transform: uppercase;
+  .area .plates { display: flex; flex-direction: column; }
+  .area > h3 { margin: 0 0 6px; font-size: 11.5px; letter-spacing: .07em; text-transform: uppercase;
                color: var(--dim); cursor: pointer; display: flex; gap: 7px; align-items: baseline;
-               flex: none; }
-  .area > h3 .n { color: var(--ink); font-size: 12px; font-weight: 650; }
+               flex-wrap: wrap; }
+  .area > h3 .n { color: var(--ink); font-size: 12.5px; font-weight: 650; }
   .area > h3 .old { margin-left: auto; font-weight: 400; text-transform: none; letter-spacing: 0; }
   .area.a-waiting_human > h3 { color: var(--stale); }
   .area.a-running > h3 { color: var(--live); }
@@ -166,6 +187,8 @@
      invitation rather than as another warning. */
   .area.a-pickup > h3 { color: var(--pick); }
   .area.a-plan > h3 { color: var(--plan); }
+  .area.a-product_owner > h3 { color: var(--ours); }
+  .area.a-undelivered > h3 { color: var(--undelivered); }
   .area.shut .plates { display: none; }
   .area .empty { color: var(--idle); font-size: 12px; padding: 2px 0 4px; }
   /* The rule that selected the contents of an area, printed with the area. It
@@ -176,47 +199,58 @@
                 margin: -2px 0 6px; flex: none; }
   .area.shut .rule { display: none; }
 
+  /* Nothing on a plate is cut, clamped or elided. Every line clamp
+     that used to stand in this block existed to protect a fixed screen height
+     that no longer exists: a long reason now makes its plate taller and the page
+     taller with it, which is what the user asked for in as many words — «плашка
+     обязана быть читаемой: текст не режется». `overflow-wrap: anywhere` stays,
+     because an observed reason is often one unbroken token
+     (`queued_behind_active_worktree_writers_669_689`) that would otherwise push
+     the column past the window on a phone. */
   .plate { border: 1px solid var(--edge); border-left: 3px solid var(--idle); border-radius: 9px;
-           background: #101828; padding: 8px 10px; margin-bottom: 7px; }
+           background: var(--plate); padding: 9px 11px; margin-bottom: 8px;
+           overflow-wrap: anywhere; }
+  .plate:last-child { margin-bottom: 0; }
   .plate.p-waiting_human { border-left-color: var(--stale); }
   .plate.p-running { border-left-color: var(--live); }
   .plate.p-stuck { border-left-color: var(--blocked); }
   .plate.p-done { border-left-color: var(--done); }
   .plate.p-pickup { border-left-color: var(--pick); }
   .plate.p-plan { border-left-color: var(--plan); }
+  .plate.p-product_owner { border-left-color: var(--ours); }
+  .plate.p-undelivered { border-left-color: var(--undelivered); }
   /* A plate opens its card. It is a control, so it says so before it is clicked
      rather than after — a board nobody knows is clickable has no drill-down. */
   .plate { cursor: pointer; }
-  .plate:hover { border-color: #2c3852; background: #131c30; }
-  .plate .head { display: flex; gap: 7px; align-items: baseline; }
-  .plate .num { color: var(--dim); font-variant-numeric: tabular-nums; font-size: 12px; flex: none; }
-  .plate .name { font-size: 13px; font-weight: 550; line-height: 1.3; }
-  .plate .row { margin-top: 5px; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
-  .tag { font-size: 11px; border: 1px solid var(--edge); border-radius: 5px; padding: 1px 6px;
-         color: var(--dim); white-space: nowrap; }
+  .plate:hover { border-color: #9fb0c6; background: var(--plate-hover); }
+  .plate .head { display: flex; gap: 7px; align-items: baseline; flex-wrap: wrap; }
+  .plate .num { color: var(--dim); font-variant-numeric: tabular-nums; font-size: 12.5px; flex: none; }
+  .plate .name { font-size: 13.5px; font-weight: 600; line-height: 1.35; }
+  .plate .row { margin-top: 6px; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  .tag { font-size: 11.5px; border: 1px solid var(--edge); border-radius: 5px; padding: 1px 6px;
+         color: var(--dim); white-space: nowrap; background: #fff; }
   .tag.who { color: var(--ink); }
-  .tag.alive { color: var(--live); border-color: #245c3c; }
-  .tag.lie { color: var(--blocked); border-color: #6b2626; }
+  .tag.alive { color: var(--live); border-color: #9ed3b6; }
+  .tag.lie { color: var(--blocked); border-color: #e6a9a4; }
   .tag.age { font-variant-numeric: tabular-nums; }
-  .tag.retry { color: var(--killed); border-color: #453a6e; }
-  .plate .doing { margin-top: 5px; color: var(--dim); font-size: 12px; line-height: 1.35; }
-  .plate .ask { margin-top: 5px; color: var(--stale); font-size: 12px; line-height: 1.35;
-                display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
-                overflow: hidden; }
-  .plate .doing { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
-                  overflow: hidden; }
+  .tag.retry { color: var(--killed); border-color: #c2b0ec; }
+  .tag.doc { color: var(--undelivered); border-color: #edb894; white-space: normal; }
+  .plate .doing { margin-top: 6px; color: var(--dim); font-size: 12.5px; line-height: 1.4; }
+  .plate .ask { margin-top: 6px; color: var(--stale); font-size: 12.5px; line-height: 1.4; }
+  /* What observed that the question is the user's, or that it is ours. The area
+     may not simply assert whose question it is: the mark that put it in front of
+     the person — date, channel, message — is printed under the question itself. */
+  .plate .asked { margin-top: 3px; color: var(--dim); font-size: 11.5px; line-height: 1.4; }
   /* The observed reason a task stands where it stands. Answering «почему» is an
      acceptance question, so it is not dimmed away into a footnote. */
-  .plate .why { margin-top: 5px; font-size: 12px; line-height: 1.35; color: var(--stale);
-                display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
-                overflow: hidden; word-break: break-word; }
+  .plate .why { margin-top: 6px; font-size: 12.5px; line-height: 1.4; color: var(--stale); }
   .plate.p-stuck .why { color: var(--blocked); }
-  /* A product's open question: the same area, so it reads as one list. A long
-     one is clamped rather than allowed to push the areas below off the screen. */
-  .plate.q .name { font-weight: 450; display: -webkit-box; -webkit-line-clamp: 3;
-                   -webkit-box-orient: vertical; overflow: hidden; }
+  /* A product's open question: the same area, so it reads as one list. */
+  .plate.q .name { font-weight: 500; }
   .plate.q .num { color: var(--stale); font-weight: 700; }
-  .plate .more { margin-top: 4px; color: var(--idle); font-size: 11.5px; }
+  .plate.p-product_owner.q .num { color: var(--ours); }
+  .plate.p-plan.q .num { color: var(--plan); }
+  .plate .more { margin-top: 4px; color: var(--idle); font-size: 12px; }
   .plate .dash { color: var(--idle); }
 
   /* Repositories and channels are reference, and reference does not outrank the
@@ -227,9 +261,8 @@
      pixels off the areas that answer the questions. Folded by default, one line
      that says what is inside, and the warnings — uncommitted, unpushed — stay
      on that line so nothing is hidden by folding it. */
-  .chan { border-top: 1px solid var(--edge); padding: 8px 12px 10px; font-size: 11.5px;
-          color: var(--dim); max-height: 17vh; overflow-y: auto; flex: none; }
-  .chan.shut { max-height: none; overflow: visible; }
+  .chan { border-top: 1px solid var(--edge); padding: 9px 12px 11px; font-size: 12px;
+          color: var(--dim); }
   .chan.shut .body { display: none; }
   .chan .sum { cursor: pointer; }
   .chan .sum::before { content: "▸ "; color: var(--idle); }
@@ -240,21 +273,19 @@
 
   #switch { margin-left: auto; display: flex; gap: 6px; }
   #switch button { padding: 5px 11px; font-size: 12.5px; }
-  #switch button.on { background: #1e3a5f; border-color: #2f5f8a; }
+  #switch button.on { background: #e2edf7; border-color: #9dbcd8; color: var(--done); }
 
+  /* Two columns before one: at a tablet width four columns give every plate a
+     line of two words, and one column makes the page four times as long as it
+     needs to be. */
+  @media (max-width: 1180px) { #columns { grid-template-columns: repeat(2, 1fr); } }
   @media (max-width: 900px) {
-    #columns { grid-template-columns: 1fr; overflow: auto; }
-    .col { min-height: auto; }
-    /* One column on a phone, so the page scrolls and every area takes the room
-       its contents need. Sharing a fixed height between seven areas here gave
-       each of them thirty pixels and made the plates unreachable — the same
-       defect as on the desktop, and the reason both sizes are measured. */
-    .colbody { overflow: visible; }
-    .area, .area.a-waiting_human, .area.a-pickup { flex: none; }
-    .area .plates { overflow: visible; }
+    #columns { grid-template-columns: 1fr; padding: 10px; }
     /* A phone gives the header a third of the screen if left alone, and every
-       line it takes comes off the answers below it. */
-    #boardhead { padding: 8px 12px 6px; }
+       line it takes comes off the answers below it. The strip stops being
+       sticky here: on a 390-wide screen it is several lines tall, and pinning it
+       would leave the columns a slot instead of a screen. */
+    #boardhead { position: static; padding: 8px 12px 6px; }
     #boardhead h1 { font-size: 15px; }
     /* One column cannot fit four directions, so on a phone the strip *is* the
        first-screen answer — which means a reason may not be cut here. The item
@@ -276,17 +307,25 @@
      over the board, the board stays where it was, and closing it puts the eye
      back on the plate it was opened from. Nothing here is fetched: every field
      travelled with the plate, because the page has no way to reach a disk. */
-  #card { position: fixed; inset: 0; z-index: 20; display: none;
-          background: rgba(4,7,13,.72); backdrop-filter: blur(3px); }
-  #card.open { display: flex; align-items: stretch; justify-content: flex-end; }
-  #cardbox { width: min(620px, 100%); background: var(--bg1); border-left: 1px solid var(--edge);
-             display: flex; flex-direction: column; box-shadow: -18px 0 44px rgba(0,0,0,.5); }
-  #cardhead { padding: 14px 16px 11px; border-bottom: 1px solid var(--edge); flex: none; }
-  #cardhead .head { display: flex; gap: 9px; align-items: baseline; }
+  /* The card is a page, not a drawer with its own scrollbar. It used to be a
+     fixed overlay whose body scrolled inside a 900-tall window, which is the
+     same «микроскролл» the board itself had: a card about a task with twenty
+     files gave the reader a six-line window onto them. Now the board steps
+     aside, the card takes the page, and the page scrolls. Nothing is navigated
+     to and nothing is fetched — closing it puts the eye back where it was, at
+     the same scroll offset. */
+  #card { display: none; }
+  #card.open { display: block; }
+  #cardbox { max-width: 940px; margin: 0 auto; background: var(--bg1);
+             border: 1px solid var(--edge); border-radius: 12px; }
+  #cardhead { position: sticky; top: 0; z-index: 3; background: var(--bg1);
+              padding: 14px 16px 11px; border-bottom: 1px solid var(--edge);
+              border-radius: 12px 12px 0 0; }
+  #cardhead .head { display: flex; gap: 9px; align-items: baseline; flex-wrap: wrap; }
   #cardhead .num { color: var(--dim); font-variant-numeric: tabular-nums; }
-  #cardhead .name { font-size: 15.5px; font-weight: 620; line-height: 1.3; }
+  #cardhead .name { font-size: 16px; font-weight: 620; line-height: 1.35; }
   #cardclose { margin-left: auto; flex: none; }
-  #cardbody { overflow: auto; padding: 12px 16px 20px; min-height: 0; }
+  #cardbody { padding: 14px 16px 24px; }
   #cardbody section { margin-bottom: 14px; }
   #cardbody h4 { margin: 0 0 6px; font-size: 11px; letter-spacing: .07em;
                  text-transform: uppercase; color: var(--dim); font-weight: 600; }
@@ -303,9 +342,30 @@
   #cardbody .files div { display: flex; gap: 10px; padding: 1.5px 0; }
   #cardbody .files .n { flex: 1; word-break: break-all; }
   #cardbody .files .m { color: var(--dim); flex: none; font-variant-numeric: tabular-nums; }
-  #cardbody .src { color: var(--idle); font-size: 11px; margin-top: 4px; }
+  #cardbody .src { color: var(--idle); font-size: 11.5px; margin-top: 4px; }
   #cardbody .warn { color: var(--stale); }
-  @media (max-width: 760px) { #cardbox { width: 100%; border-left: none; } }
+  @media (max-width: 760px) { #cardbox { border-left: none; border-right: none; border-radius: 0; } }
+
+  /* ---------- the map screen keeps its own dark chrome ----------
+     The board is light because it is a document someone reads. The map is not a
+     document: it is a drawn isometric world whose ground is painted dark onto a
+     canvas, and light captions over a light page over a dark canvas would be
+     unreadable. So the second screen re-declares the palette for itself and for
+     nothing else — this is the «тёмная как второй режим» of the task, bound to
+     the one screen that needs it rather than offered as a switch nobody asked
+     for. `body.mapmode` is set by `showBoard()` and by nothing else. */
+  body.mapmode {
+    --ink: #e8ecf5; --dim: #97a3bb; --edge: #1d2536;
+    --bg0: #070b14; --bg1: #0e1524; --panel: rgba(14,21,36,.86);
+    --live: #4ade80; --blocked: #f87171; --killed: #a78bfa;
+    --stale: #fbbf24; --gap: #fb923c; --done: #38bdf8; --idle: #64748b;
+    --pick: #22d3ee; --plan: #c084fc; --ours: #94a3b8; --undelivered: #fb923c;
+    --plate: #101828; --plate-hover: #131c30; --surface: rgba(14,21,36,.5);
+    background: radial-gradient(120% 90% at 50% 0%, #0e1524, #070b14);
+    color: var(--ink);
+  }
+  body.mapmode button.primary { background: #1e4f38; border-color: #2f7a55; color: var(--ink); }
+  body.mapmode .tag { background: transparent; }
 
   #tip { position: fixed; z-index: 9; background: rgba(9,14,24,.96); border: 1px solid var(--edge);
          border-radius: 10px; padding: 9px 11px; max-width: 300px; font-size: 12.5px;
@@ -1070,18 +1130,52 @@ function plateNode(p, areaKey) {
     if (p.why_src) why.title = "наблюдено: " + p.why_src;
     node.appendChild(why);
   }
-  for (const question of p.questions.slice(0, 2)) {
-    const ask = document.createElement("div");
-    ask.className = "ask"; ask.textContent = "? " + question;
-    node.appendChild(ask);
-  }
-  if (p.questions.length > 2) {
-    const more = document.createElement("div");
-    more.className = "more";
-    more.textContent = "и ещё вопросов: " + (p.questions.length - 2);
-    node.appendChild(more);
+  /* Every open question of the task, whole, and each one saying whose it is and
+     what said so. Two used to be shown and the rest counted, and the count was
+     the least of it: all of them stood under «ждёт решения человека» whoever
+     they belonged to. A question of ours now says it is ours, and a question of
+     the user's carries the date, the channel and the message it went out with —
+     which is what makes the area checkable instead of believable. */
+  for (const question of p.questions) node.appendChild(askedNode(question));
+
+  /* A finished task whose document nobody was shown. The line names the file and
+     what was read to decide it, because «не доставлено» is a claim about the
+     world and the board may not make one silently. */
+  const hand = (p.detail || {}).handoff;
+  if (hand && !hand.delivered) {
+    const row2 = document.createElement("div");
+    row2.className = "row";
+    const doc = tag("документ человеку: " + hand.name +
+      (hand.bytes ? " · " + bytes(hand.bytes) : "") +
+      (hand.count > 1 ? " (и ещё " + (hand.count - 1) + ")" : ""), "doc");
+    doc.title = "наблюдено: " + hand.src + "; " + hand.delivered_src;
+    row2.appendChild(doc);
+    node.appendChild(row2);
   }
   return node;
+}
+
+/* One open question as it stands on a plate: the question, then the observation
+   that decided whose it is. Shared by the task plates and by the plates a
+   product's own question makes, so «чей это вопрос» reads the same in both. */
+function askedNode(q) {
+  const ask = document.createElement("div");
+  ask.className = "ask";
+  ask.textContent = (q.owner === "user" ? "? " : "· ") + q.text;
+  const wrap = document.createDocumentFragment();
+  wrap.appendChild(ask);
+  const bits = [];
+  if (q.asked_src) bits.push(q.asked_src);
+  if (q.answer_src) bits.push("ответ: " + q.answer_src);
+  if (q.note) bits.push(q.note);
+  if (bits.length) {
+    const src = document.createElement("div");
+    src.className = "asked"; src.textContent = bits.join(" · ");
+    wrap.appendChild(src);
+  }
+  const box = document.createElement("div");
+  box.appendChild(wrap);
+  return box;
 }
 
 /* ---------- the card ----------
@@ -1211,12 +1305,28 @@ function cardBody(p) {
 
   body.appendChild(section("Доставлено человеку", s => {
     const dl = document.createElement("dl"); dl.className = "kv";
+    /* The document first, the receipts after it. The receipts were all anyone
+       looked at, and they answer a different question: 783 had two of them and
+       its report had still not left the server. */
+    const hand = d.handoff;
+    if (hand) {
+      row(dl, "Документ", hand.name + (hand.bytes ? " · " + bytes(hand.bytes) : ""), hand.src);
+      if (hand.count > 1) row(dl, "Всего документов", hand.count, hand.src);
+      row(dl, "Доставлено", hand.delivered ? "да" : "нет", hand.delivered_src);
+    }
     if (d.delivery) {
       row(dl, "Сообщений", d.delivery.count, d.delivery.src);
       row(dl, "Последнее", stamp(d.delivery.last_at), d.delivery.src);
       row(dl, "По событию", d.delivery.last_kind, d.delivery.src);
     }
     s.appendChild(dl);
+    if (hand && !hand.delivered) {
+      const warn = document.createElement("div");
+      warn.className = "src warn";
+      warn.textContent = "Работа закончена, документ лежит в каталоге задачи, а того, "
+        + "что его кто-то получил, на диске нет. Так пролежал час отчёт задачи 783.";
+      s.appendChild(warn);
+    }
     return dl.children.length > 0;
   }));
 
@@ -1244,10 +1354,21 @@ function cardBody(p) {
     for (const q of p.questions) {
       const line = document.createElement("div");
       line.className = "gate";
-      const r = document.createElement("span"); r.className = "r"; r.textContent = "?";
-      const n = document.createElement("span"); n.textContent = q;
+      const r = document.createElement("span"); r.className = "r";
+      r.textContent = q.owner === "user" ? "?" : "·";
+      const n = document.createElement("span");
+      n.textContent = q.text + (q.owner === "user" ? " — ждёт пользователя" : " — наш вопрос");
       line.appendChild(r); line.appendChild(n);
       s.appendChild(line);
+      const bits = [];
+      if (q.asked_src) bits.push(q.asked_src);
+      if (q.answer_src) bits.push("ответ: " + q.answer_src);
+      if (q.note) bits.push(q.note);
+      if (bits.length) {
+        const src = document.createElement("div");
+        src.className = "src"; src.textContent = bits.join(" · ");
+        s.appendChild(src);
+      }
     }
     return true;
   }));
@@ -1279,20 +1400,30 @@ function cardBody(p) {
   return body;
 }
 
+/* Where the board was when the card was opened, so closing puts the eye back on
+   the plate it came from. The card takes the page rather than floating over it —
+   that is what removed the last scrollbar inside a box — so the offset has to be
+   remembered here instead of being kept by a layer that never moved. */
+let boardScroll = 0;
+
 function openCard(p) {
+  if (!openTask) boardScroll = window.scrollY;
   openTask = p.task;
   el("cardnum").textContent = p.id === null ? "—" : "#" + p.id;
   el("cardname").textContent = p.title;
   const body = el("cardbody");
   body.textContent = "";
   body.appendChild(cardBody(p));
-  body.scrollTop = 0;
   el("card").classList.add("open");
+  el("board").style.display = "none";
+  window.scrollTo(0, 0);
 }
 
 function closeCard() {
   openTask = null;
   el("card").classList.remove("open");
+  el("board").style.display = "flex";
+  window.scrollTo(0, boardScroll);
 }
 
 el("cardclose").addEventListener("click", closeCard);
@@ -1348,14 +1479,15 @@ function areaNode(panel, area) {
     empty.className = "empty";
     /* «Ждёт решения человека» is drawn even when empty: an empty area is an
        answer to the question, and a missing one is not. */
-    empty.textContent = area.key === "waiting_human" ? "ничего не ждёт решения" : "пусто";
+    empty.textContent = area.key === "waiting_human"
+      ? "ничего: всё, что спрашивали у пользователя, отвечено" : "пусто";
     plates.appendChild(empty);
   }
   for (const p of area.plates) plates.appendChild(plateNode(p, area.key));
   /* The product's own open questions, in the same area and the same count as the
      tasks. They are questions to the same person; splitting them into a second
      place with a second number is how seventeen of them stayed off the board. */
-  for (const q of (area.questions || [])) plates.appendChild(questionNode(q));
+  for (const q of (area.questions || [])) plates.appendChild(questionNode(q, area.key));
   for (const q of (area.promises || [])) plates.appendChild(promiseNode(q));
   node.appendChild(plates);
   return node;
@@ -1372,15 +1504,21 @@ const AREA_RULE = {
   plan: "строки раздела «В работе», для которых не удалось наблюсти задачу: сверка идёт по номеру-ссылке, по названию задачи в строке и по слагу — под каждой строкой написано, с чем её сверили",
   pickup: "живого прогона нет, гейты не отказали, и ничто на диске эту задачу не держит",
   queued: "стоит за названным держателем — он в строке каждой плашки",
+  /* The rule of the area whose contents the user counted by hand and found
+     thirteen of sixteen wrong. Printing it is what lets the next reader do the
+     same check in a minute instead of an evening. */
+  waiting_human: "только то, что спрошено у пользователя письмом или сообщением — с датой и идентификатором — и на что ответа не наблюдалось: ни письма от него в том же треде, ни решения, записанного в строке",
+  product_owner: "наши собственные вопросы: открытые, но пользователю их не задавали, либо он ответил, а решение осталось незаписанным. Решает продакт, а не человек",
+  undelivered: "задача завершена, документ для человека лежит в каталоге задачи, а свидетельства доставки нет: ни delivery.md, ни квитанции о документе — только события жизненного цикла прогона",
 };
 
-function questionNode(q) {
+function questionNode(q, areaKey) {
   const node = document.createElement("div");
-  node.className = "plate p-waiting_human q";
+  node.className = "plate p-" + areaKey + " q";
   const head = document.createElement("div");
   head.className = "head";
   const num = document.createElement("span");
-  num.className = "num"; num.textContent = "?";
+  num.className = "num"; num.textContent = q.owner === "user" ? "?" : "·";
   const name = document.createElement("span");
   name.className = "name"; name.textContent = q.text;
   head.appendChild(num); head.appendChild(name);
@@ -1390,7 +1528,25 @@ function questionNode(q) {
   const src = tag("вопрос продукта " + q.product);
   src.title = "наблюдено: раздел «Открытые вопросы» в products/" + q.product + "/product.md";
   row.appendChild(src);
+  /* When it went out, through what, and with which message. This is the whole
+     of the rule: an area that tells a person they are blocking work has to show
+     what put the question in front of them, and the date and the message are
+     what a reader checks it by. */
+  if (q.asked_at) {
+    const when = tag("спрошено " + q.asked_at + " · " +
+      (q.channel === "email" ? "письмо " : "Telegram ") + q.ref);
+    if (q.asked_src) when.title = "наблюдено: " + q.asked_src;
+    row.appendChild(when);
+  }
   node.appendChild(row);
+  const bits = [];
+  if (q.answer_src) bits.push("ответ: " + q.answer_src);
+  if (q.note) bits.push(q.note);
+  if (bits.length) {
+    const note = document.createElement("div");
+    note.className = "asked"; note.textContent = bits.join(" · ");
+    node.appendChild(note);
+  }
   return node;
 }
 
@@ -1510,6 +1666,36 @@ function stripItem(p, cls) {
   return s;
 }
 
+/* The headline of the whole board: what the user still owes, what it is made of,
+   and what we owe ourselves. The two numbers stand together because the split
+   between them is the point — a number that merely got smaller would read as
+   questions having been thrown away. */
+function waitingGroup(board) {
+  const grp = document.createElement("div");
+  grp.className = "grp";
+  const lbl = document.createElement("span");
+  lbl.className = "lbl"; lbl.textContent = "Ждёт решения пользователя";
+  const n = document.createElement("span");
+  n.className = board.waiting ? "ask" : "none";
+  /* The number, and what it is made of. A single figure nobody could take apart
+     is what let thirteen wrong entries stand as an answer; split by source, a
+     reader can check it against the first area of the columns below. */
+  const parts = [];
+  if (board.waiting_tasks) parts.push(board.waiting_tasks + " в задачах");
+  if (board.waiting_questions) parts.push(board.waiting_questions + " вопросов продуктов");
+  n.textContent = board.waiting
+    ? board.waiting + " — " + parts.join(" и ") + ", первой областью в колонках ниже"
+    : "ничего: всё, что спрашивали у него, отвечено";
+  grp.appendChild(lbl); grp.appendChild(n);
+  const ours = document.createElement("span");
+  ours.className = board.ours ? "ours" : "none";
+  ours.textContent = board.ours
+    ? "· решает продакт: " + board.ours + ", своей областью в колонках"
+    : "· у продакта нерешённого нет";
+  grp.appendChild(ours);
+  return grp;
+}
+
 function drawStrip(board) {
   const strip = el("strip");
   strip.textContent = "";
@@ -1519,7 +1705,18 @@ function drawStrip(board) {
     /* The first question of every wake-up, so it stands on the first screen
        beside the other two rather than under a fold. */
     ["Что подхватить", board.pickup, "pick", "нечего: свободных задач нет", board.pickup_hidden],
+    /* Finished work whose result nobody was shown. It is on the strip because
+       that is the only place it would have been noticed: 783 finished at 16:14
+       and its 441 KB report lay on the server for an hour, behind two receipts
+       that both spoke about the life of the run. */
+    ["Сделано, но не доставлено", board.undelivered, "undelivered",
+     "нет: у всего завершённого есть свидетельство доставки", board.undelivered_hidden],
   ];
+  /* The headline stands first, before the names. It is the question that made
+     this board wrong — sixteen entries of which the user owned three — so it is
+     the one line that must be читаемо without scrolling anything, including on a
+     390-wide screen where the strip is several lines tall. */
+  strip.appendChild(waitingGroup(board));
   for (const [label, items, cls, empty, hidden] of groups) {
     const grp = document.createElement("div");
     grp.className = "grp";
@@ -1543,24 +1740,6 @@ function drawStrip(board) {
     }
     strip.appendChild(grp);
   }
-  const grp = document.createElement("div");
-  grp.className = "grp";
-  const lbl = document.createElement("span");
-  lbl.className = "lbl"; lbl.textContent = "Ждёт решения человека";
-  const n = document.createElement("span");
-  n.className = board.waiting ? "ask" : "none";
-  /* The number, and what it is made of. A single figure nobody could take apart
-     is what let thirteen wrong entries stand as an answer; split by source, a
-     reader can check it against the first area of the columns below. */
-  const parts = [];
-  if (board.waiting_tasks) parts.push(board.waiting_tasks + " в задачах");
-  if (board.waiting_questions) parts.push(board.waiting_questions + " вопросов продуктов");
-  n.textContent = board.waiting
-    ? board.waiting + " — " + parts.join(" и ") + ", первой областью в колонках ниже"
-    : "ничего";
-  grp.appendChild(lbl); grp.appendChild(n);
-  strip.appendChild(grp);
-
   /* The second instance of the product owner. Two pairs of duplicate tasks were
      created in one hour — 790/792 and 791/793 — because the owner in the chat
      and the owner woken by the timer each had their own queue and neither could
@@ -1607,8 +1786,11 @@ function drawBoard(board, snapshot) {
     const running = panel.areas.find(a => a.key === "running").count;
     const waiting = panel.areas.find(a => a.key === "waiting_human").count;
     const stuck = panel.areas.find(a => a.key === "stuck").count;
+    const ours = panel.areas.find(a => a.key === "product_owner").count;
+    const undelivered = panel.areas.find(a => a.key === "undelivered").count;
     meta.textContent = "задач " + panel.task_count + " · в работе " + running +
-                       " · ждёт человека " + waiting + " · заторов " + stuck;
+                       " · ждёт пользователя " + waiting + " · решает продакт " + ours +
+                       " · заторов " + stuck + " · не доставлено " + undelivered;
     head.appendChild(h2); head.appendChild(meta);
     col.appendChild(head);
 
@@ -1625,8 +1807,10 @@ function drawBoard(board, snapshot) {
     return acc;
   }, {});
   el("boardsub").textContent = "в работе " + (totals.running || 0) +
-    " · ждёт решения человека " + (totals.waiting_human || 0) +
+    " · ждёт решения пользователя " + (totals.waiting_human || 0) +
+    " · решает продакт " + (totals.product_owner || 0) +
     " · заторов " + (totals.stuck || 0) +
+    " · сделано, но не доставлено " + (totals.undelivered || 0) +
     " · можно подхватить " + (totals.pickup || 0) +
     " · надо запланировать " + (totals.plan || 0) +
     " · собрано " + new Date(DATA.built_at).toLocaleString("ru-RU");
@@ -1648,9 +1832,14 @@ function applyFresh(fresh) {
   DATA.built_at = fresh.built_at;
   DATA.digest = fresh.digest;
   const wanted = openTask;
-  const scroll = el("columns").scrollTop;
+  /* The page is what scrolls now, so the place to keep is the page offset. It
+     used to be `#columns.scrollTop`, which is zero on a board that no longer
+     has a scrollbar of its own — a live refresh would have quietly sent every
+     reader back to the top. */
+  const scroll = wanted ? boardScroll : window.scrollY;
   drawBoard(DATA.board, DATA.snapshot);
-  el("columns").scrollTop = scroll;
+  boardScroll = scroll;
+  if (!wanted) window.scrollTo(0, scroll);
   if (wanted) {
     const again = DATA.board.panels
       .flatMap(p => p.areas).flatMap(a => a.plates)
@@ -1665,10 +1854,16 @@ function applyFresh(fresh) {
 /* ---------- two screens ---------- */
 const MAP_PARTS = ["stage", "top", "legend", "panels", "bottom"];
 function showBoard(on) {
+  if (on && openTask) closeCard();     // the card belongs to the board screen
   el("board").style.display = on ? "flex" : "none";
+  el("card").style.display = on ? "" : "none";
   for (const id of MAP_PARTS) el(id).style.display = on ? "none" : "";
   el("toboard").classList.toggle("on", on);
   el("tomap").classList.toggle("on", !on);
+  /* The one place the dark palette is turned on, and it is bound to the screen
+     that needs it: the map is a dark canvas, so its chrome has to be readable
+     over it. The board is light and does not scroll under a drag. */
+  document.body.classList.toggle("mapmode", !on);
   sessionStorage.setItem("screen", on ? "board" : "map");
   if (!on) { resize(); fit(); }        // the canvas had no size while hidden
 }

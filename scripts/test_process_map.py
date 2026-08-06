@@ -23,19 +23,49 @@ import process_map_schema as schema
 import process_map_state as state
 
 
+def a_question(**over) -> dict:
+    """One open question as the collector hands it over: text plus its owner.
+
+    Never a bare string on this boundary. Whose question it is decides which area
+    it stands in, and a board that guesses the owner is the defect this shape
+    exists to prevent — «ждёт решения человека» held sixteen entries and the user
+    owned three of them.
+    """
+    question = {"text": "Публиковать ли перенос?", "owner": "product",
+                "asked_at": None, "channel": None, "ref": None,
+                "asked_src": None, "answer_src": None,
+                "note": "не помечено как спрошенное у пользователя — это наш вопрос"}
+    question.update(over)
+    return question
+
+
+def asked_question(**over) -> dict:
+    """A question that was actually put to the user, with the mark that says so."""
+    return a_question(owner="user", asked_at="2026-08-05", channel="email",
+                      ref="19fd2a19c92afcc5",
+                      asked_src="пометка «спрошено у пользователя 2026-08-05, "
+                                "письмо 19fd2a19c92afcc5» в самой строке",
+                      note=None, **over)
+
+
 def a_task(**over) -> dict:
     board = over.pop("board", {})
     run = over.pop("run", None)
     detail = over.pop("detail", {})
+    questions = over.pop("questions", [])
     task = {"id": 1, "title": "Задача", "status": "planned", "status_detail": None,
-            "dir": "001-task", "gates": [], "flags": [], "questions": [],
+            "dir": "001-task", "gates": [], "flags": [],
+            "questions": questions,
+            "asked_user": [q for q in questions if q["owner"] == "user"],
+            "our_questions": [q for q in questions if q["owner"] == "product"],
             "run": {"state": None, "current_step": None, "runner": None,
                     "workflow": None, "sandbox": None,
                     "stop_reason": None, "exit_code": None, "pid": None,
                     "alive": False, "alive_src": None, "progress": None,
                     "refusal": None, "refusal_summary": None, "repo": None},
             "detail": {"review": None, "delivery": None, "files": [],
-                       "moved": None, "moved_age_seconds": None, "moved_src": None},
+                       "moved": None, "moved_age_seconds": None, "moved_src": None,
+                       "handoff": None},
             "board": {"area": "queued", "actor": None, "actor_src": None,
                       "role": None, "role_src": None, "happening": None,
                       "why": None, "why_src": None, "since": None, "since_src": None,
@@ -77,7 +107,9 @@ def a_snapshot(tasks=None, products=None) -> dict:
             "channels": [{"channel": "telegram", "direction": "out", "count": 3},
                          {"channel": "email", "direction": "in", "count": 2}],
         }],
-        "products": products or [{"slug": "task-agent", "questions": ["Публиковать ли перенос?"],
+        "products": products or [{"slug": "task-agent",
+                                  "questions": [asked_question()],
+                                  "own_questions": [],
                                   "effect": ["2026-08-06 — карта показывает ленту"],
                                   "promises": [a_promise()]}],
         "owners_awake": [],
@@ -549,8 +581,8 @@ class BoardLayout(unittest.TestCase):
     def test_the_areas_stand_in_the_order_of_urgency(self):
         board = render.build_board(a_snapshot())
         order = [area["key"] for area in board["panels"][0]["areas"]]
-        self.assertEqual(order, ["waiting_human", "running", "stuck", "pickup",
-                                 "queued", "plan", "done"])
+        self.assertEqual(order, ["waiting_human", "running", "stuck", "undelivered",
+                                 "product_owner", "pickup", "queued", "plan", "done"])
 
     def test_what_can_be_picked_up_stands_above_what_is_held(self):
         """The first question of a wake-up outranks the reference list below it.
@@ -605,11 +637,13 @@ class BoardLayout(unittest.TestCase):
                        board={"area": "queued", "age_seconds": 900,
                               "since": f"2026-07-28T15:55:3{n}.2{n}0000+00:00"})
                 for n in (1, 2, 3)]
-        first = render.build_board(a_snapshot(near))["panels"][0]["areas"][3]
+        area_of = lambda board: next(a for a in board["panels"][0]["areas"]
+                                     if a["key"] == "queued")
+        first = area_of(render.build_board(a_snapshot(near)))
         # The same tasks, collected again with the ages rounded differently.
         for task in near:
             task["board"]["age_seconds"] += 1
-        second = render.build_board(a_snapshot(near))["panels"][0]["areas"][3]
+        second = area_of(render.build_board(a_snapshot(near)))
         self.assertEqual([p["id"] for p in first["plates"]], [p["id"] for p in second["plates"]])
 
     def test_a_live_process_and_a_lying_label_are_two_fields_on_the_plate(self):
@@ -628,6 +662,9 @@ class BoardLayout(unittest.TestCase):
                                          ("blocked", [], False), ("planned", [], True),
                                          ("planned", ["gap"], False), ("planned", [], False)):
             self.assertIn(state.board_area(status, flags, questions), schema.BOARD_AREAS)
+        self.assertIn(state.board_area("planned", [], False, None, ours=True), schema.BOARD_AREAS)
+        self.assertIn(state.board_area("completed", [], False, None, undelivered=True),
+                      schema.BOARD_AREAS)
 
 
 class BoardArea(unittest.TestCase):
@@ -692,22 +729,22 @@ class WaitingForAPerson(unittest.TestCase):
     def test_none_of_the_six_named_tasks_waits_for_a_person(self):
         for label, bullets in self.NOT_WAITING.items():
             with self.subTest(label):
-                self.assertEqual(state.pending_questions(bullets), [])
+                self.assertEqual(state.unsettled_questions(bullets), [])
 
     def test_a_task_blocked_without_a_question_is_not_waiting_for_a_person(self):
         # 760, 727 and 747 carry `- none` under the heading and reached the area
         # purely through their status.
-        self.assertEqual(state.pending_questions([]), [])
+        self.assertEqual(state.unsettled_questions([]), [])
         self.assertEqual(state.board_area("blocked", ["blocked"], False), "stuck")
 
-    def test_a_real_open_question_still_gets_there(self):
-        # The other half of the acceptance criterion: nothing genuinely waiting
-        # on a person may disappear while the false positives go.
-        self.assertEqual(state.pending_questions(self.STILL_WAITING), self.STILL_WAITING)
-        self.assertEqual(state.board_area("planned", [], True), "waiting_human")
+    def test_an_open_question_is_still_recognised_as_a_question(self):
+        # The other half of the old acceptance criterion: a real question may not
+        # disappear while the false positives go. Whose it is, is a second
+        # question and has its own tests below.
+        self.assertEqual(state.unsettled_questions(self.STILL_WAITING), self.STILL_WAITING)
 
     def test_a_struck_through_question_is_settled(self):
-        self.assertEqual(state.pending_questions(["~~Перезапускать ли 035?~~ Закрыт 2026-08-04."]), [])
+        self.assertEqual(state.unsettled_questions(["~~Перезапускать ли 035?~~ Закрыт 2026-08-04."]), [])
 
     def test_the_products_own_questions_are_in_the_same_count_and_the_same_area(self):
         # Seventeen canonical product questions sat in the same payload and were
@@ -722,7 +759,8 @@ class WaitingForAPerson(unittest.TestCase):
         self.assertEqual(board["waiting_tasks"], 0)
 
     def test_the_headline_number_is_the_sum_of_its_two_named_parts(self):
-        waiting = a_task(id=9, dir="009-t", questions=["Брать все девятнадцать?"],
+        waiting = a_task(id=9, dir="009-t",
+                         questions=[asked_question(text="Брать все девятнадцать?")],
                          board={"area": "waiting_human"})
         board = render.build_board(a_snapshot([waiting]))
         self.assertEqual(board["waiting"], board["waiting_tasks"] + board["waiting_questions"])
@@ -730,11 +768,157 @@ class WaitingForAPerson(unittest.TestCase):
 
     def test_a_question_of_a_product_no_direction_owns_is_not_invented_onto_a_panel(self):
         snapshot = a_snapshot()
-        snapshot["products"].append({"slug": "unowned", "questions": ["Ничей вопрос?"],
-                                     "effect": []})
+        snapshot["products"].append({"slug": "unowned",
+                                     "questions": [asked_question(text="Ничей вопрос?")],
+                                     "own_questions": [], "effect": []})
         board = render.build_board(snapshot)
         shown = [q["text"] for a in board["panels"][0]["areas"] for q in a["questions"]]
         self.assertNotIn("Ничей вопрос?", shown)
+
+
+class WaitingMeansWaitingOnTheUser(unittest.TestCase):
+    """Part 1 of task 817: the area is bounded by what was asked of the user.
+
+    The user counted it by hand on the live state of 2026-08-06: sixteen entries
+    stood under «ждёт решения человека», and three of them were his. The rest
+    were our own product decisions, questions to an executor about the Max
+    environment, a repair shipped in `e12e511`, and questions he had already
+    answered in writing — while the contour's own letters told him nothing was
+    required of him. These tests hold the two observations that now bound it.
+    """
+
+    NO_MAILBOX = {"threads": {}, "replies": {}, "sent_known": False}
+
+    # Verbatim from the thirteen the product owner took apart, one per reason.
+    OURS = [
+        "Какие из находок 706 (AR-001..AR-004) по гейтам и ревью превращаем в работу.",
+        "`repo-health` сканирует старые каталоги задач и валит гейт на снапшотах "
+        "255/586/587/683. Рекомендация продакта: сузить область гейта. Решение за пользователем.",
+        "Миграция с остановкой приемлема?",
+        "Сеть у ребёнка включается всем прогонам подряд или только тем, кому она нужна?",
+    ]
+
+    def test_a_question_nobody_put_to_the_user_is_ours(self):
+        for text in self.OURS:
+            with self.subTest(text[:40]):
+                entry = state.question_entry(text, self.NO_MAILBOX)
+                self.assertEqual(entry["owner"], "product")
+                self.assertIsNone(entry["asked_at"])
+
+    def test_the_recommendation_addressed_to_the_user_is_still_ours(self):
+        """«Решение за пользователем» is a sentence, not an observation.
+
+        This is the exact shape that filled the area: a product owner writing
+        that the decision is the user's does not make the user aware of it. Only
+        a message that went out does, and that is what the mark records.
+        """
+        entry = state.question_entry(
+            "Сузить область гейта или чистить артефакты? Решение за пользователем.",
+            self.NO_MAILBOX)
+        self.assertEqual(entry["owner"], "product")
+
+    def test_a_question_marked_as_asked_belongs_to_the_user(self):
+        entry = state.question_entry(
+            "Сколько ставок брать в первый заход? Спрошено у пользователя 2026-08-05, "
+            "письмо `19fd2a19c92afcc5`.", self.NO_MAILBOX)
+        self.assertEqual(entry["owner"], "user")
+        self.assertEqual(entry["asked_at"], "2026-08-05")
+        self.assertEqual(entry["channel"], "email")
+        self.assertEqual(entry["ref"], "19fd2a19c92afcc5")
+        self.assertIn("19fd2a19c92afcc5", entry["asked_src"])
+
+    def test_a_telegram_question_carries_its_message_too(self):
+        entry = state.question_entry(
+            "Пересобирать ли портфель? Спрошено у пользователя 2026-08-06, Telegram 18479.",
+            self.NO_MAILBOX)
+        self.assertEqual((entry["owner"], entry["channel"], entry["ref"]),
+                         ("user", "telegram", "18479"))
+
+    def test_an_answer_in_the_same_thread_takes_the_question_out_by_itself(self):
+        """The user's own words: an answered question must leave on its own.
+
+        «Вопрос, на который пользователь ответил, обязан исчезать из области сам,
+        по наблюдаемому признаку ответа, а не потому, что кто-то вспомнил
+        вычеркнуть строку.» The observation is a letter of his in the same thread,
+        dated no earlier than the question.
+        """
+        mail = {"threads": {"19fd2a19c92afcc5": "продакт moex strategy lab"},
+                "replies": {"продакт moex strategy lab":
+                            state.datetime(2026, 8, 6, 8, 31, tzinfo=state.timezone.utc)},
+                "sent_known": True}
+        entry = state.question_entry(
+            "Сколько ставок брать? Спрошено у пользователя 2026-08-05, письмо 19fd2a19c92afcc5.",
+            mail)
+        self.assertEqual(entry["owner"], "product")
+        self.assertIn("в том же треде", entry["answer_src"])
+        self.assertIn("незаписанным", entry["note"])
+
+    def test_a_letter_older_than_the_question_is_not_an_answer_to_it(self):
+        mail = {"threads": {"19fd2a19c92afcc5": "продакт moex strategy lab"},
+                "replies": {"продакт moex strategy lab":
+                            state.datetime(2026, 8, 1, 8, 31, tzinfo=state.timezone.utc)},
+                "sent_known": True}
+        entry = state.question_entry(
+            "Сколько ставок брать? Спрошено у пользователя 2026-08-05, письмо 19fd2a19c92afcc5.",
+            mail)
+        self.assertEqual(entry["owner"], "user")
+
+    def test_an_unresolvable_thread_says_so_instead_of_claiming_silence(self):
+        entry = state.question_entry(
+            "Спрошено у пользователя 2026-08-05, письмо 19fd2a19c92afcc5. Так что решаем?",
+            self.NO_MAILBOX)
+        self.assertEqual(entry["owner"], "user")
+        self.assertIn("не найдено в почтовом хранилище", entry["note"])
+
+    def test_a_thread_is_one_thread_whatever_prefix_a_client_added(self):
+        self.assertEqual(state.thread_key("Re: Продакт: MOEX Strategy Lab"),
+                         state.thread_key("Продакт: MOEX Strategy Lab"))
+        self.assertEqual(state.thread_key("Fwd: Re: Сводка"), state.thread_key("Сводка"))
+
+    def test_our_question_puts_the_task_in_its_own_area_and_not_in_the_user_s(self):
+        self.assertEqual(state.board_area("planned", [], False, None, ours=True),
+                         "product_owner")
+        self.assertEqual(state.board_area("planned", [], True, None, ours=True),
+                         "waiting_human")
+
+    def test_our_question_does_not_outrank_a_live_run_or_a_jam(self):
+        self.assertEqual(state.board_area("planned", ["live"], False, None, ours=True),
+                         "running")
+        self.assertEqual(state.board_area("blocked", ["blocked"], False, None, ours=True),
+                         "stuck")
+
+    def test_nothing_is_hidden_by_the_split(self):
+        """Everything that left the user's area stands in ours, counted there."""
+        ours = a_task(id=5, dir="005-t", board={"area": "product_owner"},
+                      questions=[a_question(text="Какие находки 706 берём в работу?")])
+        snapshot = a_snapshot([ours])
+        snapshot["products"][0]["questions"] = []
+        snapshot["products"][0]["own_questions"] = [a_question(text="Сужать ли гейт repo-health?")]
+        board = render.build_board(snapshot)
+        area = next(a for a in board["panels"][0]["areas"] if a["key"] == "product_owner")
+        self.assertEqual(area["count"], 2)          # one plate and one product question
+        self.assertEqual([q["text"] for q in area["questions"]],
+                         ["Сужать ли гейт repo-health?"])
+        self.assertEqual(board["waiting"], 0)
+        self.assertEqual(board["ours"], 2)
+
+    def test_a_user_question_without_the_mark_that_asked_it_is_refused(self):
+        # The same rule as `actor_src`: an area that tells a person they are
+        # blocking work has to say what put the question in front of them.
+        with self.assertRaises(schema.ContractError):
+            schema.validate_question(a_question(owner="user", asked_src=None), "вопрос")
+
+    def test_the_split_in_the_document_cannot_drift_from_the_questions(self):
+        task = a_task(questions=[asked_question()])
+        task["our_questions"] = task["asked_user"]          # a reader's mistake
+        with self.assertRaises(schema.ContractError):
+            schema.validate_snapshot(a_snapshot([task]))
+
+    def test_the_page_prints_the_mark_next_to_the_question(self):
+        page = (Path(__file__).parent / "process_map_template.html").read_text()
+        self.assertIn("спрошено \" + q.asked_at", page)
+        self.assertIn("Решает продакт", (Path(__file__).parent
+                                         / "process_map_schema.py").read_text())
 
 
 class JamReason(unittest.TestCase):
@@ -1463,6 +1647,179 @@ class OneObserver(unittest.TestCase):
     def test_an_unknown_thread_is_still_refused_loudly(self):
         with self.assertRaises(SystemExit):
             state.build(False, only="no-such-thread")
+
+
+class DoneButNeverShown(unittest.TestCase):
+    """Part 3 of task 817: finished work whose result nobody was shown.
+
+    Task 783 finished at 16:14 with a 441 KB report in its `deliverables/`, and
+    the report lay on the server for about an hour. Its receipts were
+    `attempt_started` 18447 and `attempt_completed` 18479 — both about the life
+    of the run, neither about the document. Nobody noticed until the user said
+    «по выполненным задачам я не видел документов в почте или в телеграме».
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.task = Path(self.tmp.name)
+        self.addCleanup(self.tmp.cleanup)
+
+    def like_783(self) -> Path:
+        """The state 783 was actually in when its report was lying on the server."""
+        box = self.task / "deliverables"
+        box.mkdir()
+        (box / "moex-portfolio-history-sources-2026-08-06.html").write_text("x" * 441097)
+        (box / "manifest.json").write_text("[]")
+        pipeline = self.task / "dev-pipeline"
+        pipeline.mkdir()
+        (pipeline / "notification-receipts.jsonl").write_text(
+            '{"event_id": "e1", "kind": "attempt_started", "message_id": 18447, '
+            '"recorded_at": "2026-08-06T12:03:55+00:00", "schema_version": "1.0"}\n'
+            '{"event_id": "e2", "kind": "attempt_completed", "message_id": 18479, '
+            '"recorded_at": "2026-08-06T14:19:28+00:00", "schema_version": "1.0"}\n')
+        return self.task
+
+    def test_the_case_of_783_is_caught(self):
+        hand = state.handoff(self.like_783())
+        self.assertFalse(hand["delivered"])
+        self.assertEqual(hand["name"], "deliverables/moex-portfolio-history-sources-2026-08-06.html")
+        self.assertEqual(hand["bytes"], 441097)
+        self.assertEqual(state.board_area("completed", [], False, None, undelivered=True),
+                         "undelivered")
+
+    def test_lifecycle_receipts_are_not_delivery_of_a_document(self):
+        # Every receipt in the whole repository is a lifecycle event, so «квитанция
+        # есть» has never once meant «документ доставлен».
+        self.assertIsNone(state.delivery_receipt(self.like_783()))
+
+    def test_the_delivery_note_closes_it(self):
+        task = self.like_783()
+        (task / "delivery.md").write_text("# Доставка\nTelegram message_id=18491\n")
+        hand = state.handoff(task)
+        self.assertTrue(hand["delivered"])
+        self.assertIn("delivery.md", hand["delivered_src"])
+
+    def test_a_receipt_about_something_other_than_the_run_closes_it_too(self):
+        task = self.like_783()
+        with (task / "dev-pipeline" / "notification-receipts.jsonl").open("a") as handle:
+            handle.write('{"kind": "deliverable_sent", "message_id": 18491, '
+                         '"recorded_at": "2026-08-06T15:20:00+00:00"}\n')
+        hand = state.handoff(task)
+        self.assertTrue(hand["delivered"])
+        self.assertIn("deliverable_sent", hand["delivered_src"])
+
+    def test_a_task_with_nothing_made_for_a_person_is_not_in_the_area(self):
+        (self.task / "plan.md").write_text("# Plan\n")
+        self.assertIsNone(state.handoff(self.task))
+        self.assertEqual(state.board_area("completed", [], False, None, undelivered=False),
+                         "done")
+
+    def test_a_report_written_straight_into_the_task_directory_counts(self):
+        (self.task / "report.html").write_text("<html></html>")
+        self.assertEqual(state.handoff(self.task)["name"], "report.html")
+
+    def test_the_manifest_alone_is_not_a_document_for_a_person(self):
+        box = self.task / "deliverables"
+        box.mkdir()
+        (box / "manifest.json").write_text("[]")
+        self.assertIsNone(state.handoff(self.task))
+
+    def test_the_claim_travels_with_what_was_read_to_make_it(self):
+        task = self.like_783()
+        with self.assertRaises(schema.ContractError):
+            schema.validate_snapshot(a_snapshot([a_task(
+                detail={"handoff": {**state.handoff(task), "delivered_src": ""}})]))
+
+    def test_the_area_reaches_the_board_and_the_strip(self):
+        hand = state.handoff(self.like_783())
+        task = a_task(id=783, dir="783-moex", status="completed",
+                      board={"area": "undelivered"}, detail={"handoff": hand})
+        board = render.build_board(a_snapshot([task]))
+        area = next(a for a in board["panels"][0]["areas"] if a["key"] == "undelivered")
+        self.assertEqual(area["count"], 1)
+        self.assertEqual([p["id"] for p in board["undelivered"]], [783])
+        self.assertFalse(area["plates"][0]["detail"]["handoff"]["delivered"])
+
+    def test_the_freshest_undelivered_document_stands_first(self):
+        """The one area that reads newest first, and why.
+
+        Everywhere else time in a state is the problem, so the oldest plate leads.
+        Here an old finished task was either handed over some other way or has
+        stopped mattering, and the document somebody is waiting for right now is
+        the one that just appeared — 783's report was an hour old, not a month.
+        """
+        old = a_task(id=1, dir="001-t", status="completed",
+                     board={"area": "undelivered", "since": "2026-07-01T10:00:00+00:00",
+                            "age_seconds": 3000000})
+        fresh = a_task(id=2, dir="002-t", status="completed",
+                       board={"area": "undelivered", "since": "2026-08-06T14:19:00+00:00",
+                              "age_seconds": 3600})
+        board = render.build_board(a_snapshot([old, fresh]))
+        area = next(a for a in board["panels"][0]["areas"] if a["key"] == "undelivered")
+        self.assertEqual([p["id"] for p in area["plates"]], [2, 1])
+        self.assertEqual([p["id"] for p in board["undelivered"]], [2, 1])
+
+    def test_the_page_names_the_document_and_what_was_read(self):
+        page = (Path(__file__).parent / "process_map_template.html").read_text()
+        self.assertIn("документ человеку: ", page)
+        self.assertIn("Сделано, но не доставлено", page)
+
+
+class ReadableAtBothSizes(unittest.TestCase):
+    """Part 2 of task 817: light, scrolling, and nothing cut.
+
+    «Давай доску сделаем в светлой теме. И не надо стараться всё упихнуть в
+    экран. Мне подойдёт, если будет скролл. А то так ничего не понятно:
+    микроплашки с микроскроллом.» Measured in a browser as well — see
+    `tasks/817-.../verification.md` — but the shapes that made it impossible are
+    held here, because a stylesheet drifts back quietly.
+    """
+
+    def page(self) -> str:
+        return (Path(__file__).parent / "process_map_template.html").read_text()
+
+    def board_css(self) -> str:
+        text = self.page()
+        return text[text.index("---------- board"):text.index("---------- the card")]
+
+    def test_the_board_is_light(self):
+        text = self.page()
+        head = text[text.index(":root"):text.index("* { box-sizing")]
+        self.assertIn("--bg0: #f2f5f9", head)
+        self.assertIn("--bg1: #ffffff", head)
+        # The dark palette survives only as the chrome of the isometric map, and
+        # only under the class the screen switch sets.
+        self.assertIn("body.mapmode {", text)
+        self.assertIn('classList.toggle("mapmode", !on)', text)
+
+    def test_the_page_scrolls_instead_of_squeezing_everything_into_the_window(self):
+        text = self.page()
+        self.assertNotIn("html, body { margin: 0; height: 100%; overflow: hidden; }", text)
+        self.assertIn("body.mapmode { height: 100%; overflow: hidden; }", text)
+        # The board is in the flow of the document, not pinned to the viewport.
+        self.assertNotIn("#board { position: fixed", text)
+
+    def test_no_plate_area_or_column_scrolls_inside_itself(self):
+        css = self.board_css()
+        for gone in ("overflow-y: auto", "overflow: auto", "max-height: 24vh", "max-height: 17vh"):
+            self.assertNotIn(gone, css, f"вложенный скролл вернулся: {gone}")
+
+    def test_no_text_on_a_plate_is_clamped_or_elided(self):
+        # Every `-webkit-line-clamp` in this file existed to protect a fixed
+        # screen height that no longer exists, and each of them cut a sentence
+        # the board had already promised to answer.
+        self.assertNotIn("-webkit-line-clamp", self.page())
+
+    def test_every_question_of_a_plate_is_shown_and_not_the_first_two(self):
+        text = self.page()
+        self.assertIn("for (const question of p.questions) node.appendChild(askedNode(question))", text)
+        self.assertNotIn("p.questions.slice(0, 2)", text)
+
+    def test_the_card_takes_the_page_rather_than_scrolling_inside_a_drawer(self):
+        text = self.page()
+        self.assertIn("#cardbody { padding:", text)
+        self.assertNotIn("#cardbody { overflow: auto", text)
+        self.assertIn("window.scrollTo(0, boardScroll)", text)
 
 
 if __name__ == "__main__":
