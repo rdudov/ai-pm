@@ -25,6 +25,8 @@ import sys
 import time
 from pathlib import Path
 
+from process_map_schema import SCHEMA_VERSION, validate_snapshot
+
 HOME = Path(__file__).resolve().parents[1]
 CONFIG = HOME / "threads.json"
 PRODUCTS = HOME / "products"
@@ -239,6 +241,12 @@ SCRUB = [
 ]
 
 
+# Titles survive anonymisation on purpose: the user asked to recognise a specific
+# task among all the shown work by its real name, not by a demo caption. Content
+# privacy of those titles stays a human step before any showing.
+KEEP_AS_IS = {"title", "task_title"}
+
+
 def scrub(value):
     if isinstance(value, str):
         for pattern, replacement in SCRUB:
@@ -247,7 +255,8 @@ def scrub(value):
     if isinstance(value, list):
         return [scrub(item) for item in value]
     if isinstance(value, dict):
-        return {key: scrub(item) for key, item in value.items()}
+        return {key: item if key in KEEP_AS_IS else scrub(item)
+                for key, item in value.items()}
     return value
 
 
@@ -265,12 +274,16 @@ def build(anonymize: bool) -> dict:
             "repos": [repo_state(path) for path in thread.get("repos", [])],
         })
     snapshot = {
-        "schema_version": 1,
+        "schema_version": SCHEMA_VERSION,
         "mode": "demo" if anonymize else "real",
         "threads": threads,
         "products": products(),
     }
-    return scrub(snapshot) if anonymize else snapshot
+    if anonymize:
+        snapshot = scrub(snapshot)
+    # The renderer sees this document and nothing else, so the shape it is
+    # promised is checked here rather than discovered in the browser.
+    return validate_snapshot(snapshot)
 
 
 def main() -> None:

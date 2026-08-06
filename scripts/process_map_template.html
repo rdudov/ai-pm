@@ -1,0 +1,715 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Карта процессной работы</title>
+<style>
+  :root {
+    --ink: #e8ecf5; --dim: #97a3bb; --edge: #1d2536;
+    --bg0: #070b14; --bg1: #0e1524; --panel: rgba(14,21,36,.86);
+    --live: #4ade80; --blocked: #f87171; --killed: #a78bfa;
+    --stale: #fbbf24; --gap: #fb923c; --done: #38bdf8; --idle: #64748b;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; }
+  body {
+    background: radial-gradient(120% 90% at 50% 0%, var(--bg1), var(--bg0));
+    color: var(--ink); font: 14px/1.45 "Inter", "Segoe UI", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  #stage { position: fixed; inset: 0; }
+  canvas { display: block; width: 100%; height: 100%; cursor: grab; }
+  canvas.dragging { cursor: grabbing; }
+
+  .hud { position: fixed; pointer-events: none; }
+  .hud > * { pointer-events: auto; }
+
+  #top { top: 0; left: 0; right: 0; padding: 14px 18px; display: flex;
+         gap: 16px; align-items: baseline; flex-wrap: wrap;
+         background: linear-gradient(180deg, rgba(7,11,20,.92), transparent); }
+  #top h1 { margin: 0; font-size: 17px; font-weight: 650; letter-spacing: .2px; }
+  #top .sub { color: var(--dim); font-size: 12.5px; }
+  #mode { font-size: 11px; letter-spacing: .08em; text-transform: uppercase;
+          border: 1px solid var(--edge); border-radius: 999px; padding: 2px 9px; color: var(--dim); }
+
+  #panels { top: 62px; right: 14px; width: 310px; display: flex; flex-direction: column; gap: 12px; }
+  .panel { background: var(--panel); border: 1px solid var(--edge); border-radius: 12px;
+           padding: 12px 13px; backdrop-filter: blur(9px); max-height: 34vh; overflow: auto; }
+  .panel h2 { margin: 0 0 8px; font-size: 12px; letter-spacing: .09em; text-transform: uppercase; color: var(--dim); }
+  .panel h2 b { color: var(--ink); font-size: 13px; margin-left: 4px; }
+  .panel li { list-style: none; margin: 0 0 7px; padding-left: 15px; position: relative; font-size: 12.5px; }
+  .panel ul { margin: 0; padding: 0; }
+  #waiting li::before { content: "?"; position: absolute; left: 0; color: var(--stale); font-weight: 700; }
+  #done li::before { content: "✓"; position: absolute; left: 0; color: var(--done); }
+  .panel .src { color: var(--dim); font-size: 11px; }
+
+  #legend { left: 14px; top: 62px; width: 232px; background: var(--panel);
+            border: 1px solid var(--edge); border-radius: 12px; padding: 11px 12px; backdrop-filter: blur(9px); }
+  #legend h2 { margin: 0 0 8px; font-size: 12px; letter-spacing: .09em; text-transform: uppercase; color: var(--dim); }
+  .lg { display: flex; align-items: center; gap: 9px; margin-bottom: 6px; font-size: 12.5px; }
+  .lg canvas { width: 34px; height: 26px; flex: none; }
+
+  #bottom { left: 0; right: 0; bottom: 0; padding: 12px 16px 14px;
+            background: linear-gradient(0deg, rgba(7,11,20,.96), transparent); }
+  #nowline { display: flex; gap: 10px; align-items: baseline; min-height: 34px; margin-bottom: 6px; }
+  #nowkind { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--dim);
+             border: 1px solid var(--edge); border-radius: 6px; padding: 1px 7px; flex: none; }
+  #nowtext { font-size: 14px; font-weight: 550; }
+  #nowsrc { color: var(--dim); font-size: 12px; }
+  #controls { display: flex; gap: 12px; align-items: center; }
+  button { background: #162034; color: var(--ink); border: 1px solid var(--edge);
+           border-radius: 9px; padding: 7px 13px; font: inherit; cursor: pointer; }
+  button:hover { background: #1d2a45; }
+  button.primary { background: #1e4f38; border-color: #2f7a55; }
+  #scrub { flex: 1; accent-color: var(--live); height: 22px; }
+  #clock { font-variant-numeric: tabular-nums; color: var(--dim); font-size: 12.5px; min-width: 128px; text-align: right; }
+  select { background: #162034; color: var(--ink); border: 1px solid var(--edge);
+           border-radius: 9px; padding: 6px 8px; font: inherit; }
+
+  #tip { position: fixed; z-index: 9; background: rgba(9,14,24,.96); border: 1px solid var(--edge);
+         border-radius: 10px; padding: 9px 11px; max-width: 300px; font-size: 12.5px;
+         display: none; pointer-events: none; }
+  #tip b { display: block; margin-bottom: 4px; }
+  #tip .st { color: var(--dim); font-size: 11.5px; }
+
+  /* On a phone the two panels would bury the map, so they collapse to two taps:
+     the counts stay visible, the lines open on demand. */
+  @media (max-width: 760px) {
+    #legend { display: none; }
+    #panels { top: 46px; left: 8px; right: 8px; width: auto; flex-direction: row; gap: 8px; }
+    .panel { flex: 1; padding: 8px 10px; max-height: none; overflow: visible; }
+    .panel h2 { margin: 0; cursor: pointer; font-size: 11px; }
+    .panel ul { display: none; }
+    .panel.open { position: absolute; top: 0; left: 0; right: 0; z-index: 5;
+                  max-height: 62vh; overflow: auto; }
+    .panel.open ul { display: block; margin-top: 8px; }
+    #top { padding: 10px 12px; }
+    #top h1 { font-size: 15px; }
+    #top .sub { display: none; }
+    #nowsrc { display: none; }
+    #nowtext { font-size: 13px; }
+    #nowline { min-height: 46px; }
+    #bottom { padding: 8px 10px 10px; }
+    #controls { gap: 7px; }
+    button { padding: 6px 9px; font-size: 12.5px; }
+    select { padding: 5px 4px; font-size: 12.5px; }
+    #clock { display: none; }
+    #mode { display: none; }
+  }
+</style>
+</head>
+<body>
+<div id="stage"><canvas id="map"></canvas></div>
+
+<div class="hud" id="top">
+  <h1>Карта процессной работы</h1>
+  <span class="sub" id="subtitle"></span>
+  <span id="mode"></span>
+</div>
+
+<div class="hud" id="legend">
+  <h2>Что значит форма</h2>
+  <div id="legenditems"></div>
+</div>
+
+<div class="hud" id="panels">
+  <div class="panel" id="waiting"><h2>Ждёт человека <b id="waitcount"></b></h2><ul></ul></div>
+  <div class="panel" id="done"><h2>Готово <b id="donecount"></b></h2><ul></ul></div>
+</div>
+
+<div class="hud" id="bottom">
+  <div id="nowline">
+    <span id="nowkind">—</span>
+    <span><span id="nowtext">нажмите «Пуск»</span> <span id="nowsrc"></span></span>
+  </div>
+  <div id="controls">
+    <button class="primary" id="play">▶ Пуск</button>
+    <button id="rewind">⟲ В начало</button>
+    <input type="range" id="scrub" min="0" max="1000" value="0">
+    <select id="speed">
+      <option value="0.5">×0,5</option>
+      <option value="1" selected>×1</option>
+      <option value="3">×3</option>
+      <option value="10">×10</option>
+    </select>
+    <span id="clock"></span>
+  </div>
+</div>
+
+<div id="tip"></div>
+
+<script id="payload" type="application/json">__DATA__</script>
+<script>
+"use strict";
+const DATA = JSON.parse(document.getElementById("payload").textContent);
+const SNAP = DATA.snapshot, RECORDS = DATA.timeline, WORLD = DATA.world;
+
+/* ---------- isometric projection ---------- */
+const TW = 68, TH = 34;               // tile width and height in world units
+const iso = (x, y) => ({ x: (x - y) * TW / 2, y: (x + y) * TH / 2 });
+
+const COLORS = {
+  live: "#4ade80", blocked: "#f87171", killed: "#a78bfa", stale_label: "#fbbf24",
+  gap: "#fb923c", delivered: "#38bdf8", idle: "#64748b"
+};
+const AREA_HUE = [205, 152, 32, 275];
+
+/* ---------- time ----------
+   Real observation times are kept and shown, but the playhead runs on its own
+   clock: a quiet hour between two records is squeezed to a few seconds, so the
+   recording is watchable and no observation is dropped or moved. */
+const MAX_GAP = 12000;                         // real dead air, squeezed to this
+RECORDS.forEach(r => { r._t = Date.parse(r.at); });
+const REAL = RECORDS.filter(r => !isNaN(r._t));
+let acc = 0;
+REAL.forEach((r, i) => {
+  if (i > 0) acc += Math.min(Math.max(r._t - REAL[i - 1]._t, 0), MAX_GAP);
+  r._pt = acc;
+});
+const T0 = REAL.length ? REAL[0]._t : 0;
+const SPAN = Math.max(acc + 2500, 1000);       // a tail, so the last record is seen
+const PLAY_SECONDS = 70;                       // whole recording compressed to this
+const RATE = SPAN / (PLAY_SECONDS * 1000);
+const FLASH = Math.max(SPAN / 26, 1400);       // how long a record stays "just happened"
+
+let clock = 0, playing = false, speed = 1, lastFrame = 0, ANIM = 0;
+
+/* ---------- layout ---------- */
+const areas = WORLD.areas.map((area, i) => {
+  const cols = Math.ceil(Math.sqrt(area.tasks.length)) || 1;
+  const rows = Math.ceil(area.tasks.length / cols) || 1;
+  const size = Math.max(cols, rows) + 1;
+  const tasks = area.tasks.map((t, k) => ({
+    ...t,
+    gx: area.ox + 1 + (k % cols),
+    gy: area.oy + 1 + Math.floor(k / cols),
+    bob: (i * 7 + k * 13) % 10 / 10
+  }));
+  return { ...area, hue: AREA_HUE[i % AREA_HUE.length], size, tasks, cols, rows };
+});
+const TASKS = {};
+areas.forEach(a => a.tasks.forEach(t => { TASKS[t.task] = t; t.area = a; }));
+
+/* channel endpoints live outside the areas: the outside world of the contour */
+const GATES = {
+  email:    { gx: WORLD.span / 2, gy: -3.2, label: "почта", glyph: "✉" },
+  telegram: { gx: WORLD.span + 3.2, gy: WORLD.span / 2, label: "Telegram", glyph: "◎" },
+  git:      { gx: -3.2, gy: WORLD.span / 2, label: "репозиторий", glyph: "⑂" }
+};
+
+/* ---------- derived state at the playhead ---------- */
+function stateAt(now) {
+  const st = { tasks: {}, channels: {}, recent: [], index: 0 };
+  for (const t of Object.keys(TASKS)) st.tasks[t] = { stations: {}, station: null, last: null, hits: 0 };
+  for (let i = 0; i < REAL.length; i++) {
+    const r = REAL[i], at = r._pt;
+    if (at > now) break;
+    st.index = i + 1;
+    st.at = r._t;
+    const age = now - at;
+    if (age < FLASH) st.recent.push({ r, age });
+    const t = r.task && st.tasks[r.task];
+    if (t) {
+      t.hits++; t.last = r;
+      if (r.station) { t.stations[r.station] = at; if (age < FLASH * 4) t.station = r.station; }
+      if (age < FLASH) t.flash = 1 - age / FLASH;
+      else t.flash = 0;
+    }
+    if (r.channel) {
+      const c = st.channels[r.channel] || (st.channels[r.channel] = { fire: 0, r: null });
+      if (age < FLASH) { c.fire = 1 - age / FLASH; c.r = r; c.task = r.task; }
+    }
+  }
+  return st;
+}
+
+/* ---------- canvas ---------- */
+const cv = document.getElementById("map"), cx = cv.getContext("2d");
+let view = { x: 0, y: 0, k: 1 }, dpr = 1, fitted = null;
+
+function resize() {
+  dpr = Math.min(window.devicePixelRatio || 1, 2);
+  cv.width = cv.clientWidth * dpr; cv.height = cv.clientHeight * dpr;
+  fit();
+}
+function bounds() {
+  let x0 = 1e9, x1 = -1e9, y0 = 1e9, y1 = -1e9;
+  const pts = [];
+  for (const a of areas) {
+    pts.push([a.ox, a.oy], [a.ox + a.size, a.oy], [a.ox, a.oy + a.size], [a.ox + a.size, a.oy + a.size]);
+  }
+  for (const g of Object.values(GATES)) pts.push([g.gx, g.gy]);
+  for (const [gx, gy] of pts) {
+    const p = iso(gx, gy);
+    x0 = Math.min(x0, p.x); x1 = Math.max(x1, p.x);
+    y0 = Math.min(y0, p.y); y1 = Math.max(y1, p.y);
+  }
+  return { x0: x0 - 50, x1: x1 + 50, y0: y0 - 80, y1: y1 + 60 };
+}
+function fit() {
+  const b = bounds(), w = cv.clientWidth, h = cv.clientHeight;
+  const narrow = w < 760;
+  // The panels float over the map with a blurred backdrop, so the world may run
+  // under them: reserving their full width would leave the town in a corner.
+  const padTop = narrow ? 96 : 62, padBottom = narrow ? 116 : 92;
+  const padLeft = narrow ? 6 : 200, padRight = narrow ? 6 : 240;
+  const availW = Math.max(w - padLeft - padRight, 160);
+  const availH = Math.max(h - padTop - padBottom, 160);
+  // An isometric world is twice as wide as it is tall, so fitting a phone by
+  // width leaves a strip of town in a sea of background. On a narrow screen the
+  // map opens zoomed in and is dragged, the way a map is; a wide screen shows
+  // the whole contour at once, which is the point of a top-down view.
+  const k = Math.min(availW / (b.x1 - b.x0), availH / (b.y1 - b.y0)) * (narrow ? 1.9 : 1);
+  fitted = {
+    k, x: padLeft + availW / 2 - (b.x0 + b.x1) / 2 * k,
+    y: padTop + availH / 2 - (b.y0 + b.y1) / 2 * k
+  };
+  view = { ...fitted };
+}
+const S = p => ({ x: view.x + p.x * view.k, y: view.y + p.y * view.k });
+
+/* --- drawing primitives --- */
+function tile(gx, gy, fill, stroke, inset) {
+  const i = inset || 0;
+  const p = [[gx + i, gy + i], [gx + 1 - i, gy + i], [gx + 1 - i, gy + 1 - i], [gx + i, gy + 1 - i]]
+    .map(([x, y]) => S(iso(x, y)));
+  cx.beginPath(); cx.moveTo(p[0].x, p[0].y);
+  for (let n = 1; n < 4; n++) cx.lineTo(p[n].x, p[n].y);
+  cx.closePath();
+  if (fill) { cx.fillStyle = fill; cx.fill(); }
+  if (stroke) { cx.strokeStyle = stroke; cx.lineWidth = 1; cx.stroke(); }
+}
+
+/* An isometric box: the body of a task object. */
+function box(gx, gy, h, top, left, right, w) {
+  const s = w === undefined ? 0.74 : w, o = (1 - s) / 2;
+  const H = h * view.k;
+  const a = S(iso(gx + o, gy + o)), b = S(iso(gx + o + s, gy + o));
+  const c = S(iso(gx + o + s, gy + o + s)), d = S(iso(gx + o, gy + o + s));
+  cx.fillStyle = left;
+  cx.beginPath(); cx.moveTo(a.x, a.y); cx.lineTo(d.x, d.y);
+  cx.lineTo(d.x, d.y - H); cx.lineTo(a.x, a.y - H); cx.closePath(); cx.fill();
+  cx.fillStyle = right;
+  cx.beginPath(); cx.moveTo(d.x, d.y); cx.lineTo(c.x, c.y);
+  cx.lineTo(c.x, c.y - H); cx.lineTo(d.x, d.y - H); cx.closePath(); cx.fill();
+  cx.fillStyle = top;
+  cx.beginPath(); cx.moveTo(a.x, a.y - H); cx.lineTo(b.x, b.y - H);
+  cx.lineTo(c.x, c.y - H); cx.lineTo(d.x, d.y - H); cx.closePath(); cx.fill();
+  return { top: S(iso(gx + 0.5, gy + 0.5)).y - H, cx: S(iso(gx + 0.5, gy + 0.5)).x };
+}
+
+function shade(hue, l, a) { return `hsla(${hue},38%,${l}%,${a === undefined ? 1 : a})`; }
+
+/* A worker figure: a body and a head, small enough to read as a person. */
+function figure(px, py, color, walk) {
+  const k = view.k, s = 7 * k;
+  cx.save();
+  cx.translate(px, py);
+  cx.fillStyle = "rgba(0,0,0,.32)";
+  cx.beginPath(); cx.ellipse(0, 0, s * .8, s * .35, 0, 0, 7); cx.fill();
+  const lean = Math.sin(walk * 6.28) * .18;
+  cx.fillStyle = color;
+  cx.beginPath();
+  cx.moveTo(-s * .42, 0); cx.lineTo(s * .42, 0);
+  cx.lineTo(s * .3 + lean * s, -s * 1.5); cx.lineTo(-s * .3 + lean * s, -s * 1.5);
+  cx.closePath(); cx.fill();
+  cx.beginPath(); cx.arc(lean * s, -s * 1.92, s * .42, 0, 7); cx.fill();
+  cx.restore();
+}
+
+function chains(px, py, w, h) {
+  cx.strokeStyle = "rgba(248,113,113,.95)"; cx.lineWidth = 2.4 * view.k;
+  cx.beginPath();
+  cx.moveTo(px - w, py - h * .35); cx.lineTo(px + w, py - h * .75);
+  cx.moveTo(px - w, py - h * .75); cx.lineTo(px + w, py - h * .35);
+  cx.stroke();
+}
+
+function text(str, px, py, size, color, align) {
+  cx.font = `${size * Math.max(view.k, .55)}px "Inter", system-ui, sans-serif`;
+  cx.textAlign = align || "center"; cx.textBaseline = "alphabetic";
+  cx.fillStyle = color; cx.fillText(str, px, py);
+}
+
+const STATION_ORDER = ["analysis", "development", "tests", "review", "commit", "report"];
+const STATION_RU = { analysis: "анализ", development: "разработка", tests: "тесты",
+                     review: "ревью", commit: "коммит", report: "отчёт" };
+
+function draw(now) {
+  const st = stateAt(now);
+  cx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  cx.clearRect(0, 0, cv.clientWidth, cv.clientHeight);
+
+  /* channel lines first: they run under everything */
+  for (const [name, g] of Object.entries(GATES)) {
+    const fire = st.channels[name];
+    const from = S(iso(g.gx + .5, g.gy + .5));
+    const target = fire && fire.task && TASKS[fire.task]
+      ? S(iso(TASKS[fire.task].gx + .5, TASKS[fire.task].gy + .5))
+      : S(iso(WORLD.span / 2, WORLD.span / 2));
+    cx.strokeStyle = fire && fire.fire > 0 ? `rgba(125,211,252,${.25 + fire.fire * .7})` : "rgba(90,110,150,.20)";
+    cx.lineWidth = (fire && fire.fire > 0 ? 2.4 : 1) * view.k;
+    cx.setLineDash([6 * view.k, 6 * view.k]);
+    cx.beginPath(); cx.moveTo(from.x, from.y); cx.lineTo(target.x, target.y); cx.stroke();
+    cx.setLineDash([]);
+    if (fire && fire.fire > 0) {              /* a message travelling the channel */
+      const t = 1 - fire.fire;
+      const mx = from.x + (target.x - from.x) * t, my = from.y + (target.y - from.y) * t;
+      cx.fillStyle = "#7dd3fc";
+      cx.beginPath(); cx.arc(mx, my, 5 * view.k, 0, 7); cx.fill();
+    }
+    const lit = fire && fire.fire > 0;
+    cx.fillStyle = lit ? "#7dd3fc" : "rgba(150,170,200,.75)";
+    text(g.glyph, from.x, from.y + 5 * view.k, 22, cx.fillStyle);
+    text(g.label, from.x, from.y + 26 * view.k, 12, lit ? "#bae6fd" : "rgba(150,170,200,.7)");
+  }
+
+  /* areas: ground of each direction */
+  for (const a of areas) {
+    for (let x = 0; x < a.size; x++)
+      for (let y = 0; y < a.size; y++)
+        tile(a.ox + x, a.oy + y, shade(a.hue, 13 + ((x + y) % 2) * 2, .95), shade(a.hue, 20, .6));
+    /* open questions: a marker on the ground of the thread that owns them, the
+       same fact the «ждёт человека» panel states in words */
+    const shown = Math.min(a.questions.length, 5);
+    for (let q = 0; q < shown; q++) {
+      const c = S(iso(a.ox + a.size - .5, a.oy + .5 + q * .9));
+      const blink = (Math.sin(ANIM / 700 + q) + 1) / 2;
+      cx.fillStyle = `rgba(251,191,36,${.55 + blink * .45})`;
+      text("?", c.x, c.y - 6 * view.k, 20, cx.fillStyle);
+    }
+    if (a.questions.length > shown) {
+      const c = S(iso(a.ox + a.size - .5, a.oy + .5 + shown * .9));
+      text("+" + (a.questions.length - shown), c.x, c.y - 6 * view.k, 12, "rgba(251,191,36,.8)");
+    }
+  }
+
+  /* task objects, painted back to front so nearer boxes overlap farther ones */
+  const drawList = [], labels = [];
+  for (const a of areas) for (const t of a.tasks) drawList.push(t);
+  drawList.sort((p, q) => (p.gx + p.gy) - (q.gx + q.gy));
+
+  for (const t of drawList) {
+    const ts = st.tasks[t.task] || { stations: {}, hits: 0 };
+    const flags = new Set(t.flags);
+    const live = flags.has("live");
+    const h = 16 + Math.min(t.gates || 0, 5) * 4 + (flags.has("delivered") ? 6 : 0);
+    let hue = a_hue(t, flags);
+    const pulse = live ? (Math.sin(ANIM / 260 + t.bob * 6.28) + 1) / 2 : 0;
+
+    if (live) {                                   /* glow under a working object */
+      const c = S(iso(t.gx + .5, t.gy + .5));
+      const grd = cx.createRadialGradient(c.x, c.y, 0, c.x, c.y, 46 * view.k);
+      grd.addColorStop(0, `rgba(74,222,128,${.30 + pulse * .20})`);
+      grd.addColorStop(1, "rgba(74,222,128,0)");
+      cx.fillStyle = grd; cx.beginPath(); cx.arc(c.x, c.y, 46 * view.k, 0, 7); cx.fill();
+    }
+    tile(t.gx, t.gy, "rgba(255,255,255,.045)", "rgba(255,255,255,.10)", .04);
+
+    /* stations: pads around the object, lit only where something was observed */
+    STATION_ORDER.forEach((s, i) => {
+      if (!(s in ts.stations)) return;
+      const ang = -Math.PI / 2 + i * Math.PI / 3;
+      const c = S(iso(t.gx + .5 + Math.cos(ang) * .42, t.gy + .5 + Math.sin(ang) * .42));
+      const on = ts.station === s;
+      cx.fillStyle = on ? "#fde68a" : "rgba(253,230,138,.34)";
+      cx.beginPath(); cx.arc(c.x, c.y, (on ? 4.6 : 3) * view.k, 0, 7); cx.fill();
+    });
+
+    let body;
+    if (flags.has("killed")) {                    /* a collapsed object, not a done one */
+      body = box(t.gx, t.gy, h * .45, `hsla(${hue},30%,26%,1)`, `hsla(${hue},30%,15%,1)`, `hsla(${hue},30%,20%,1)`, .78);
+      const c = S(iso(t.gx + .5, t.gy + .5));
+      cx.strokeStyle = COLORS.killed; cx.lineWidth = 2.6 * view.k;
+      cx.beginPath();
+      cx.moveTo(c.x - 11 * view.k, body.top - 4 * view.k); cx.lineTo(c.x + 11 * view.k, body.top - 18 * view.k);
+      cx.moveTo(c.x - 11 * view.k, body.top - 18 * view.k); cx.lineTo(c.x + 11 * view.k, body.top - 4 * view.k);
+      cx.stroke();
+    } else if (flags.has("delivered")) {          /* a delivered crate with a ribbon */
+      body = box(t.gx, t.gy, h, `hsl(${hue},45%,52%)`, `hsl(${hue},45%,28%)`, `hsl(${hue},45%,38%)`, .70);
+      cx.strokeStyle = "rgba(255,255,255,.55)"; cx.lineWidth = 1.6 * view.k;
+      const c = S(iso(t.gx + .5, t.gy + .5));
+      cx.beginPath(); cx.moveTo(c.x - 15 * view.k, body.top + 6 * view.k);
+      cx.lineTo(c.x, body.top + 13 * view.k); cx.lineTo(c.x + 15 * view.k, body.top + 6 * view.k); cx.stroke();
+    } else {
+      const l = flags.has("idle") ? 30 : 44;
+      body = box(t.gx, t.gy, h, `hsl(${hue},42%,${l + 10}%)`, `hsl(${hue},42%,${l - 16}%)`, `hsl(${hue},42%,${l - 6}%)`);
+    }
+
+    if (flags.has("gap")) {                       /* a notch cut out of the roof */
+      const c = S(iso(t.gx + .5, t.gy + .5));
+      cx.fillStyle = COLORS.gap;
+      cx.beginPath();
+      cx.moveTo(c.x - 8 * view.k, body.top + 2 * view.k);
+      cx.lineTo(c.x, body.top - 9 * view.k);
+      cx.lineTo(c.x + 8 * view.k, body.top + 2 * view.k);
+      cx.closePath(); cx.fill();
+    }
+    if (flags.has("blocked")) {
+      const c = S(iso(t.gx + .5, t.gy + .5));
+      chains(c.x, c.y, 17 * view.k, h * view.k);
+    }
+    if (flags.has("stale_label")) {               /* an oversized banner claiming more */
+      const c = S(iso(t.gx + .5, t.gy + .5));
+      cx.fillStyle = "rgba(251,191,36,.85)";
+      cx.beginPath();
+      cx.moveTo(c.x, body.top - 6 * view.k);
+      cx.lineTo(c.x + 30 * view.k, body.top - 13 * view.k);
+      cx.lineTo(c.x + 30 * view.k, body.top + 1 * view.k);
+      cx.closePath(); cx.fill();
+      cx.strokeStyle = "rgba(251,191,36,.85)"; cx.lineWidth = 1.4 * view.k;
+      cx.beginPath(); cx.moveTo(c.x, body.top - 2 * view.k); cx.lineTo(c.x, body.top + 12 * view.k); cx.stroke();
+    }
+    if (live) {                                   /* the figure at work on the object */
+      const c = S(iso(t.gx + .82, t.gy + .5));
+      figure(c.x, c.y, "#eafff1", (ANIM / 900 + t.bob) % 1);
+    }
+    if (ts.flash > 0) {                           /* what just happened, right now */
+      const c = S(iso(t.gx + .5, t.gy + .5));
+      cx.strokeStyle = `rgba(255,255,255,${ts.flash * .85})`;
+      cx.lineWidth = 2 * view.k;
+      cx.beginPath(); cx.arc(c.x, c.y, (10 + (1 - ts.flash) * 40) * view.k, 0, 7); cx.stroke();
+    }
+
+    /* The real title of the task: the user recognises their own task by it.
+       Only what is moving, alive or pointed at gets a caption — labelling every
+       object turns the map into a wall of text and hides exactly the movement
+       it is meant to show. */
+    const busy = live || ts.flash > 0 || (hover && hover.t === t);
+    if (view.k > .5 && busy) labels.push({ t, body, live, weight: live ? 2 : (ts.flash > 0 ? 1 : 3) });
+    t._screen = S(iso(t.gx + .5, t.gy + .5));
+    t._top = body.top;
+  }
+
+  /* captions last, and never on top of one another — nor on an area heading */
+  const taken = [];
+  const headings = areas.map(a => {
+    const p = S(iso(a.ox, a.oy));
+    cx.font = `${15.5 * Math.max(view.k, .55)}px "Inter", system-ui, sans-serif`;
+    const w = Math.max(cx.measureText(a.title).width, cx.measureText(a.note).width) + 16;
+    const box = { x: p.x - w / 2, y: p.y - 28 * view.k, w, h: 34 * view.k };
+    taken.push(box);
+    return { a, p };
+  });
+  labels.sort((p, q) => q.weight - p.weight);
+  for (const item of labels) {
+    const c = S(iso(item.t.gx + .5, item.t.gy + .5));
+    const label = item.t.title.length > 38 ? item.t.title.slice(0, 37) + "…" : item.t.title;
+    cx.font = `${12.5 * Math.max(view.k, .7)}px "Inter", system-ui, sans-serif`;
+    const w = cx.measureText(label).width + 12, h = 19 * view.k;
+    let x = c.x - w / 2, y = item.body.top - 27 * view.k;
+    const hits = r => taken.some(o => !(r.x + r.w < o.x || r.x > o.x + o.w || r.y + r.h < o.y || r.y > o.y + o.h));
+    let box = { x, y, w, h }, lift = 0;
+    while (hits(box) && lift < 5) { lift++; box = { x, y: y - lift * (h + 3), w, h }; }
+    if (hits(box)) continue;                     // no free room: stay silent
+    taken.push(box);
+    cx.fillStyle = "rgba(6,10,18,.82)";
+    cx.beginPath(); cx.roundRect(box.x, box.y, w, h, 6); cx.fill();
+    if (item.live) { cx.strokeStyle = "rgba(74,222,128,.55)"; cx.lineWidth = 1; cx.stroke(); }
+    text(label, c.x, box.y + 13.5 * view.k, 12.5, item.live ? "#dcfce7" : "#dbe3f3");
+  }
+
+  /* area titles above everything: they are the map's headings */
+  for (const { a, p } of headings) {
+    text(a.title, p.x, p.y - 14 * view.k, 15.5, shade(a.hue, 80));
+    text(a.note, p.x, p.y + 1 * view.k, 11.5, shade(a.hue, 58));
+  }
+  return st;
+}
+function a_hue(t, flags) {
+  if (flags.has("blocked")) return 0;
+  if (flags.has("killed")) return 268;
+  if (flags.has("stale_label")) return 44;
+  if (flags.has("delivered")) return 197;
+  if (flags.has("live")) return 142;
+  if (flags.has("gap")) return 26;
+  return 218;
+}
+
+/* ---------- HUD wiring ---------- */
+const el = id => document.getElementById(id);
+el("subtitle").textContent = WORLD.subtitle;
+el("mode").textContent = SNAP.mode === "demo" ? "запись · обезличено" : "запись · как есть";
+
+function fillPanel(id, items, countId) {
+  const ul = el(id).querySelector("ul");
+  ul.innerHTML = "";
+  items.forEach(i => {
+    const li = document.createElement("li");
+    li.textContent = i.text;
+    const src = document.createElement("div");
+    src.className = "src"; src.textContent = i.src;
+    li.appendChild(src); ul.appendChild(li);
+  });
+  el(countId).textContent = items.length;
+}
+fillPanel("waiting", WORLD.waiting, "waitcount");
+fillPanel("done", WORLD.done, "donecount");
+
+/* the collapsed panels of the phone layout: one open at a time */
+for (const id of ["waiting", "done"]) {
+  el(id).querySelector("h2").addEventListener("click", () => {
+    const open = el(id).classList.contains("open");
+    el("waiting").classList.remove("open"); el("done").classList.remove("open");
+    if (!open) el(id).classList.add("open");
+  });
+}
+
+/* legend: the shapes themselves, drawn the same way the map draws them */
+(function legend() {
+  const items = [
+    ["живой прогон — фигура работает", "live"],
+    ["в цепях — блокирует чужая причина", "blocked"],
+    ["надзор убил прогон", "killed"],
+    ["ярлык врёт: заявлено больше наблюдённого", "stale_label"],
+    ["гейт сказал GAP или FAIL", "gap"],
+    ["доставлено", "delivered"],
+    ["никто не работает", "idle"]
+  ];
+  const host = el("legenditems");
+  for (const [label, flag] of items) {
+    const row = document.createElement("div"); row.className = "lg";
+    const c = document.createElement("canvas"); c.width = 68; c.height = 52;
+    const g = c.getContext("2d"); g.scale(2, 2);
+    g.fillStyle = COLORS[flag];
+    if (flag === "live") { g.beginPath(); g.moveTo(10, 22); g.lineTo(17, 22); g.lineTo(15, 8); g.lineTo(12, 8); g.closePath(); g.fill();
+                           g.beginPath(); g.arc(13.5, 5.5, 3.4, 0, 7); g.fill(); }
+    else if (flag === "blocked") { g.fillStyle = "#3b4c6b"; g.fillRect(6, 8, 18, 14);
+                                   g.strokeStyle = COLORS.blocked; g.lineWidth = 2;
+                                   g.beginPath(); g.moveTo(5, 8); g.lineTo(25, 22); g.moveTo(25, 8); g.lineTo(5, 22); g.stroke(); }
+    else if (flag === "killed") { g.fillStyle = "#2c2740"; g.fillRect(7, 15, 16, 7);
+                                  g.strokeStyle = COLORS.killed; g.lineWidth = 2;
+                                  g.beginPath(); g.moveTo(8, 6); g.lineTo(22, 14); g.moveTo(22, 6); g.lineTo(8, 14); g.stroke(); }
+    else if (flag === "stale_label") { g.fillStyle = "#3b4c6b"; g.fillRect(7, 12, 12, 10);
+                                       g.fillStyle = COLORS.stale; g.beginPath(); g.moveTo(13, 12); g.lineTo(27, 6); g.lineTo(27, 12); g.closePath(); g.fill(); }
+    else if (flag === "gap") { g.fillStyle = "#3b4c6b"; g.fillRect(7, 12, 16, 10);
+                               g.fillStyle = COLORS.gap; g.beginPath(); g.moveTo(9, 12); g.lineTo(15, 4); g.lineTo(21, 12); g.closePath(); g.fill(); }
+    else if (flag === "delivered") { g.fillStyle = COLORS.done; g.fillRect(7, 10, 17, 12);
+                                     g.strokeStyle = "rgba(255,255,255,.8)"; g.lineWidth = 2;
+                                     g.beginPath(); g.moveTo(9, 13); g.lineTo(15.5, 17); g.lineTo(22, 13); g.stroke(); }
+    else { g.fillStyle = "#39445c"; g.fillRect(8, 12, 15, 10); }
+    const span = document.createElement("span"); span.textContent = label;
+    row.appendChild(c); row.appendChild(span); host.appendChild(row);
+  }
+})();
+
+const KIND_RU = {
+  task_appeared: "новая задача", task_status: "смена статуса", pipeline_event: "событие пайплайна",
+  artifact: "артефакт", activity: "работа идёт", commit: "коммит",
+  notification: "уведомление", mail: "письмо"
+};
+
+function paintNow(st) {
+  const last = st.recent.length ? st.recent[st.recent.length - 1].r
+             : (st.index ? RECORDS[st.index - 1] : null);
+  if (!last) { el("nowkind").textContent = "—"; el("nowtext").textContent = "запись не начата"; el("nowsrc").textContent = ""; return; }
+  el("nowkind").textContent = KIND_RU[last.kind] || last.kind;
+  const who = last.task_title ? ` — ${last.task_title}` : "";
+  const station = last.station ? ` [${STATION_RU[last.station]}]` : "";
+  el("nowtext").textContent = `${last.label}${station}${who}`;
+  el("nowsrc").textContent = `наблюдено: ${last.observed_by}`;
+}
+
+/* The caption always shows the real observed instant, never the play clock. */
+function fmt(realMs) {
+  const d = new Date(realMs || T0);
+  return d.toISOString().slice(5, 16).replace("T", " ");
+}
+
+let hover = null;
+function frame(ts) {
+  if (!lastFrame) lastFrame = ts;
+  const dt = ts - lastFrame; lastFrame = ts;
+  if (playing) {
+    clock += dt * RATE * speed;
+    if (clock >= SPAN) { clock = SPAN; setPlaying(false); }
+    el("scrub").value = String(Math.round(clock / SPAN * 1000));
+  }
+  ANIM = ts;
+  const st = draw(clock);
+  paintNow(st);
+  el("clock").textContent = `${fmt(st.at)} · ${st.index}/${REAL.length}`;
+  if (hover) tipFor(hover);
+  requestAnimationFrame(frame);
+}
+
+function setPlaying(on) {
+  playing = on;
+  el("play").textContent = on ? "❚❚ Пауза" : "▶ Пуск";
+  el("play").classList.toggle("primary", !on);
+}
+el("play").onclick = () => { if (clock >= SPAN) clock = 0; setPlaying(!playing); };
+el("rewind").onclick = () => { clock = 0; el("scrub").value = "0"; };
+el("scrub").oninput = e => { clock = SPAN * e.target.value / 1000; };
+el("speed").onchange = e => { speed = parseFloat(e.target.value); };
+window.addEventListener("keydown", e => {
+  if (e.code === "Space") { e.preventDefault(); el("play").click(); }
+  if (e.code === "ArrowRight") clock = Math.min(SPAN, clock + SPAN / 40);
+  if (e.code === "ArrowLeft") clock = Math.max(0, clock - SPAN / 40);
+});
+
+/* pan and zoom */
+let drag = null;
+cv.addEventListener("pointerdown", e => { drag = { x: e.clientX, y: e.clientY, vx: view.x, vy: view.y }; cv.classList.add("dragging"); });
+window.addEventListener("pointerup", () => { drag = null; cv.classList.remove("dragging"); });
+window.addEventListener("pointermove", e => {
+  if (drag) { view.x = drag.vx + (e.clientX - drag.x); view.y = drag.vy + (e.clientY - drag.y); return; }
+  const r = cv.getBoundingClientRect();
+  hover = pick(e.clientX - r.left, e.clientY - r.top, e.clientX, e.clientY);
+  if (!hover) el("tip").style.display = "none";
+});
+cv.addEventListener("wheel", e => {
+  e.preventDefault();
+  const f = e.deltaY < 0 ? 1.12 : 1 / 1.12;
+  const r = cv.getBoundingClientRect(), mx = e.clientX - r.left, my = e.clientY - r.top;
+  view.x = mx - (mx - view.x) * f; view.y = my - (my - view.y) * f; view.k *= f;
+}, { passive: false });
+cv.addEventListener("dblclick", () => fit());
+
+function pick(px, py, cxp, cyp) {
+  let best = null, bd = 34 * view.k;
+  for (const a of areas) for (const t of a.tasks) {
+    if (!t._screen) continue;
+    const d = Math.hypot(t._screen.x - px, t._screen.y - py);
+    if (d < bd) { bd = d; best = t; }
+  }
+  return best ? { t: best, cx: cxp, cy: cyp } : null;
+}
+function tipFor(h) {
+  const tip = el("tip"), t = h.t;
+  const st = stateAt(clock).tasks[t.task] || { stations: {} };
+  const stations = Object.keys(st.stations).map(s => STATION_RU[s]).join(", ") || "наблюдений пока нет";
+  tip.innerHTML = "";
+  const b = document.createElement("b"); b.textContent = t.title; tip.appendChild(b);
+  const s1 = document.createElement("div");
+  s1.textContent = `${t.status || "?"} · ${t.flags.join(", ") || "без флагов"}`;
+  const s2 = document.createElement("div"); s2.className = "st";
+  s2.textContent = `станции: ${stations}`;
+  const s3 = document.createElement("div"); s3.className = "st";
+  s3.textContent = st.last ? `последнее: ${st.last.label} (${st.last.observed_by})` : "";
+  tip.appendChild(s1); tip.appendChild(s2); tip.appendChild(s3);
+  tip.style.display = "block";
+  tip.style.left = Math.min(h.cx + 14, window.innerWidth - 320) + "px";
+  tip.style.top = Math.min(h.cy + 14, window.innerHeight - 120) + "px";
+}
+
+window.addEventListener("resize", resize);
+resize();
+requestAnimationFrame(frame);
+setTimeout(() => setPlaying(true), 700);
+
+/* Live mode: the same renderer, served with a fresh snapshot. A recording never
+   takes this branch — `file://` cannot fetch, and its data is already inside. */
+if (DATA.live_url) {
+  el("mode").textContent = "живой режим";
+  setInterval(async () => {
+    try {
+      const fresh = await (await fetch(DATA.live_url, { cache: "no-store" })).json();
+      if (fresh.timeline.length !== RECORDS.length) location.reload();
+    } catch (err) { /* server gone: keep showing what we have */ }
+  }, 10000);
+}
+</script>
+</body>
+</html>
