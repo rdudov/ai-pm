@@ -1,0 +1,8 @@
+# Runtime state: snapshots of threads, mail drafts, scratch letters.
+# Rebuilt from observation on every tick; nothing here is a record of decision.
+state/
+
+# Local machine settings and tool caches.
+.claude/settings.local.json
+__pycache__/
+*.pyc

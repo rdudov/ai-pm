@@ -1,0 +1,29 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 scripts/thread_state.py:*)",
+      "Bash(python3 scripts/thread_tick.py:*)",
+      "Bash(python3 scripts/codex_budget.py:*)",
+      "Bash(python3 scripts/lesson.py:*)",
+      "Bash(cat:*)",
+      "Bash(ls:*)",
+      "Bash(find:*)",
+      "Bash(rg:*)",
+      "Bash(grep:*)",
+      "Bash(head:*)",
+      "Bash(tail:*)",
+      "Bash(wc:*)",
+      "Bash(jq:*)",
+      "Bash(git status:*)",
+      "Bash(git log:*)",
+      "Bash(git diff:*)",
+      "Bash(git show:*)",
+      "Bash(git branch:*)",
+      "Bash(ps:*)",
+      "Bash(stat:*)",
+      "Bash(cd /opt/projects/companion-agent && .venv/bin/python skills/task-creator/scripts/tasks_index.py:*)",
+      "Bash(cd /opt/projects/companion-agent && .venv/bin/python skills/task-runner/scripts/task_runner.py:*)",
+      "Bash(/opt/projects/companion-agent/.venv/bin/python:*)"
+    ]
+  }
+}

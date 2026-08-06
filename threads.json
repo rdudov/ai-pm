@@ -1,0 +1,72 @@
+{
+  "schema_version": 1,
+  "comment": "Направления фоновых тредов продакта. Одно направление владеет своими репозиториями: write-прогон в чужом репозитории запускать нельзя. Путь должен указывать на сам git-репозиторий, а не на каталог с репозиториями.",
+  "threads": {
+    "process": {
+      "title": "Процессный контур",
+      "products": [
+        "task-agent",
+        "dev-pipeline"
+      ],
+      "projects": [
+        "unified-task-execution",
+        "dev-pipeline-adoption",
+        "process-rules-architecture",
+        "task-debt-cleanup",
+        "proactive-product-owner",
+        "process-visualization"
+      ],
+      "repos": [
+        "/opt/projects/companion-agent",
+        "/opt/projects/dev-pipeline",
+        "/opt/projects/task-agent"
+      ]
+    },
+    "companion": {
+      "title": "Companion (Calypso и Max)",
+      "products": [
+        "companion"
+      ],
+      "projects": [],
+      "task_search": [
+        "calypso",
+        "max"
+      ],
+      "repos": [
+        "/opt/projects/companions/companion",
+        "/opt/projects/companions/calypso",
+        "/opt/projects/companions/max"
+      ]
+    },
+    "moex": {
+      "title": "MOEX Strategy Lab",
+      "products": [
+        "moex-strategy-lab"
+      ],
+      "projects": [
+        "moex-strategy-lab"
+      ],
+      "task_search": [
+        "moex"
+      ],
+      "repos": [
+        "/opt/projects/moex-strategy-lab",
+        "/opt/projects/moex-trading-engine"
+      ]
+    },
+    "deep-research": {
+      "title": "Deep Research",
+      "products": [
+        "deep-research"
+      ],
+      "projects": [
+        "greenfield-deepresearch"
+      ],
+      "repos": [
+        "/opt/projects/deeprsrch/deepresearch_mvp3_full",
+        "/opt/projects/deeprsrch/deepresearch_next",
+        "/opt/projects/deeprsrch/deepresearch_mvp3"
+      ]
+    }
+  }
+}
