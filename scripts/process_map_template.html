@@ -111,6 +111,11 @@
   /* What the strip did not take. A silent cap reads as «показано всё». */
   #strip .more { color: var(--dim); }
   #strip .grp { flex: 1 1 100%; }
+  /* The safety valve, not the mechanism. What keeps the strip short is the
+     character budget in the renderer, which shows fewer names rather than
+     cutting the ones it shows; this only stops an unusually loud contour from
+     taking the whole window and leaving the columns nothing. */
+  #strip { max-height: 24vh; overflow-y: auto; }
 
   #columns { flex: 1; display: grid; grid-template-columns: repeat(4, 1fr);
              gap: 12px; padding: 12px 14px 14px; overflow: hidden; min-height: 0; }
@@ -124,14 +129,30 @@
      1440×900, so a whole acceptance question was answered only by scrolling a
      column. Five headings with their counts and their oldest age now always
      stand on the first screen, and the plates of an area move within it. */
-  .colbody { overflow: hidden; display: flex; flex-direction: column; gap: 10px;
-             padding: 8px 9px 12px; flex: 1; min-height: 0; }
+  /* The column scrolls only as a last resort. Seven areas of headings and rules
+     do not always fit a 900-tall window, and when they did not, every area was
+     crushed to twelve pixels and the plates laid out on top of the area below —
+     a board whose plates could not be clicked at all, found by driving the page
+     rather than by looking at it. A scroll here is the safety valve; the
+     `min-height` on the area below is what keeps it from ever being needed for
+     the headings themselves. */
+  .colbody { overflow-y: auto; overflow-x: hidden; display: flex; flex-direction: column;
+             gap: 10px; padding: 8px 9px 12px; flex: 1; min-height: 0; }
 
-  .area { display: flex; flex-direction: column; min-height: 0; flex: 1 1 0; }
-  /* The area that answers an acceptance question outright gets the room. A
+  /* `min-height` is the whole fix: a flex item with `min-height: 0` may be
+     crushed below its own content, and seven of them in a fixed column were.
+     One heading with its count and its oldest age is the floor, so the answer
+     «сколько их и как давно» survives however many areas there are. */
+  .area { display: flex; flex-direction: column; min-height: 30px; flex: 1 1 0; }
+  /* The two areas that answer an acceptance question outright get the room:
+     what a person owes an answer to, and what can be started right now. A
      folded area costs its heading and nothing else. */
-  .area.a-waiting_human { flex: 2 1 0; }
+  .area.a-waiting_human, .area.a-pickup { flex: 2 1 0; }
   .area.shut, .area.void { flex: none; }
+  /* An empty area needs its heading, not its rule: «пусто» under a heading is
+     already the whole answer, and the rule would cost three lines the areas
+     with something to show need more. */
+  .area.void .rule { display: none; }
   .area .plates { overflow: auto; min-height: 0; flex: 1; }
   .area > h3 { margin: 0 0 6px; font-size: 11px; letter-spacing: .07em; text-transform: uppercase;
                color: var(--dim); cursor: pointer; display: flex; gap: 7px; align-items: baseline;
@@ -198,7 +219,21 @@
   .plate .more { margin-top: 4px; color: var(--idle); font-size: 11.5px; }
   .plate .dash { color: var(--idle); }
 
-  .chan { border-top: 1px solid var(--edge); padding: 8px 12px 10px; font-size: 11.5px; color: var(--dim); }
+  /* Repositories and channels are reference, and reference does not outrank the
+     answers above it: a direction owning three repositories was taking 181 of
+     900 pixels off the areas. */
+  /* Repositories and channels are reference, and reference does not outrank the
+     answers above it: one direction owning three repositories took 181 of 900
+     pixels off the areas that answer the questions. Folded by default, one line
+     that says what is inside, and the warnings — uncommitted, unpushed — stay
+     on that line so nothing is hidden by folding it. */
+  .chan { border-top: 1px solid var(--edge); padding: 8px 12px 10px; font-size: 11.5px;
+          color: var(--dim); max-height: 17vh; overflow-y: auto; flex: none; }
+  .chan.shut { max-height: none; overflow: visible; }
+  .chan.shut .body { display: none; }
+  .chan .sum { cursor: pointer; }
+  .chan .sum::before { content: "▸ "; color: var(--idle); }
+  .chan:not(.shut) .sum::before { content: "▾ "; }
   .chan div { margin-top: 3px; }
   .chan b { color: var(--ink); font-weight: 600; }
   .chan .warn { color: var(--stale); }
@@ -209,7 +244,14 @@
 
   @media (max-width: 900px) {
     #columns { grid-template-columns: 1fr; overflow: auto; }
-    .col { min-height: 60vh; }
+    .col { min-height: auto; }
+    /* One column on a phone, so the page scrolls and every area takes the room
+       its contents need. Sharing a fixed height between seven areas here gave
+       each of them thirty pixels and made the plates unreachable — the same
+       defect as on the desktop, and the reason both sizes are measured. */
+    .colbody { overflow: visible; }
+    .area, .area.a-waiting_human, .area.a-pickup { flex: none; }
+    .area .plates { overflow: visible; }
     /* A phone gives the header a third of the screen if left alone, and every
        line it takes comes off the answers below it. */
     #boardhead { padding: 8px 12px 6px; }
@@ -1373,7 +1415,32 @@ function promiseNode(q) {
 
 function channelsNode(panel) {
   const node = document.createElement("div");
-  node.className = "chan";
+  const shut = isShut(panel.key, "chan", true);
+  node.className = "chan" + (shut ? " shut" : "");
+
+  /* The summary carries what a folded block must not hide: a repository with
+     uncommitted or unpushed work is work that exists and is invisible in prose,
+     which is one of the things the board is for. */
+  const dirty = panel.repos.filter(r => r.tracked_dirty || r.unpushed);
+  const sum = document.createElement("div");
+  sum.className = "sum";
+  sum.textContent = "Репозитории и связь: " + panel.repos.length;
+  if (dirty.length) {
+    const warn = document.createElement("span");
+    warn.className = "warn";
+    warn.textContent = " — не опубликовано в " + dirty.length +
+      (dirty.length === 1 ? " репозитории" : " репозиториях");
+    sum.appendChild(warn);
+  }
+  sum.addEventListener("click", () => {
+    const now = !node.classList.contains("shut");
+    node.classList.toggle("shut", now);
+    sessionStorage.setItem(shutKey(panel.key, "chan"), now ? "1" : "0");
+  });
+  node.appendChild(sum);
+
+  const body = document.createElement("div");
+  body.className = "body";
   const names = { telegram: "Telegram", email: "Почта продакта", git: "Git" };
   const out = [];
   for (const c of panel.channels) {
@@ -1382,7 +1449,7 @@ function channelsNode(panel) {
   if (out.length) {
     const line = document.createElement("div");
     line.textContent = "Связь: " + out.join(" · ");
-    node.appendChild(line);
+    body.appendChild(line);
   }
   /* Commits and pushes at the level of the product, not the task: nothing on
      disk ties a commit to a task number, so no such tie is drawn. */
@@ -1402,8 +1469,9 @@ function channelsNode(panel) {
       warn.textContent = " — " + bits.join(", ");
       line.appendChild(warn);
     }
-    node.appendChild(line);
+    body.appendChild(line);
   }
+  node.appendChild(body);
   return node;
 }
 
@@ -1505,8 +1573,8 @@ function drawStrip(board) {
     const s = document.createElement("span");
     s.className = "item jam";
     const age = ago(ageOf({ since: owner.since, age_seconds: owner.age_seconds }));
-    s.textContent = "продакт разбужен на треде «" + (owner.thread || "?") + "»"
-      + (age ? " · " + age : "") + " — не заводите задачу, не посмотрев его очередь";
+    s.textContent = "тред «" + (owner.thread || "?") + "»" + (age ? " · " + age : "")
+      + " — сверьтесь с его очередью, прежде чем заводить задачу";
     s.title = "наблюдено: " + owner.src;
     mine.appendChild(s);
   }

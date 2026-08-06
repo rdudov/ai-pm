@@ -942,6 +942,35 @@ class OfflineRecording(unittest.TestCase):
         self.assertIn('sessionStorage.getItem("screen") !== "map"', html)
 
 
+def code_only(source: str) -> str:
+    """Python source with its comments and docstrings removed.
+
+    Several claims here are about what the code does, and this file explains at
+    length what the code deliberately stopped doing — so a literal search finds
+    the explanation and passes or fails on prose. Tokenising first makes the
+    assertion about the code it claims to be about.
+    """
+    import io
+    import tokenize
+    kept = []
+    previous = tokenize.INDENT
+    for token in tokenize.generate_tokens(io.StringIO(source).readline):
+        if token.type == tokenize.COMMENT:
+            continue
+        if token.type == tokenize.STRING and previous in (
+                tokenize.INDENT, tokenize.DEDENT, tokenize.NEWLINE, tokenize.NL):
+            continue                                    # a docstring, not a value
+        kept.append(token.string)
+        if token.type not in (tokenize.NL, tokenize.COMMENT):
+            previous = token.type
+    return " ".join(kept)
+
+
+def thread_of(cmdline):
+    """The direction a wake-up process names, from its own argv."""
+    return state.ticked_thread(cmdline)
+
+
 def a_page(snapshot=None) -> str:
     """The page as it is delivered, built from one snapshot."""
     snapshot = snapshot or a_snapshot()
@@ -1152,10 +1181,30 @@ class TheOtherProductOwner(unittest.TestCase):
 
     def test_it_is_observed_from_a_command_line_and_never_from_a_transcript(self):
         source = Path(state.__file__).read_text()
-        body = source[source.index("def owner_wakeups"):source.index("def build(")]
-        self.assertIn("/proc", body + str(state.PROC))
+        body = code_only(source[source.index("def owner_wakeups"):source.index("def build(")])
+        self.assertIn("cmdline", body)
+        self.assertEqual(state.PROC, Path("/proc"))
+        # The prose above this function says «no transcript» in as many words,
+        # so the claim is checked against the code with the prose removed.
         for forbidden in ("transcript", "session.jsonl", ".claude/projects"):
             self.assertNotIn(forbidden, body)
+
+    def test_the_thread_is_read_from_the_tick_s_own_argv(self):
+        """Found by driving the page, not by reading the code.
+
+        The first cut searched every argument for the substring
+        `thread_tick.py` and then guessed the thread from the last non-flag
+        token. A `bash -c` wrapper carries the whole command in one argument, so
+        it matched the shell and put «/bin/bash» on the strip as the name of a
+        direction. The script has to be an argument of its own, and the thread
+        is the argument after it — which is exactly what the timer passes.
+        """
+        self.assertEqual(thread_of(["/usr/bin/python3", "scripts/thread_tick.py",
+                                    "deep-research"]), "deep-research")
+        self.assertEqual(thread_of(["python3", "/opt/x/scripts/thread_tick.py",
+                                    "--force", "moex"]), "moex")
+        self.assertIsNone(thread_of(["/bin/bash", "-c",
+                                     "cd /opt && python3 scripts/thread_tick.py companion"]))
 
     def test_this_very_wake_up_mechanism_is_the_one_observed(self):
         # Whatever else changes, the thing being looked for is the tick script,
@@ -1168,7 +1217,7 @@ class TheOtherProductOwner(unittest.TestCase):
                                      "age_seconds": 60, "src": "командная строка процесса в /proc"}]
         board = render.build_board(snapshot)
         self.assertEqual(len(board["owners_awake"]), 1)
-        self.assertIn("не заводите задачу, не посмотрев его очередь", a_page(snapshot))
+        self.assertIn("сверьтесь с его очередью, прежде чем заводить задачу", a_page(snapshot))
 
 
 class DrillDown(unittest.TestCase):
@@ -1220,8 +1269,11 @@ class LiveWithoutLosingThePlace(unittest.TestCase):
         reading a task in order to show them something they were not looking at.
         """
         page = a_page()
-        self.assertIn("applyFresh(fresh)", page)
-        self.assertNotIn("location.reload()", page)
+        # The poll branch itself, not the prose around it: the old call is named
+        # in a comment there on purpose, and a literal search would find it.
+        poll = page[page.index("if (DATA.live_url)"):]
+        self.assertIn("applyFresh(fresh)", poll)
+        self.assertNotIn("location.reload();", poll)
 
     def test_the_open_card_survives_a_refresh_on_the_same_task(self):
         page = a_page()
@@ -1263,7 +1315,7 @@ class OneObserver(unittest.TestCase):
     def test_there_is_no_second_answer_to_whether_a_process_is_alive(self):
         # `os.kill(pid, 0)` answers «some process holds this number», and PIDs
         # are reused: after a wrap an unrelated process counted as a live run.
-        source = self.source()
+        source = code_only(self.source())
         self.assertNotIn("os.kill", source)
         self.assertNotIn("def pid_alive", source)
 

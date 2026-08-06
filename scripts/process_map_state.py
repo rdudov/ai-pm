@@ -935,6 +935,25 @@ def unplanned(items: list[str]) -> list[str]:
             if not item.startswith(STRUCK) and not TASK_REFERENCE.search(item)]
 
 
+def ticked_thread(cmdline: list[str]) -> str | None:
+    """The direction a wake-up process is working on, from its own argv.
+
+    The tick's own arguments, not a command line that merely mentions it. A
+    `bash -c` wrapper carries the whole command in one argument, so searching
+    every argument for the substring matched the shell instead and put
+    «/bin/bash» on the strip as the name of a direction — found by driving the
+    page against the real process table, not by reading this code.
+
+    The script has to be an argument of its own, and the thread is the argument
+    after it, which is exactly what `product-thread@<тред>.service` passes.
+    """
+    for index, part in enumerate(cmdline):
+        if part.endswith("thread_tick.py"):
+            return next((later for later in cmdline[index + 1:]
+                         if later and not later.startswith("-")), None)
+    return None
+
+
 def owner_wakeups() -> list[dict]:
     """Other instances of the product owner that are awake right now.
 
@@ -956,11 +975,9 @@ def owner_wakeups() -> list[dict]:
             started = entry.stat().st_mtime
         except OSError:
             continue
-        if not any("thread_tick.py" in part for part in cmdline):
+        thread = ticked_thread(cmdline)
+        if thread is None:
             continue
-        thread = next((part for part in reversed(cmdline)
-                       if part and not part.startswith("-") and "thread_tick.py" not in part
-                       and "python" not in part), None)
         awake.append({
             "pid": int(entry.name),
             "thread": thread,

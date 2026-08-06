@@ -218,7 +218,18 @@ PICKUP_IN_STRIP = 3
 # that still leaves «Ждёт решения человека» and the top of the columns on the
 # first screen. Raising it is a change to be re-measured on a phone size, not a
 # constant to tune by eye.
-STRIP_GROUP_CHARS = 400
+# Re-measured when the strip went from three groups to five: «что подхватить»
+# and «другой я» were added, and the budget that had been measured for three
+# groups let the strip take 296 of 900 pixels, leaving 286 for seven areas —
+# every area crushed to its minimum and the columns answering nothing. This is
+# the same lesson the comment above records, paid a second time: the budget is a
+# measurement of a layout, so adding a group means measuring again.
+#
+# At 1440×900 with five groups this leaves the strip at about a sixth of the
+# window and every area of every column its own room; at 390×844 the strip is
+# the first-screen answer and still scrolls to at most a quarter of it. Raising
+# it is a change to be re-measured on both sizes, not a constant to tune by eye.
+STRIP_GROUP_CHARS = 190
 
 
 def strip_group(items: list[dict], cap: int, budget: int = STRIP_GROUP_CHARS) -> tuple[list[dict], int]:
