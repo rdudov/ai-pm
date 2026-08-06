@@ -10,8 +10,14 @@ to, which artifact and which channel.
 
 The cost of a tick does not depend on how much work happened: child transcripts
 are never read, and everything else is either a `stat` or a tail of an
-append-only file past a stored cursor. That is the rule `thread_state.py` set and
-the state collector kept.
+append-only file past a stored cursor, and the walk over a task directory is
+bounded in depth and reads names rather than contents. That is the rule
+`thread_state.py` set and the state collector kept.
+
+Declared limit: a source or test file of a *product* repository is not tied to a
+task. Nothing on disk carries that tie — the same reason commit attribution sits
+at the level of the product — so the scribe reports files it can attribute and
+says nothing about the ones it cannot, rather than inventing the link.
 
 Exit code 0 on a clean stop.
 """
@@ -27,7 +33,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import process_map_state as state
-from process_map_schema import SCHEMA_VERSION, validate_record
+from process_map_schema import SCHEMA_VERSION, scrub, validate_record
 
 TASKS = state.REPO / "tasks"
 MAIL_INBOX = state.REPO / ".state" / "gmail" / "product-owner" / "inbox"
@@ -176,7 +182,14 @@ class Scribe:
         if self.seeding and not (self.replay_since and str(record["at"]) >= self.replay_since):
             return
         if self.anonymize:
-            record = scrub_record(record)
+            # The one cleaner, with nothing put back afterwards. This used to
+            # save `task_title` and `label`, clean the record and then write the
+            # saved values back over the cleaned ones — a leftover from when
+            # `scrub` skipped titles entirely. `scrub` has cleaned titles since
+            # review 780; the restoration outlived it and quietly undid the
+            # cleaning on every record that carried a title (finding HIGH-3 of
+            # review 786).
+            record = scrub(record)
         with self.out.open("a") as handle:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
         self.written += 1
@@ -254,13 +267,11 @@ class Scribe:
             })
 
     def observe_artifacts(self, task_dir: Path, base: dict) -> None:
-        for path in sorted(task_dir.iterdir()):
-            if not path.is_file():
-                continue
+        for path in self.artifact_files(task_dir):
             station = self.station_of(path.name)
             if station is None:
                 continue
-            key = f"{base['task']}/{path.name}"
+            key = f"{base['task']}/{path.relative_to(task_dir)}"
             try:
                 stamp = mtime_iso(path)
             except OSError:
@@ -269,18 +280,46 @@ class Scribe:
                 continue
             fresh = key not in self.cursor["artifacts"]
             self.cursor["artifacts"][key] = stamp
+            where = str(path.relative_to(task_dir))
             self.emit({
                 **base,
                 "at": stamp,
                 "kind": "artifact",
-                "label": path.name,
+                "label": where,
                 "observed_by": "появление файла" if fresh else "обновление файла",
                 "station": station,
-                "artifact": path.name,
+                "artifact": where,
                 # No actor: a file that exists says a file exists. Who wrote it
                 # is not observable from its presence, and a plate that repeats
                 # this record must not claim otherwise (finding MEDIUM-3).
             })
+
+    # Directories that are not the work: the runner's own bookkeeping, the
+    # pipeline's journals (already observed as events, one by one) and build
+    # leftovers. Everything else inside a task is the task.
+    SKIP_DIRS = {".runner", "dev-pipeline", "__pycache__", ".git", "node_modules"}
+    # How deep the walk goes. Code and tests of a task live in `deliverables/`,
+    # `evidence/` or `scripts/` — one level down — and the root-only walk missed
+    # every one of them, so the «разработка» and «тесты» stations were poorer
+    # than the disk (second half of finding MEDIUM-3 of review 780, still open in
+    # review 786). Bounded rather than unlimited on purpose: the cost of a look
+    # must not grow with the amount of work done, and this stays a walk over
+    # names, not over contents.
+    MAX_DEPTH = 2
+
+    @classmethod
+    def artifact_files(cls, task_dir: Path, depth: int = 1):
+        """Files of a task that a station could be evidence of, bounded in depth."""
+        try:
+            entries = sorted(task_dir.iterdir())
+        except OSError:
+            return
+        for path in entries:
+            if path.is_file():
+                yield path
+            elif (path.is_dir() and depth < cls.MAX_DEPTH
+                  and path.name not in cls.SKIP_DIRS and not path.is_symlink()):
+                yield from cls.artifact_files(path, depth + 1)
 
     @staticmethod
     def station_of(filename: str) -> str | None:
@@ -387,22 +426,6 @@ class Scribe:
                 "channel": "email",
             })
         self.cursor["mail"] = sorted(seen)
-
-
-def scrub_record(record: dict) -> dict:
-    """Structural anonymisation, with task titles deliberately preserved.
-
-    The user asked to recognise a specific task among the rest by its real name,
-    so titles survive. Content-level privacy of those titles stays a human step
-    before any showing — declared as a limit, not as a closed box.
-    """
-    kept = {key: record[key] for key in ("task_title", "label") if key in record}
-    scrubbed = state.scrub(record)
-    if record.get("kind") in {"task_appeared", "task_status", "artifact", "pipeline_event"}:
-        scrubbed.update(kept)
-    else:
-        scrubbed.update({key: value for key, value in kept.items() if key == "task_title"})
-    return scrubbed
 
 
 def main() -> int:

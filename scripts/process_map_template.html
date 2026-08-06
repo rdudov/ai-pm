@@ -77,7 +77,7 @@
   #boardhead .sub { color: var(--dim); font-size: 12.5px; }
   /* The strip above the columns: who is working and where the jam is, by name.
      Both answers have to be readable without scrolling anything. */
-  #strip { display: flex; gap: 22px; padding: 9px 18px; border-bottom: 1px solid var(--edge);
+  #strip { display: flex; gap: 4px 22px; padding: 7px 18px; border-bottom: 1px solid var(--edge);
            flex-wrap: wrap; font-size: 12.5px; align-items: baseline; }
   #strip .grp { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; max-width: 100%; }
   #strip .lbl { color: var(--dim); font-size: 11px; letter-spacing: .07em; text-transform: uppercase; }
@@ -85,7 +85,18 @@
   #strip .jam { color: var(--blocked); }
   #strip .ask { color: var(--stale); }
   #strip .none { color: var(--idle); }
-  #strip .item { border: 1px solid var(--edge); border-radius: 6px; padding: 2px 8px; }
+  /* One line per item. Left to wrap, six jams each carrying a paragraph-long
+     reason took more than half of a 1440×900 screen and pushed the columns —
+     the actual board — off it. The whole reason still stands on the plate in the
+     column; this is the summary, and a summary that fills the screen is not one. */
+  #strip .item { border: 1px solid var(--edge); border-radius: 6px; padding: 2px 8px;
+                 max-width: 100%; white-space: nowrap; overflow: hidden;
+                 text-overflow: ellipsis; }
+  /* The reason, right next to the jam it belongs to. Dimmer than the name so the
+     eye reads «what» first and «why» second, but on the same line and never
+     hidden behind a hover. */
+  #strip .why { color: var(--dim); }
+  #strip .grp { flex: 1 1 100%; }
 
   #columns { flex: 1; display: grid; grid-template-columns: repeat(4, 1fr);
              gap: 12px; padding: 12px 14px 14px; overflow: hidden; min-height: 0; }
@@ -94,11 +105,23 @@
   .colhead { padding: 10px 12px 8px; border-bottom: 1px solid var(--edge); }
   .colhead h2 { margin: 0; font-size: 13.5px; font-weight: 620; }
   .colhead .meta { color: var(--dim); font-size: 11.5px; margin-top: 3px; }
-  .colbody { overflow: auto; padding: 8px 9px 12px; flex: 1; min-height: 0; }
+  /* The column does not scroll as one piece; each area scrolls inside itself.
+     Review 786 found «Затор» sitting below a filled «Ждёт решения человека» at
+     1440×900, so a whole acceptance question was answered only by scrolling a
+     column. Five headings with their counts and their oldest age now always
+     stand on the first screen, and the plates of an area move within it. */
+  .colbody { overflow: hidden; display: flex; flex-direction: column; gap: 10px;
+             padding: 8px 9px 12px; flex: 1; min-height: 0; }
 
-  .area { margin-bottom: 12px; }
+  .area { display: flex; flex-direction: column; min-height: 0; flex: 1 1 0; }
+  /* The area that answers an acceptance question outright gets the room. A
+     folded area costs its heading and nothing else. */
+  .area.a-waiting_human { flex: 2 1 0; }
+  .area.shut, .area.void { flex: none; }
+  .area .plates { overflow: auto; min-height: 0; flex: 1; }
   .area > h3 { margin: 0 0 6px; font-size: 11px; letter-spacing: .07em; text-transform: uppercase;
-               color: var(--dim); cursor: pointer; display: flex; gap: 7px; align-items: baseline; }
+               color: var(--dim); cursor: pointer; display: flex; gap: 7px; align-items: baseline;
+               flex: none; }
   .area > h3 .n { color: var(--ink); font-size: 12px; font-weight: 650; }
   .area > h3 .old { margin-left: auto; font-weight: 400; text-transform: none; letter-spacing: 0; }
   .area.a-waiting_human > h3 { color: var(--stale); }
@@ -130,6 +153,17 @@
                 overflow: hidden; }
   .plate .doing { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
                   overflow: hidden; }
+  /* The observed reason a task stands where it stands. Answering «почему» is an
+     acceptance question, so it is not dimmed away into a footnote. */
+  .plate .why { margin-top: 5px; font-size: 12px; line-height: 1.35; color: var(--stale);
+                display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
+                overflow: hidden; word-break: break-word; }
+  .plate.p-stuck .why { color: var(--blocked); }
+  /* A product's open question: the same area, so it reads as one list. A long
+     one is clamped rather than allowed to push the areas below off the screen. */
+  .plate.q .name { font-weight: 450; display: -webkit-box; -webkit-line-clamp: 3;
+                   -webkit-box-orient: vertical; overflow: hidden; }
+  .plate.q .num { color: var(--stale); font-weight: 700; }
   .plate .more { margin-top: 4px; color: var(--idle); font-size: 11.5px; }
   .plate .dash { color: var(--idle); }
 
@@ -145,6 +179,21 @@
   @media (max-width: 900px) {
     #columns { grid-template-columns: 1fr; overflow: auto; }
     .col { min-height: 60vh; }
+    /* A phone gives the header a third of the screen if left alone, and every
+       line it takes comes off the answers below it. */
+    #boardhead { padding: 8px 12px 6px; }
+    #boardhead h1 { font-size: 15px; }
+    /* One column cannot fit four directions, so on a phone the strip *is* the
+       first-screen answer — which means a reason may not be cut into an
+       ellipsis here. The item wraps and the reason takes its own line. */
+    #strip { padding: 7px 12px; }
+    /* Wrapped rather than elided, but bounded: an unbounded reason on a phone
+       pushed «Ждёт решения человека» off the first screen, which is trading one
+       acceptance answer for another. Three lines carry the reason of every jam
+       observed so far, and the whole text stands on the plate below. */
+    #strip .item { white-space: normal; display: -webkit-box; -webkit-line-clamp: 3;
+                   -webkit-box-orient: vertical; overflow: hidden; }
+    #strip .why { color: var(--dim); }
   }
 
   #tip { position: fixed; z-index: 9; background: rgba(9,14,24,.96); border: 1px solid var(--edge);
@@ -797,6 +846,14 @@ function tipFor(h) {
    nothing, the plate shows a dash rather than a plausible guess. */
 const BOARD = DATA.board;
 
+/* One wording for one measurement. The caption was written out twice — once when
+   a plate is built and once by the ticker that refreshes it every half minute —
+   so changing it in one place left the other saying something else thirty
+   seconds later. What it says is deliberately «без изменений»: the number is the
+   age of the freshest file the area is built from, which bounds the transition
+   without claiming to be it (finding MEDIUM-1 of review 786). */
+function ageCaption(age) { return "без изменений " + age; }
+
 /* An age counted from the instant the state was last observed to change, so it
    stays true while the page sits open rather than freezing at collection time. */
 function ageOf(p) {
@@ -855,14 +912,32 @@ function plateNode(p, areaKey) {
   if (p.alive) row.appendChild(tag("прогон жив", "alive"));
   if (p.stale_label) row.appendChild(tag("ярлык врёт: процесса нет", "lie"));
   if (p.attempt > 1) row.appendChild(tag("попытка " + p.attempt, "retry"));
+  /* «Без изменений», not «в этом состоянии»: what is measured is the mtime of
+     the freshest file the area is built from, which is an upper bound on the
+     transition and not the transition itself. The tooltip names the file. */
   const age = ago(ageOf(p));
-  if (age) { const a = tag("в этом состоянии " + age, "age"); a.dataset.since = p.since || ""; row.appendChild(a); }
+  if (age) {
+    const a = tag(ageCaption(age), "age");
+    a.dataset.since = p.since || "";
+    if (p.since_src) a.title = "наблюдено: " + p.since_src;
+    row.appendChild(a);
+  }
   node.appendChild(row);
 
   if (p.happening) {
     const doing = document.createElement("div");
     doing.className = "doing"; doing.textContent = p.happening;
     node.appendChild(doing);
+  }
+  /* Why it stands here. `happening` comes from a live child's progress line and
+     is therefore empty for exactly the tasks that are stuck, which is the one
+     case a reader needs it — so the observed reason is its own line, shown
+     whenever the disk carries one and absent when it does not. */
+  if (p.why) {
+    const why = document.createElement("div");
+    why.className = "why"; why.textContent = "почему: " + p.why;
+    if (p.why_src) why.title = "наблюдено: " + p.why_src;
+    node.appendChild(why);
   }
   for (const question of p.questions.slice(0, 2)) {
     const ask = document.createElement("div");
@@ -889,7 +964,10 @@ function isShut(col, area, byDefault) {
 function areaNode(panel, area) {
   const node = document.createElement("section");
   const shut = isShut(panel.key, area.key, area.collapsed);
-  node.className = "area a-" + area.key + (shut ? " shut" : "");
+  /* An empty area still shows its heading — that heading is the answer «ничего
+     не ждёт решения» — but it must not hold vertical space away from the areas
+     that have something to show. */
+  node.className = "area a-" + area.key + (shut ? " shut" : "") + (area.count ? "" : " void");
 
   const title = document.createElement("h3");
   title.appendChild(document.createTextNode(area.title + " "));
@@ -922,7 +1000,31 @@ function areaNode(panel, area) {
     plates.appendChild(empty);
   }
   for (const p of area.plates) plates.appendChild(plateNode(p, area.key));
+  /* The product's own open questions, in the same area and the same count as the
+     tasks. They are questions to the same person; splitting them into a second
+     place with a second number is how seventeen of them stayed off the board. */
+  for (const q of (area.questions || [])) plates.appendChild(questionNode(q));
   node.appendChild(plates);
+  return node;
+}
+
+function questionNode(q) {
+  const node = document.createElement("div");
+  node.className = "plate p-waiting_human q";
+  const head = document.createElement("div");
+  head.className = "head";
+  const num = document.createElement("span");
+  num.className = "num"; num.textContent = "?";
+  const name = document.createElement("span");
+  name.className = "name"; name.textContent = q.text;
+  head.appendChild(num); head.appendChild(name);
+  node.appendChild(head);
+  const row = document.createElement("div");
+  row.className = "row";
+  const src = tag("вопрос продукта " + q.product);
+  src.title = "наблюдено: раздел «Открытые вопросы» в products/" + q.product + "/product.md";
+  row.appendChild(src);
+  node.appendChild(row);
   return node;
 }
 
@@ -968,10 +1070,21 @@ function stripItem(p, cls) {
   const bits = ["#" + p.id, p.title];
   if (p.actor) bits.push("— " + p.actor);
   if (p.role) bits.push("(" + (ROLE_RU[p.role] || p.role) + ")");
-  const age = ago(p.age_seconds);
+  const age = ago(ageOf(p));
   if (age) bits.push("· " + age);
   s.textContent = bits.join(" ");
-  s.title = p.thread + (p.happening ? " · " + p.happening : "");
+  /* The jam is named on the first screen, so its reason has to be there too:
+     «где затор» without «почему» is two thirds of an acceptance question. What
+     is doing the work — the child's activity line or the observed reason — is
+     shown as its own span, so it is read rather than hovered over. */
+  const why = p.why || p.happening;
+  if (why) {
+    const w = document.createElement("span");
+    w.className = "why"; w.textContent = " — " + why;
+    if (p.why_src) w.title = "наблюдено: " + p.why_src;
+    s.appendChild(w);
+  }
+  s.title = p.thread;
   return s;
 }
 
@@ -1002,7 +1115,15 @@ function drawStrip(board) {
   lbl.className = "lbl"; lbl.textContent = "Ждёт решения человека";
   const n = document.createElement("span");
   n.className = board.waiting ? "ask" : "none";
-  n.textContent = board.waiting ? board.waiting + " — в колонках ниже, первой областью" : "ничего";
+  /* The number, and what it is made of. A single figure nobody could take apart
+     is what let thirteen wrong entries stand as an answer; split by source, a
+     reader can check it against the first area of the columns below. */
+  const parts = [];
+  if (board.waiting_tasks) parts.push(board.waiting_tasks + " в задачах");
+  if (board.waiting_questions) parts.push(board.waiting_questions + " вопросов продуктов");
+  n.textContent = board.waiting
+    ? board.waiting + " — " + parts.join(" и ") + ", первой областью в колонках ниже"
+    : "ничего";
   grp.appendChild(lbl); grp.appendChild(n);
   strip.appendChild(grp);
 }
@@ -1066,7 +1187,7 @@ drawBoard(BOARD, SNAP);
 setInterval(() => {
   for (const node of document.querySelectorAll(".tag.age[data-since]")) {
     const age = ago(ageOf({ since: node.dataset.since }));
-    if (age) node.textContent = "в этом состоянии " + age;
+    if (age) node.textContent = ageCaption(age);
   }
 }, 30000);
 window.addEventListener("resize", resize);

@@ -10,6 +10,7 @@ goes with it and the layout decisions the picture depends on.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -24,16 +25,20 @@ import process_map_state as state
 
 def a_task(**over) -> dict:
     board = over.pop("board", {})
+    run = over.pop("run", None)
     task = {"id": 1, "title": "Задача", "status": "planned", "status_detail": None,
             "dir": "001-task", "gates": [], "flags": [], "questions": [],
             "run": {"state": None, "runner": None, "workflow": None, "sandbox": None,
                     "stop_reason": None, "exit_code": None, "pid": None,
-                    "alive": False, "progress": None},
+                    "alive": False, "alive_src": None, "progress": None},
             "board": {"area": "queued", "actor": None, "actor_src": None,
                       "role": None, "role_src": None, "happening": None,
-                      "since": None, "age_seconds": None, "attempt": 0}}
+                      "why": None, "why_src": None, "since": None, "since_src": None,
+                      "age_seconds": None, "attempt": 0}}
     task.update(over)
     task["board"].update(board)
+    if run:
+        task["run"].update(run)
     return task
 
 
@@ -111,14 +116,19 @@ class RecordContract(unittest.TestCase):
             schema.validate_record(a_record(at="вчера вечером"))
 
 
+# The negative control, in one place: a real path, a real address and a real
+# chat identifier, in the shape they actually leaked in.
+SECRET = ("/opt/projects/moex-strategy-lab/report.md пишет elfiona.sea.girl@gmail.com "
+          "в чат 433978200")
+
+
 class Anonymisation(unittest.TestCase):
     """The negative control: what must not survive, and what must."""
 
-    SECRET = ("/opt/projects/moex-strategy-lab/report.md пишет elfiona.sea.girl@gmail.com "
-              "в чат 433978200")
+    SECRET = SECRET
 
     def test_paths_mail_and_numeric_ids_do_not_survive(self):
-        clean = state.scrub({"detail": self.SECRET, "dir": "316-identify-max-user-433978200"})
+        clean = schema.scrub({"detail": self.SECRET, "dir": "316-identify-max-user-433978200"})
         self.assertNotIn("/opt/projects", clean["detail"])
         self.assertNotIn("@gmail.com", clean["detail"])
         self.assertNotIn("433978200", clean["detail"])
@@ -127,17 +137,29 @@ class Anonymisation(unittest.TestCase):
     def test_real_task_titles_survive_on_purpose(self):
         # The user asked to recognise a specific task by its real name among all
         # the shown work. Content privacy of titles stays a human step.
-        clean = state.scrub({"title": "Карта процессной работы: вид сверху",
+        clean = schema.scrub({"title": "Карта процессной работы: вид сверху",
                              "task_title": "Пересчитать 18 строк калькулятора"})
         self.assertEqual(clean["title"], "Карта процессной работы: вид сверху")
         self.assertEqual(clean["task_title"], "Пересчитать 18 строк калькулятора")
 
-    def test_recorder_scrubs_a_record_but_keeps_the_title(self):
-        clean = recorder.scrub_record(a_record(
-            kind="artifact", task_title="Карта процессной работы",
-            detail=self.SECRET, label="analysis.md"))
-        self.assertEqual(clean["task_title"], "Карта процессной работы")
-        self.assertNotIn("433978200", clean["detail"])
+    def test_the_recorder_cleans_the_title_it_saves(self):
+        # This test used to put the secret in `detail` and assert that
+        # `task_title` came back untouched — so it passed while the scribe wrote
+        # the raw title back over the cleaned one, and the review's negative
+        # control walked straight through it (finding HIGH-3 of review 786). The
+        # secret now goes exactly where the bypass lived.
+        clean = schema.scrub(a_record(
+            kind="artifact", task_title=self.SECRET, label=self.SECRET,
+            detail=self.SECRET))
+        for field in ("task_title", "label", "detail"):
+            self.assertNotIn("/opt/projects", clean[field], field)
+            self.assertNotIn("@gmail.com", clean[field], field)
+            self.assertNotIn("433978200", clean[field], field)
+
+    def test_the_scribe_has_no_second_cleaner_to_put_values_back_with(self):
+        source = Path(recorder.__file__).read_text()
+        self.assertNotIn("scrub_record", source)
+        self.assertFalse(hasattr(recorder, "scrub_record"))
 
 
 class RecorderObservation(unittest.TestCase):
@@ -218,11 +240,13 @@ class Rendering(unittest.TestCase):
 class PrivacyNegativeControl(unittest.TestCase):
     """The bypasses the previous suite walked past (finding HIGH-1 of review 780)."""
 
+    SECRET = SECRET
+
     def test_a_secret_inside_a_kept_title_does_not_survive(self):
         # The old scrub excluded titles from cleaning altogether, so a real chat
         # identifier went out inside a real task name, in a file stamped
         # «ОБЕЗЛИЧЕНО». The title keeps its meaning; its content gets cleaned.
-        clean = state.scrub({"title": "Identify Max telegram_user_433978200",
+        clean = schema.scrub({"title": "Identify Max telegram_user_433978200",
                              "task_title": "Отчёт в /opt/projects/moex-strategy-lab на elfiona.sea.girl@gmail.com"})
         self.assertNotIn("433978200", clean["title"])
         self.assertIn("Identify Max", clean["title"])
@@ -233,19 +257,68 @@ class PrivacyNegativeControl(unittest.TestCase):
     def test_an_integer_identifier_does_not_survive(self):
         # `scrub` used to return every int untouched, which is how 298 PIDs
         # reached a public artifact: a regex never sees a number that is not text.
-        clean = state.scrub({"run": {"pid": 2065651, "alive": True}, "task_count": 73})
+        clean = schema.scrub({"run": {"pid": 2065651, "alive": True}, "task_count": 73})
         self.assertIsNone(clean["run"]["pid"])
         self.assertTrue(clean["run"]["alive"])
         # A count is a measurement, not an identifier, and has to stay.
         self.assertEqual(clean["task_count"], 73)
+
+    def test_the_written_timeline_of_an_anonymous_scribe_carries_no_secret(self):
+        # End to end through the scribe, with the secret in the task title —
+        # which is what the review's independent probe did, and what survived.
+        secret = "telegram_user_433978200 /opt/projects/private owner@example.com"
+        with tempfile.TemporaryDirectory() as tmp:
+            task_dir = Path(tmp) / "001-task"
+            task_dir.mkdir()
+            (task_dir / "task.md").write_text(f'---\nstatus: "planned"\ntitle: "{secret}"\n---\n')
+            (task_dir / "analysis.md").write_text("анализ")
+            out, cursor = Path(tmp) / "t.jsonl", Path(tmp) / "c.json"
+            scribe = recorder.Scribe(out, cursor, anonymize=True)
+            scribe.seeding = False
+            scribe.observe_task(task_dir)
+            written = out.read_text()
+        self.assertTrue(written.strip(), "писец ничего не записал")
+        for forbidden in ("433978200", "/opt/projects", "owner@example.com"):
+            self.assertNotIn(forbidden, written, forbidden)
+        # The record is still a record: the observation survives the cleaning.
+        for record in (json.loads(line) for line in written.splitlines()):
+            schema.validate_record(record)
+            self.assertTrue(record["task_title"])
+
+    def test_showing_anonymously_cleans_a_timeline_written_without_the_flag(self):
+        # `--serve --anonymize` used to trust that the file on disk had been
+        # written safely, so a scribe started without the flag leaked through a
+        # server started with it (finding HIGH-3 of review 786).
+        secret = "telegram_user_433978200 в /opt/projects/private, owner@example.com"
+        with tempfile.TemporaryDirectory() as tmp:
+            timeline = Path(tmp) / "timeline.jsonl"
+            timeline.write_text(json.dumps(a_record(task_title=secret, label=secret,
+                                                    detail=secret), ensure_ascii=False))
+            snapshot = Path(tmp) / "snapshot.json"
+            snapshot.write_text(json.dumps(
+                a_snapshot([a_task(title=secret)]), ensure_ascii=False))
+            dirty = render.payload(timeline, snapshot)
+            clean = render.payload(timeline, snapshot, anonymize=True)
+        self.assertIn("433978200", json.dumps(dirty, ensure_ascii=False))
+        blob = json.dumps(clean, ensure_ascii=False)
+        for forbidden in ("433978200", "/opt/projects", "owner@example.com"):
+            self.assertNotIn(forbidden, blob, forbidden)
+
+    def test_cleaning_an_already_clean_document_changes_nothing(self):
+        # Live mode cleans on the way to the screen even when the scribe already
+        # cleaned on the way to disk, so the second pass has to be a no-op.
+        once = schema.scrub(a_record(task_title=self.SECRET, detail=self.SECRET))
+        self.assertEqual(schema.scrub(once), once)
 
     def test_a_built_anonymised_document_carries_no_pid_and_no_long_number(self):
         snapshot = a_snapshot([a_task(title="Задача telegram_user_433978200",
                                       run={"state": "running", "runner": "codex",
                                            "workflow": "dev-pipeline", "sandbox": None,
                                            "stop_reason": None, "exit_code": None,
-                                           "pid": 2065651, "alive": True, "progress": None})])
-        blob = json.dumps(state.scrub(snapshot), ensure_ascii=False)
+                                           "pid": 2065651, "alive": True,
+                                           "alive_src": "pid и стартовый тик ядра",
+                                           "progress": None})])
+        blob = json.dumps(schema.scrub(snapshot), ensure_ascii=False)
         self.assertNotIn("2065651", blob)
         self.assertNotIn("433978200", blob)
 
@@ -384,7 +457,8 @@ class LiveUpdate(unittest.TestCase):
         alive = a_task(flags=["live"], board={"area": "running"},
                        run={"state": "running", "runner": "codex", "workflow": "dev-pipeline",
                             "sandbox": None, "stop_reason": None, "exit_code": None,
-                            "pid": None, "alive": True, "progress": None})
+                            "pid": None, "alive": True,
+                            "alive_src": "pid и стартовый тик ядра", "progress": None})
         dead = a_task(flags=["stale_label"], board={"area": "stuck"},
                       run={**alive["run"], "alive": False})
         self.assertNotEqual(self.digest(a_snapshot([alive])), self.digest(a_snapshot([dead])))
@@ -453,7 +527,9 @@ class BoardLayout(unittest.TestCase):
     def test_the_area_waiting_for_a_person_is_present_even_when_empty(self):
         # It is the whole answer to one of the three acceptance questions: an
         # empty area answers it, a missing one does not.
-        board = render.build_board(a_snapshot([a_task(board={"area": "done"})]))
+        snapshot = a_snapshot([a_task(board={"area": "done"})])
+        snapshot["products"][0]["questions"] = []
+        board = render.build_board(snapshot)
         waiting = board["panels"][0]["areas"][0]
         self.assertEqual(waiting["key"], "waiting_human")
         self.assertEqual(waiting["count"], 0)
@@ -514,9 +590,15 @@ class BoardLayout(unittest.TestCase):
 
 
 class BoardArea(unittest.TestCase):
-    def test_a_person_deciding_comes_before_everything_else(self):
+    def test_a_person_owing_an_answer_comes_before_everything_else(self):
         self.assertEqual(state.board_area("planned", ["live"], True), "waiting_human")
-        self.assertEqual(state.board_area("blocked", [], False), "waiting_human")
+
+    def test_blocked_is_a_jam_and_not_a_person_owing_an_answer(self):
+        # It used to be a silent synonym for «ждёт решения человека», which put
+        # technical blockages under the one heading a person is meant to act on
+        # (finding HIGH-1 of review 786). Work that stands is a jam; the reason
+        # stands next to it.
+        self.assertEqual(state.board_area("blocked", ["blocked"], False), "stuck")
 
     def test_a_dead_run_under_a_living_label_is_a_jam(self):
         self.assertEqual(state.board_area("planned", ["stale_label"], False), "stuck")
@@ -527,6 +609,223 @@ class BoardArea(unittest.TestCase):
 
     def test_nothing_happening_and_nothing_wrong_is_a_queue_not_work(self):
         self.assertEqual(state.board_area("planned", ["idle"], False), "queued")
+
+
+class WaitingForAPerson(unittest.TestCase):
+    """The six plates review 786 named, and the questions the board never showed."""
+
+    # Verbatim from the tasks the review inspected. Each one used to be counted
+    # as work waiting on a person, and none of them is (finding HIGH-1).
+    NOT_WAITING = {
+        "760/727 — блокировка без вопроса": [],
+        "747 — ремонт вынесен в другую задачу": [],
+        "779 — прямо сказано, что выбора нет": [
+            "Задача поставлена по прямому письму пользователя; выбора, ожидающего "
+            "его ответа, в ней нет."],
+        "722 — инструкция к трактовке будущего результата": [
+            "Если после честного расчёта окажется, что часть пар не имеет достаточного "
+            "общего минутного покрытия — это результат («пара неизмерима на этих данных»), "
+            "а не ошибка. Такие случаи выделить отдельно, а не прятать в общий итог."],
+        "723 — вопрос и ответ на него в одном пункте": [
+            "Если выбран путь «read-only с записью в свой каталог» — считается ли такой "
+            "прогон по-прежнему read-only для целей правила кросс-ревью? Продуктовый "
+            "ответ: да, потому что ограничение защищает предмет ревью, а не блокнот "
+            "ревьювера."],
+    }
+
+    STILL_WAITING = [
+        "Публиковать ли перенос коммитов на уровень продукта?",
+        "Кто четыре внешних пользователя Max и что им нужно?",
+    ]
+
+    def test_none_of_the_six_named_tasks_waits_for_a_person(self):
+        for label, bullets in self.NOT_WAITING.items():
+            with self.subTest(label):
+                self.assertEqual(state.pending_questions(bullets), [])
+
+    def test_a_task_blocked_without_a_question_is_not_waiting_for_a_person(self):
+        # 760, 727 and 747 carry `- none` under the heading and reached the area
+        # purely through their status.
+        self.assertEqual(state.pending_questions([]), [])
+        self.assertEqual(state.board_area("blocked", ["blocked"], False), "stuck")
+
+    def test_a_real_open_question_still_gets_there(self):
+        # The other half of the acceptance criterion: nothing genuinely waiting
+        # on a person may disappear while the false positives go.
+        self.assertEqual(state.pending_questions(self.STILL_WAITING), self.STILL_WAITING)
+        self.assertEqual(state.board_area("planned", [], True), "waiting_human")
+
+    def test_a_struck_through_question_is_settled(self):
+        self.assertEqual(state.pending_questions(["~~Перезапускать ли 035?~~ Закрыт 2026-08-04."]), [])
+
+    def test_the_products_own_questions_are_in_the_same_count_and_the_same_area(self):
+        # Seventeen canonical product questions sat in the same payload and were
+        # not part of the board's answer at all (finding HIGH-1).
+        board = render.build_board(a_snapshot([a_task()]))
+        area = board["panels"][0]["areas"][0]
+        self.assertEqual(area["key"], "waiting_human")
+        self.assertEqual([q["text"] for q in area["questions"]], ["Публиковать ли перенос?"])
+        self.assertEqual(area["count"], 1)
+        self.assertEqual(board["waiting"], 1)
+        self.assertEqual(board["waiting_questions"], 1)
+        self.assertEqual(board["waiting_tasks"], 0)
+
+    def test_the_headline_number_is_the_sum_of_its_two_named_parts(self):
+        waiting = a_task(id=9, dir="009-t", questions=["Брать все девятнадцать?"],
+                         board={"area": "waiting_human"})
+        board = render.build_board(a_snapshot([waiting]))
+        self.assertEqual(board["waiting"], board["waiting_tasks"] + board["waiting_questions"])
+        self.assertEqual(board["waiting"], 2)
+
+    def test_a_question_of_a_product_no_direction_owns_is_not_invented_onto_a_panel(self):
+        snapshot = a_snapshot()
+        snapshot["products"].append({"slug": "unowned", "questions": ["Ничей вопрос?"],
+                                     "effect": []})
+        board = render.build_board(snapshot)
+        shown = [q["text"] for a in board["panels"][0]["areas"] for q in a["questions"]]
+        self.assertNotIn("Ничей вопрос?", shown)
+
+
+class JamReason(unittest.TestCase):
+    """«Где затор» without «почему» is two thirds of an acceptance question."""
+
+    NO_RUN = {"stop_reason": None, "alive": False, "alive_src": None}
+
+    def test_the_frontmatter_reason_is_used_and_its_source_named(self):
+        # Exactly the case of task 686: `happening` is null because no live child
+        # writes progress, while the reason sits in the frontmatter next to it.
+        why, src = state.jam_reason("queued_behind_active_worktree_writers_669_689",
+                                    self.NO_RUN, [], [])
+        self.assertEqual(why, "queued_behind_active_worktree_writers_669_689")
+        self.assertIn("status_detail", src)
+
+    def test_a_stopped_watcher_names_the_stop(self):
+        why, src = state.jam_reason(None, {**self.NO_RUN, "stop_reason": "memory_limit"}, [], [])
+        self.assertEqual(why, "memory_limit")
+        self.assertIn("runner.json", src)
+
+    def test_a_failed_gate_is_a_reason(self):
+        why, src = state.jam_reason(None, self.NO_RUN,
+                                    [{"gate": "live_surface", "result": "FAIL"},
+                                     {"gate": "tests", "result": "OK"}], [])
+        self.assertIn("live_surface", why)
+        self.assertNotIn("tests", why)
+        self.assertIn("verification.md", src)
+
+    def test_a_lying_label_is_a_reason(self):
+        why, src = state.jam_reason(None, self.NO_RUN, [], ["stale_label"])
+        self.assertIn("running", why)
+        self.assertTrue(src)
+
+    def test_silence_where_the_disk_says_nothing(self):
+        self.assertEqual(state.jam_reason(None, self.NO_RUN, [], []), (None, None))
+
+    def test_a_reason_without_a_source_cannot_reach_the_board(self):
+        with self.assertRaises(schema.ContractError):
+            schema.validate_snapshot(a_snapshot([a_task(board={"why": "просто так"})]))
+
+    def test_the_reason_reaches_the_plate_and_the_strip(self):
+        stuck = a_task(id=686, dir="686-t", flags=["blocked"],
+                       status_detail="queued_behind_active_worktree_writers_669_689",
+                       board={"area": "stuck", "why": "queued_behind_active_worktree_writers_669_689",
+                              "why_src": "поле status_detail во frontmatter task.md"})
+        board = render.build_board(a_snapshot([stuck]))
+        self.assertEqual(board["panels"][0]["areas"][2]["plates"][0]["why"],
+                         "queued_behind_active_worktree_writers_669_689")
+        self.assertEqual(board["jams"][0]["why"],
+                         "queued_behind_active_worktree_writers_669_689")
+
+    def test_the_page_prints_the_reason_rather_than_hiding_it_in_a_tooltip(self):
+        html = render.render({"snapshot": a_snapshot(), "timeline": [],
+                              "board": render.build_board(a_snapshot()),
+                              "world": render.build_world(a_snapshot(), []),
+                              "built_at": "2026-08-06T12:00:00+00:00",
+                              "live_url": None, "digest": "d"})
+        self.assertIn('why.textContent = "почему: " + p.why', html)
+        self.assertIn('w.textContent = " — " + why', html)
+
+
+class Liveness(unittest.TestCase):
+    """A run is this task's run, or it is not one (finding MEDIUM-2 of review 786)."""
+
+    def test_the_owner_of_the_question_is_the_runner_that_recorded_the_process(self):
+        # One concept, one implementation: the collector asks, it does not decide.
+        self.assertIsNotNone(state.RUNNER)
+        self.assertTrue(hasattr(state.RUNNER, "process_is_live"))
+        # And keeps no answer of its own to put back in its place.
+        self.assertFalse(hasattr(state, "pid_alive"))
+
+    def test_this_very_process_is_live_under_its_recorded_identity(self):
+        pid = os.getpid()
+        runner = {"pid": pid, "process_identity": state.RUNNER.process_identity(pid)}
+        alive, src = state.run_alive(runner)
+        self.assertTrue(alive)
+        self.assertTrue(src)
+
+    def test_a_reused_pid_is_not_this_task_s_run(self):
+        # The whole finding: the number still exists, so `os.kill(pid, 0)` said
+        # «alive» and a stranger's process was drawn as the task working.
+        alive, src = state.run_alive({"pid": os.getpid(),
+                                      "process_identity": "identity-of-a-process-long-gone"})
+        self.assertFalse(alive)
+        self.assertIsNone(src)
+
+    def test_a_recorded_pid_with_no_recorded_identity_is_not_live(self):
+        self.assertEqual(state.run_alive({"pid": os.getpid()}), (False, None))
+        self.assertEqual(state.run_alive({}), (False, None))
+
+    def test_a_pid_of_another_namespace_is_unobservable_not_dead(self):
+        alive, src = state.run_alive({"pid": 1, "process_identity": "x",
+                                      "pid_namespace": "pid:[4026500000]"})
+        self.assertFalse(alive)
+        self.assertIn("ненаблюдаема", src)
+
+    def test_a_live_run_without_a_stated_observation_is_refused(self):
+        with self.assertRaises(schema.ContractError):
+            schema.validate_snapshot(a_snapshot([a_task(run={"alive": True})]))
+        schema.validate_snapshot(a_snapshot([a_task(
+            run={"alive": True, "alive_src": "pid и стартовый тик ядра"})]))
+
+
+class StateAge(unittest.TestCase):
+    """What «без изменений N» measures, and that it says so (finding MEDIUM-1)."""
+
+    def test_the_newest_input_of_the_area_wins_over_the_one_that_used_to_be_picked(self):
+        # The review's control: a task.md rewritten now, a status.json from
+        # before. The old rule preferred status.json whenever it held any state
+        # and reported the older instant for the newer area.
+        with tempfile.TemporaryDirectory() as tmp:
+            task_dir = Path(tmp) / "001-task"
+            task_dir.mkdir()
+            (task_dir / "status.json").write_text('{"state": "running"}')
+            os.utime(task_dir / "status.json", (1_000_000, 1_000_000))
+            (task_dir / "task.md").write_text('---\nstatus: "blocked"\n---\n')
+            since, age, src = state.state_age(task_dir)
+        self.assertIn("task.md", src)
+        self.assertLess(age, 60 * 60 * 24)
+
+    def test_every_file_the_area_depends_on_is_an_input(self):
+        # If the area is derived from a file, that file has to be able to move
+        # the age; otherwise the caption measures something else again.
+        self.assertEqual(set(state.AREA_INPUTS),
+                         {"task.md", "status.json", "verification.md", ".runner/runner.json"})
+
+    def test_a_task_with_no_inputs_at_all_says_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(state.state_age(Path(tmp)), (None, None, None))
+
+    def test_the_caption_says_what_it_measures(self):
+        html = render.render({"snapshot": a_snapshot(), "timeline": [],
+                              "board": render.build_board(a_snapshot()),
+                              "world": render.build_world(a_snapshot(), []),
+                              "built_at": "2026-08-06T12:00:00+00:00",
+                              "live_url": None, "digest": "d"})
+        self.assertIn('function ageCaption(age) { return "без изменений " + age; }', html)
+        self.assertNotIn("в этом состоянии \" + age", html)
+        # One wording, built in one place: the plate and the ticker that
+        # refreshes it every half minute used to spell the caption separately.
+        self.assertEqual(html.count('"без изменений "'), 1)
+        self.assertEqual(html.count("ageCaption("), 3)
 
 
 class OfflineRecording(unittest.TestCase):

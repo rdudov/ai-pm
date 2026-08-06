@@ -12,13 +12,23 @@ Observed state only, on purpose. Everything comes from task frontmatter,
 the same regardless of how much work happened — the same rule `thread_state.py`
 follows.
 
+Two questions this module deliberately does not answer itself:
+
+* whether a recorded process is still this task's run — that belongs to the
+  runner that recorded it, and is asked of `task_runner.process_is_live`;
+* how a document is anonymised — that belongs to `process_map_schema`, which
+  reads no files and can therefore be shared with the renderer.
+
+Both used to live here in a second copy, and both copies drifted from the
+original: a PID number counted as a live run, and a caller could put raw values
+back after cleaning.
+
 Exit code 0 always; the caller decides what to do with the report.
 """
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
 import subprocess
 import sys
@@ -26,13 +36,14 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from process_map_schema import SCHEMA_VERSION, STATIONS, validate_snapshot
+from process_map_schema import SCHEMA_VERSION, STATIONS, scrub, validate_snapshot
 
 HOME = Path(__file__).resolve().parents[1]
 CONFIG = HOME / "threads.json"
 PRODUCTS = HOME / "products"
 REPO = Path("/opt/projects/companion-agent")
 TASKS_INDEX = REPO / "skills" / "task-creator" / "scripts" / "tasks_index.py"
+RUNNER_SCRIPTS = REPO / "skills" / "task-runner" / "scripts"
 PYTHON = REPO / ".venv" / "bin" / "python"
 MAIL_ROOT = REPO / ".state" / "gmail" / "product-owner"
 
@@ -124,14 +135,50 @@ def load_config() -> dict:
     return json.loads(CONFIG.read_text())
 
 
-def pid_alive(pid: int) -> bool:
+def liveness_owner():
+    """The runner module that owns «is this recorded process still this run».
+
+    The question already has an implementation and it is not here:
+    `task_runner.process_is_live` compares the recorded PID *and* the kernel
+    start tick, and `runner_pid_namespace_visible` decides when a negative
+    lookup is evidence at all. Both values are already in the
+    `.runner/runner.json` this collector reads. Writing a second answer here
+    would be a second implementation of one concept, so the owner is imported
+    and asked instead (finding MEDIUM-2 of review 786). It is stdlib-only and
+    costs about a tenth of a second to import, once.
+    """
+    if str(RUNNER_SCRIPTS) not in sys.path:
+        sys.path.insert(0, str(RUNNER_SCRIPTS))
     try:
-        os.kill(pid, 0)
-    except (ProcessLookupError, ValueError):
-        return False
-    except PermissionError:
-        return True
-    return True
+        import task_runner
+    except ImportError:
+        return None
+    return task_runner
+
+
+RUNNER = liveness_owner()
+
+
+def run_alive(runner: dict) -> tuple[bool, str | None]:
+    """Whether the process this task recorded is still running, and what said so.
+
+    Closed by default. `os.kill(pid, 0)` — what this used to be — answers «some
+    process holds this number», and PIDs are reused, so after a wrap an
+    unrelated process was shown as a live run of the task, in green, in the «в
+    работе сейчас» area. Three answers are now distinguished:
+
+    * live, because the recorded identity still matches the running process;
+    * not live, because nothing matches or nothing was recorded to match against;
+    * unobservable, because the PID belongs to a namespace this observer cannot
+      see — which is not the same as dead, and says so on the plate.
+    """
+    if RUNNER is None:
+        return False, None
+    if not RUNNER.runner_pid_namespace_visible(runner):
+        return False, "личность процесса ненаблюдаема: другое пространство имён PID"
+    if RUNNER.process_is_live(runner.get("pid"), runner.get("process_identity")):
+        return True, "pid и стартовый тик ядра совпали с .runner/runner.json"
+    return False, None
 
 
 def read_json(path: Path) -> dict:
@@ -193,7 +240,7 @@ def run_state(task_dir: Path) -> dict:
     status = read_json(task_dir / "status.json")
     runner = read_json(task_dir / ".runner" / "runner.json")
     pid = runner.get("pid") or status.get("pid")
-    alive = pid_alive(int(pid)) if isinstance(pid, int) else False
+    alive, alive_src = run_alive(runner)
 
     progress_path = task_dir / "progress.json"
     progress = None
@@ -216,6 +263,7 @@ def run_state(task_dir: Path) -> dict:
         "exit_code": runner.get("exit_code"),
         "pid": pid if isinstance(pid, int) else None,
         "alive": alive,
+        "alive_src": alive_src,
         "progress": progress,
     }
 
@@ -247,21 +295,45 @@ def observed_role(task_dir: Path) -> tuple[str | None, str | None]:
     return None, None
 
 
-def state_age(task_dir: Path, run: dict) -> tuple[str | None, int | None]:
-    """When the current state was last observed to change, and how long ago.
+# Every file the board area of a task is derived from. `task.md` carries the
+# status and the questions, `status.json` the run label, `verification.md` the
+# gate verdicts, `runner.json` the stop reason. The area depends on all four, so
+# no single one of them can stand for «when the area last changed».
+AREA_INPUTS = ("task.md", "status.json", "verification.md", ".runner/runner.json")
+
+
+def state_age(task_dir: Path) -> tuple[str | None, int | None, str | None]:
+    """How long nothing the area is built from has changed, and which file said so.
 
     A jam is not a status, it is time spent in one — so the plate needs an age.
-    It is taken from the mtime of the file that carries the state, never from a
-    timestamp the child wrote itself: children routinely put local time into a
-    UTC field, and the contour has been burned by that already.
+    The previous version picked one carrier, `status.json` if it held any state
+    and `task.md` otherwise, and called the result «в этом состоянии». That is
+    two claims too many: the area also depends on the questions, the gate
+    verdicts and the stop reason, so a task whose `task.md` had just been
+    rewritten kept showing the older mtime of its `status.json` (finding
+    MEDIUM-1 of review 786).
+
+    Reading it from the *newest* of the area's inputs is an honest upper bound —
+    the area cannot have changed later than its latest input did — and needs no
+    memory of the previous state, which a collector that deliberately keeps none
+    could not provide. What is measured is named in `since_src`, and the caption
+    says «без изменений», not «в этом состоянии»: it is the age of the newest
+    observation, not of a transition nobody watched.
+
+    Never a timestamp a child wrote itself: children routinely put local time
+    into a UTC field, and the contour has been burned by that already.
     """
-    carrier = task_dir / ("status.json" if run.get("state") else "task.md")
-    try:
-        mtime = carrier.stat().st_mtime
-    except OSError:
-        return None, None
+    seen = []
+    for name in AREA_INPUTS:
+        try:
+            seen.append((task_dir.joinpath(*name.split("/")).stat().st_mtime, name))
+        except OSError:
+            continue
+    if not seen:
+        return None, None, None
+    mtime, name = max(seen)
     stamp = datetime.fromtimestamp(mtime, timezone.utc).isoformat()
-    return stamp, max(int(time.time() - mtime), 0)
+    return stamp, max(int(time.time() - mtime), 0), f"mtime {name} — самый свежий вход области"
 
 
 def attempt_count(task_dir: Path) -> int:
@@ -273,21 +345,78 @@ def attempt_count(task_dir: Path) -> int:
 
 
 def board_area(status: str | None, flags: list[str], has_questions: bool) -> str:
+    """Which area of the board a task stands in. One rule, one owner.
+
+    `has_questions` means a question is open *and still unanswered* — see
+    `pending_questions`, which owns that judgement. It used to mean «the
+    Open Questions heading has any bullet under it», and `blocked` was accepted
+    as a second, silent synonym for waiting on a person, which put technical
+    blockages, an already-migrated repair, a bullet saying there is no choice to
+    make and a question answered in its own sentence under «ждёт решения
+    человека» (finding HIGH-1 of review 786).
+
+    A blocked task is now what it is: work that stands and cannot move — a jam,
+    with its reason next to it. Someone may well have to unblock it, but that is
+    not the same statement as «a person owes an answer», and the board answers
+    the second question, not the first.
+    """
     if status in TERMINAL:
         return "done"
-    # A person deciding comes first, so the area is checked first: a blocked task
-    # in our contour is one a human has to restart.
-    if has_questions or status == "blocked":
+    # A person owing an answer comes first: it is the whole of one acceptance
+    # question, and an answer nobody gives blocks everything behind it.
+    if has_questions:
         return "waiting_human"
     if "live" in flags:
         return "running"
-    if {"stale_label", "killed", "gap"} & set(flags):
+    if {"stale_label", "killed", "gap", "blocked"} & set(flags):
         return "stuck"
     return "queued"
 
 
+def jam_reason(status_detail: str | None, run: dict, verdicts: list[dict],
+               flags: list[str]) -> tuple[str | None, str | None]:
+    """Why this task stands where it stands, and what observed it.
+
+    The board named the jam and could not say why, although the reason was
+    sitting in the same payload: task 686 showed `happening: null` while its
+    frontmatter carried `queued_behind_active_worktree_writers_669_689` (finding
+    HIGH-2 of review 786). `happening` comes from a live child's `progress.json`
+    and is therefore empty for exactly the tasks that are stuck, which is the one
+    case the caption was needed for.
+
+    Four observable sources, most specific first. Nothing is derived, guessed or
+    softened: where the disk says nothing, this returns nothing and the plate
+    stays silent rather than filling the space.
+    """
+    if status_detail:
+        return status_detail, "поле status_detail во frontmatter task.md"
+    if run.get("stop_reason"):
+        return run["stop_reason"], "watcher_stop_reason в .runner/runner.json"
+    failed = [v["gate"] for v in verdicts if v["result"] != "OK"]
+    if failed:
+        return ("гейты не пройдены: " + ", ".join(failed[:3]),
+                "строки Result в verification.md")
+    if "stale_label" in flags:
+        return ("ярлык говорит running, а записанного процесса нет",
+                "status.json против личности процесса из .runner/runner.json")
+    if run.get("alive_src") and not run.get("alive"):
+        # Unobservable is not dead, and the plate has to say which one it is.
+        return run["alive_src"], "сверка пространства имён PID с .runner/runner.json"
+    return None, None
+
+
 OPEN_QUESTIONS = re.compile(r"^##\s+Open Questions\s*$(.*?)(?=^##\s|\Z)",
                             re.MULTILINE | re.DOTALL)
+
+# A bullet that answers itself in the same breath. The contour writes exactly
+# this shape — «Продуктовый ответ: да, потому что…» under the question it settles
+# (task 723) — and reading it as an open question is how the board reported a
+# decision that had already been taken.
+ANSWERED_HERE = re.compile(r"\b(ответ|решение|answer|decision|decided)\b\s*:", re.IGNORECASE)
+
+# The product's own convention for a closed question, already honoured by
+# `products()`: a struck-through line is settled.
+STRUCK = "~~"
 
 
 def open_questions(task_dir: Path) -> list[str]:
@@ -309,6 +438,26 @@ def open_questions(task_dir: Path) -> list[str]:
             # its first line cut real sentences in half on the plate.
             items[-1] += " " + line.strip()
     return [item for item in items if item.lower() not in {"none", "нет"}]
+
+
+def pending_questions(items: list[str]) -> list[str]:
+    """The one owner of «a person still owes an answer here».
+
+    A heading is a place, not a claim. `## Open Questions` holds whatever its
+    author put there, and in this contour that includes notes with no question in
+    them at all («выбора, ожидающего его ответа, в ней нет»), instructions for
+    reading a future result, and questions settled in their own bullet. Counting
+    the heading counted all three as people-blocking work (finding HIGH-1 of
+    review 786).
+
+    What is observable in the text itself is exactly two things: whether it asks
+    anything, and whether the answer is already written next to it. Both are used
+    here and nowhere else — the collector, the board, the counter above the
+    columns and the tests all come through this function, so «ждёт решения
+    человека» has one meaning on the whole screen.
+    """
+    return [item for item in items
+            if "?" in item and not ANSWERED_HERE.search(item) and STRUCK not in item]
 
 
 def task_entry(task: dict) -> dict:
@@ -335,17 +484,21 @@ def task_entry(task: dict) -> dict:
     if status not in TERMINAL and not run["alive"] and status:
         flags.append("idle")
 
-    questions = open_questions(task_dir)
+    # Only the still-unanswered ones reach the plate and the counter: a settled
+    # question on a board of open ones is the same lie as a wrong number.
+    questions = pending_questions(open_questions(task_dir))
     actor, actor_src = observed_actor(task_dir, run)
     role, role_src = observed_role(task_dir)
-    since, age = state_age(task_dir, run)
+    since, age, since_src = state_age(task_dir)
+    status_detail = task.get("status_detail")
+    why, why_src = jam_reason(status_detail, run, verdicts, flags)
     progress = run.get("progress") or {}
 
     return {
         "id": task.get("id"),
         "title": task.get("title"),
         "status": status,
-        "status_detail": task.get("status_detail"),
+        "status_detail": status_detail,
         "dir": Path(task["path"]).name,
         "run": run,
         "gates": verdicts,
@@ -360,7 +513,12 @@ def task_entry(task: dict) -> dict:
             # One line of what is going on, from the child's own progress line —
             # the only place that says it in words. Absent is absent.
             "happening": progress.get("activity"),
+            # Why it stands there, when the disk says why. This is the answer to
+            # the acceptance question the board previously could not give.
+            "why": why,
+            "why_src": why_src,
             "since": since,
+            "since_src": since_src,
             "age_seconds": age,
             "attempt": attempt_count(task_dir),
         },
@@ -443,6 +601,20 @@ def markdown_section(text: str, heading: str) -> list[str]:
 
 
 def products() -> list[dict]:
+    """Products, with the canonical list of questions the user owes an answer to.
+
+    Deliberately *not* filtered through `pending_questions`, and the difference
+    is the point. `## Открытые вопросы` of a product is a curated list: only
+    questions are written into it, and it has its own closure convention — the
+    product owner strikes a settled one through and writes when and by what it
+    was closed. Honouring that convention is the whole test here.
+
+    A task's `## Open Questions` has neither property, which is why it needs the
+    stricter reading. Applying the strict reading here instead would drop four
+    real product questions that happen to be phrased as statements («Какие из
+    находок 706 превращаем в работу»), and dropping a question the user is
+    actually waiting on is the more expensive error of the two.
+    """
     entries = []
     for path in sorted(PRODUCTS.glob("*/product.md")):
         try:
@@ -451,53 +623,10 @@ def products() -> list[dict]:
             continue
         entries.append({
             "slug": path.parent.name,
-            "questions": [q for q in markdown_section(text, "Открытые вопросы") if not q.startswith("~~")],
+            "questions": [q for q in markdown_section(text, "Открытые вопросы") if not q.startswith(STRUCK)],
             "effect": markdown_section(text, "Журнал эффекта")[:8],
         })
     return entries
-
-
-SCRUB = [
-    # Structural identifiers only. Content-level review before publication stays
-    # a human step, and the map declares it rather than pretending otherwise.
-    (re.compile(r"/opt/projects/[A-Za-z0-9_./-]*"), "<repo>"),
-    (re.compile(r"/(?:home|root|Users)/[A-Za-z0-9_./-]*"), "<home>"),
-    (re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+"), "<email>"),
-    # Not `\b\d{7,}\b`: a word boundary never fires between `_` and a digit, so
-    # the real leak `telegram_user_433978200` walked straight through it. Digit
-    # look-around catches an identifier however it is glued to its name.
-    (re.compile(r"(?<!\d)\d{7,}(?!\d)"), "<id>"),
-]
-
-
-# Numeric identifiers hide from the regexes by not being text at all: `scrub`
-# used to return every integer untouched, and 298 real PIDs went out in a file
-# stamped «ОБЕЗЛИЧЕНО» (finding HIGH-1 of review 780). These keys carry an
-# identifier rather than a measurement, so their value is dropped outright —
-# a count of tasks or a line number stays, a PID does not.
-DROP_NUMERIC_KEYS = {"pid", "inode", "chat_id", "message_id", "user_id"}
-
-
-def scrub(value):
-    """Structural anonymisation of a document, applied to every string in it.
-
-    Task titles are *kept as meaning* and *cleaned as text*: the user asked to
-    recognise a specific task by its real name, and that is compatible with
-    running the name through the same expressions as everything else. Excluding
-    titles from the cleaning altogether — which is what this used to do — let a
-    real chat identifier through inside a real title. Content privacy of titles
-    stays a human step before showing, and is declared as a limit.
-    """
-    if isinstance(value, str):
-        for pattern, replacement in SCRUB:
-            value = pattern.sub(replacement, value)
-        return value
-    if isinstance(value, list):
-        return [scrub(item) for item in value]
-    if isinstance(value, dict):
-        return {key: None if key in DROP_NUMERIC_KEYS and isinstance(item, int) else scrub(item)
-                for key, item in value.items()}
-    return value
 
 
 def build(anonymize: bool) -> dict:

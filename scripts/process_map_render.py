@@ -27,8 +27,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from process_map_schema import (BOARD_AREA_RU, BOARD_AREAS, validate_record,
-                                validate_snapshot)
+from process_map_schema import (BOARD_AREA_RU, BOARD_AREAS, scrub,
+                                validate_record, validate_snapshot)
 
 HOME = Path(__file__).resolve().parents[1]
 TEMPLATE = Path(__file__).resolve().parent / "process_map_template.html"
@@ -44,7 +44,15 @@ PER_AREA = 12
 INTEREST = ["live", "blocked", "killed", "stale_label", "gap", "delivered", "idle"]
 
 
-def load_timeline(path: Path) -> list[dict]:
+def load_timeline(path: Path, anonymize: bool = False) -> list[dict]:
+    """The timeline as the page will see it, cleaned when the showing is anonymous.
+
+    `--anonymize` used to mean «the scribe was told to write this file safely»,
+    so live mode handed over whatever was on disk and trusted its provenance
+    (finding HIGH-3 of review 786). It now means what it says: the document being
+    shown is cleaned on its way to the screen. Cleaning is idempotent, so an
+    already-anonymous timeline is unchanged by passing through here again.
+    """
     if not path.is_file():
         return []
     records = []
@@ -56,6 +64,8 @@ def load_timeline(path: Path) -> list[dict]:
             record = json.loads(line)
         except json.JSONDecodeError:
             continue
+        if anonymize:
+            record = scrub(record)
         records.append(validate_record(without_unsourced_actor(record)))
     # Sorting by the string would misplace anything written with a local offset
     # — git stamps commits as `+03:00`, the rest of the contour as `+00:00`.
@@ -187,6 +197,12 @@ def build_world(snapshot: dict, timeline: list[dict]) -> dict:
 # readable. What the cap dropped is counted out loud in the area caption.
 PER_BOARD_AREA = 25
 
+# How many names the strip above the columns carries. The strip answers two of
+# the three acceptance questions by name, so it has to be readable at a glance
+# and has to leave the board itself on the screen.
+NOW_IN_STRIP = 3
+JAMS_IN_STRIP = 4
+
 
 def plate(task: dict) -> dict:
     """One task as the user described it: number, name, status, who, what, how long."""
@@ -203,10 +219,17 @@ def plate(task: dict) -> dict:
         "role": board["role"],
         "role_src": board["role_src"],
         "happening": board["happening"],
+        # Why it stands where it stands, and what observed that. Without it the
+        # board named the jam and left «почему» unanswered while the answer sat
+        # in the same payload (finding HIGH-2 of review 786).
+        "why": board["why"],
+        "why_src": board["why_src"],
         "age_seconds": board["age_seconds"],
         # The instant, so the page can keep the age honest between refreshes
-        # instead of freezing it at the moment the snapshot was collected.
+        # instead of freezing it at the moment the snapshot was collected, and
+        # what its mtime actually belongs to (finding MEDIUM-1).
         "since": board["since"],
+        "since_src": board["since_src"],
         # A live process and a label saying «running» are two different facts,
         # and the contour has already been burned by reading one as the other.
         # They stay two fields, so a dead run under a living label reads as the
@@ -225,6 +248,26 @@ def board_age(tasks: list[dict]) -> int | None:
     return max(ages) if ages else None
 
 
+def product_questions(snapshot: dict, thread: dict) -> list[dict]:
+    """The canonical questions of the products this direction owns.
+
+    `## Открытые вопросы` of a product is the one place written specifically to
+    hold questions for the user, and the board used to ignore it completely: the
+    number above the columns counted task plates only, so seventeen questions
+    sitting in the same payload were absent from the answer to «что ждёт решения
+    человека» (finding HIGH-1 of review 786).
+
+    They stand in the same area of the same panel as the task plates and are
+    added into the same count. A question is a question wherever it was written
+    down; two competing counters of one concept would be the defect again under
+    a nicer name.
+    """
+    mine = set(thread.get("products") or [])
+    return [{"text": question, "product": product["slug"]}
+            for product in snapshot["products"] if product["slug"] in mine
+            for question in product["questions"]]
+
+
 def build_board(snapshot: dict) -> dict:
     """Four direction panels, each split into areas by urgency.
 
@@ -235,6 +278,7 @@ def build_board(snapshot: dict) -> dict:
     panels = []
     for thread in snapshot["threads"]:
         plates = [plate(task) for task in thread["tasks"]]
+        questions = product_questions(snapshot, thread)
         areas = []
         for key in BOARD_AREAS:
             mine = [p for p, task in zip(plates, thread["tasks"])
@@ -245,14 +289,19 @@ def build_board(snapshot: dict) -> dict:
             # swap places between two collections and look like a change.
             mine.sort(key=lambda p: (p["since"] or "9999", -(p["id"] or 0)))
             shown = mine[:PER_BOARD_AREA]
+            asked = questions if key == "waiting_human" else []
             areas.append({
                 "key": key,
                 "title": BOARD_AREA_RU[key],
-                "count": len(mine),
+                # One count for one concept: a question of a product and a task
+                # whose question is still open are the same statement about the
+                # same person, so they are counted together or the number lies.
+                "count": len(mine) + len(asked),
                 "hidden": len(mine) - len(shown),
                 "oldest": board_age(mine),
                 "collapsed": key in ("queued", "done"),
                 "plates": shown,
+                "questions": asked,
             })
         panels.append({
             "key": thread["key"],
@@ -276,17 +325,26 @@ def build_board(snapshot: dict) -> dict:
                 now += [{**p, "thread": panel["title"]} for p in area["plates"]]
             if area["key"] == "stuck":
                 jams += [{**p, "thread": panel["title"]} for p in area["plates"]]
+    waiting_areas = [a for p in panels for a in p["areas"] if a["key"] == "waiting_human"]
     return {
         "panels": panels,
         "areas": [{"key": k, "title": BOARD_AREA_RU[k]} for k in BOARD_AREAS],
-        "now": now[:6],
-        "jams": sorted(jams, key=lambda p: -(p["age_seconds"] or 0))[:6],
-        "waiting": sum(a["count"] for p in panels for a in p["areas"]
-                       if a["key"] == "waiting_human"),
+        # A summary that fills the screen is not one: the strip sits above the
+        # columns and every line it takes is a line the board loses. What the cap
+        # drops is still in the columns below, under «Затор» and «В работе».
+        "now": now[:NOW_IN_STRIP],
+        "jams": sorted(jams, key=lambda p: -(p["age_seconds"] or 0))[:JAMS_IN_STRIP],
+        # The headline number, and the two things it is made of. A single number
+        # nobody can take apart is what let thirteen wrong entries stand as an
+        # answer: split by source, a reader can check it against the columns.
+        "waiting": sum(a["count"] for a in waiting_areas),
+        "waiting_tasks": sum(len(a["plates"]) + a["hidden"] for a in waiting_areas),
+        "waiting_questions": sum(len(a["questions"]) for a in waiting_areas),
     }
 
 
-def payload(timeline_path: Path, snapshot_path: Path, live_url: str | None = None) -> dict:
+def payload(timeline_path: Path, snapshot_path: Path, live_url: str | None = None,
+            anonymize: bool = False) -> dict:
     """The whole document the page gets, built from a snapshot and a timeline.
 
     The renderer takes a validated JSON document and nothing else. It does not
@@ -294,9 +352,14 @@ def payload(timeline_path: Path, snapshot_path: Path, live_url: str | None = Non
     disk beyond these two files, so «the picture cannot show what it never saw»
     is a property of the input rather than of how someone chose to call it
     (finding HIGH-2 of review 780).
+
+    `anonymize` cleans both documents on the way in, whoever wrote them. The
+    collector already cleans a snapshot it was asked to anonymise; doing it again
+    here costs nothing and removes the assumption that it was asked.
     """
-    snapshot = validate_snapshot(json.loads(snapshot_path.read_text()))
-    timeline = load_timeline(timeline_path)
+    raw = json.loads(snapshot_path.read_text())
+    snapshot = validate_snapshot(scrub(raw) if anonymize else raw)
+    timeline = load_timeline(timeline_path, anonymize)
     data = {
         "snapshot": snapshot,
         "timeline": timeline,
@@ -346,9 +409,12 @@ def main() -> int:
     parser.add_argument("--out", type=Path, required=True,
                         help="write the self-contained recording here")
     parser.add_argument("--timeline", type=Path, default=DEFAULT_TIMELINE)
+    parser.add_argument("--anonymize", action="store_true",
+                        help="clean both documents on the way to the page, "
+                             "whoever wrote them")
     args = parser.parse_args()
 
-    data = payload(args.timeline, args.snapshot)
+    data = payload(args.timeline, args.snapshot, anonymize=args.anonymize)
     html = render(data)
     args.out.write_text(html)
     board = data["board"]

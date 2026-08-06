@@ -8,7 +8,17 @@ checked, so this module is the single place where the shape lives — the collec
 produces it, the recorder appends to it, the renderer consumes it, the tests
 assert on it.
 
-Nothing here reads files. It is a description plus two validators.
+Anonymisation lives here for the same reason. It is a property of a document,
+not of whoever produced it, and all three sides need it: the collector cleans a
+snapshot, the scribe cleans a record, the renderer cleans a timeline it was
+handed. Putting it in the collector meant the renderer could not clean anything
+without importing the collector and losing the physical boundary (finding HIGH-2
+of review 780), so `--anonymize` silently became a property of how a file had
+once been written rather than of how it is being shown (finding HIGH-3 of review
+786). This module reads no files, so everyone can import it.
+
+Nothing here touches the disk. It is a description, two validators and one
+cleaner.
 """
 from __future__ import annotations
 
@@ -23,7 +33,11 @@ SCHEMA_VERSION = 1
 SNAPSHOT_FIELDS = ("schema_version", "mode", "threads", "products")
 THREAD_FIELDS = ("key", "title", "products", "task_count", "tasks", "repos", "channels")
 TASK_FIELDS = ("id", "title", "status", "dir", "run", "gates", "flags", "board")
-RUN_FIELDS = ("state", "runner", "workflow", "alive", "progress")
+# `alive_src` says what answered the liveness question, on the same rule as
+# `actor_src`: a run called live has to name what said so, and the answer now
+# comes from the runner that recorded the process rather than from the existence
+# of a PID number (finding MEDIUM-2 of review 786).
+RUN_FIELDS = ("state", "runner", "workflow", "alive", "alive_src", "progress")
 REPO_FIELDS = ("name", "present")
 CHANNEL_FIELDS = ("channel", "direction", "count")
 
@@ -53,11 +67,17 @@ BOARD_AREA_RU = {
     "done": "Сделано",
 }
 
-# Fields of one plate. `actor` and `role` are nullable on purpose: an empty cell
-# is the honest answer when nothing on disk names the executor, and it is better
-# than a confident invention (finding MEDIUM-3 of review 780).
+# Fields of one plate. `actor`, `role` and `why` are nullable on purpose: an
+# empty cell is the honest answer when nothing on disk names the executor or the
+# reason, and it is better than a confident invention (finding MEDIUM-3 of review
+# 780). `why`/`why_src` carry the observed reason a task stands where it stands —
+# without it the board named the jam and could not answer «why», which is one of
+# the three acceptance questions (finding HIGH-2 of review 786). `since_src` says
+# which file's mtime the age is actually measured from, so the caption stops
+# implying a state transition it never observed (finding MEDIUM-1).
 BOARD_FIELDS = ("area", "actor", "actor_src", "role", "role_src",
-                "happening", "since", "age_seconds", "attempt")
+                "happening", "why", "why_src", "since", "since_src",
+                "age_seconds", "attempt")
 
 # Task flags promised to the renderer. Each one has to be visible as a shape on
 # the map, so adding a flag here is a change to the picture, not only to data.
@@ -140,10 +160,15 @@ def validate_snapshot(snapshot: dict) -> dict:
             role = task["board"]["role"]
             if role is not None and role not in STATIONS:
                 raise ContractError(f"{where}: роль {role!r}")
-            # A named executor without a named observation is exactly the caption
-            # the board must not carry: it would read as fact and be a guess.
+            # A named executor, role or reason without a named observation is
+            # exactly the caption the board must not carry: it would read as fact
+            # and be a guess. The reason joins the rule rather than getting an
+            # exemption — «почему затор» is the caption most tempting to invent.
             for value, source, what in ((task["board"]["actor"], task["board"]["actor_src"], "исполнитель"),
-                                        (role, task["board"]["role_src"], "роль")):
+                                        (role, task["board"]["role_src"], "роль"),
+                                        (task["board"]["why"], task["board"]["why_src"], "причина"),
+                                        (task["board"]["since"], task["board"]["since_src"], "давность"),
+                                        (task["run"]["alive"], task["run"]["alive_src"], "живость прогона")):
                 if value and not str(source or "").strip():
                     raise ContractError(f"{where}: {what} названа, но не сказано, чем наблюдена")
             unknown = [flag for flag in task["flags"] if flag not in TASK_FLAGS]
@@ -190,3 +215,56 @@ def validate_record(record: dict) -> dict:
     if channel is not None and channel not in CHANNELS:
         raise ContractError(f"запись ленты: канал {channel!r}")
     return record
+
+
+# ---------------------------------------------------------------------------
+# Anonymisation: one cleaner, applied to whichever document is being shown.
+# ---------------------------------------------------------------------------
+
+SCRUB = [
+    # Structural identifiers only. Content-level review before publication stays
+    # a human step, and the map declares it rather than pretending otherwise.
+    (re.compile(r"/opt/projects/[A-Za-z0-9_./-]*"), "<repo>"),
+    (re.compile(r"/(?:home|root|Users)/[A-Za-z0-9_./-]*"), "<home>"),
+    (re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+"), "<email>"),
+    # Not `\b\d{7,}\b`: a word boundary never fires between `_` and a digit, so
+    # the real leak `telegram_user_433978200` walked straight through it. Digit
+    # look-around catches an identifier however it is glued to its name.
+    (re.compile(r"(?<!\d)\d{7,}(?!\d)"), "<id>"),
+]
+
+# Numeric identifiers hide from the regexes by not being text at all: `scrub`
+# used to return every integer untouched, and 298 real PIDs went out in a file
+# stamped «ОБЕЗЛИЧЕНО» (finding HIGH-1 of review 780). These keys carry an
+# identifier rather than a measurement, so their value is dropped outright —
+# a count of tasks or a line number stays, a PID does not.
+DROP_NUMERIC_KEYS = {"pid", "inode", "chat_id", "message_id", "user_id"}
+
+
+def scrub(value):
+    """Structural anonymisation of a document, applied to every string in it.
+
+    Task titles are *kept as meaning* and *cleaned as text*: the user asked to
+    recognise a specific task by its real name, and that is compatible with
+    running the name through the same expressions as everything else. Excluding
+    titles from the cleaning — which both this function and the scribe used to
+    do, in that order — let a real chat identifier through inside a real title
+    (finding HIGH-1 of review 780, and its survivor HIGH-3 of review 786).
+    Content privacy of titles stays a human step before showing, and is declared
+    as a limit.
+
+    There is no exemption list and no caller may reinstate one: a caller that
+    puts a raw value back after cleaning has un-cleaned the document, which is
+    exactly the bypass that shipped. Cleaning is idempotent, so cleaning an
+    already-clean document on the way to the screen is safe and cheap.
+    """
+    if isinstance(value, str):
+        for pattern, replacement in SCRUB:
+            value = pattern.sub(replacement, value)
+        return value
+    if isinstance(value, list):
+        return [scrub(item) for item in value]
+    if isinstance(value, dict):
+        return {key: None if key in DROP_NUMERIC_KEYS and isinstance(item, int) else scrub(item)
+                for key, item in value.items()}
+    return value

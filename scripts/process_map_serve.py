@@ -47,9 +47,17 @@ def collect(anonymize: bool) -> Path:
 
 
 def build_payload(anonymize: bool, timeline: Path, live_url: str | None) -> dict:
+    """One anonymisation decision, applied to everything that reaches the page.
+
+    The snapshot was collected anonymously and the timeline was read from disk as
+    it happened to be written, so `--anonymize` was only as good as the flags the
+    scribe had been started with hours earlier (finding HIGH-3 of review 786).
+    The flag now travels with the request: whatever is being shown is cleaned
+    before it is shown.
+    """
     path = collect(anonymize)
     try:
-        return render.payload(timeline, path, live_url=live_url)
+        return render.payload(timeline, path, live_url=live_url, anonymize=anonymize)
     finally:
         path.unlink(missing_ok=True)
 
@@ -112,7 +120,7 @@ def main() -> int:
     try:
         if args.snapshot_out:
             args.snapshot_out.write_text(snapshot_path.read_text())
-        data = render.payload(args.timeline, snapshot_path)
+        data = render.payload(args.timeline, snapshot_path, anonymize=args.anonymize)
     finally:
         snapshot_path.unlink(missing_ok=True)
 
