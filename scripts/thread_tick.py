@@ -43,7 +43,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from thread_state import HOME, REPO, build  # noqa: E402
 
 STATE_DIR = HOME / "state" / "threads"
-CLAUDE_BIN = "/usr/local/bin/claude"
+CLAUDE_PRODUCT_OWNER = HOME / "scripts" / "claude_product_owner.py"
 COMPANION = Path("/opt/projects/companion-agent")
 MAIL_TO = "rdudov@gmail.com"
 
@@ -245,7 +245,7 @@ def main() -> int:
     # would otherwise swallow a trailing positional prompt.
     environment = {**os.environ, "IS_SANDBOX": "1"}
     result = subprocess.run(
-        [CLAUDE_BIN, "--print", "--add-dir", "/opt/projects",
+        [str(CLAUDE_PRODUCT_OWNER), "--print", "--add-dir", "/opt/projects",
          "--dangerously-skip-permissions"],
         input=prompt(report, events), env=environment,
         capture_output=True, text=True, cwd=HOME, timeout=1800,

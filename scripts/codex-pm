@@ -1,4 +1,4 @@
 #!/usr/bin/env bash
 set -euo pipefail
 exec /opt/projects/product-owner/scripts/claude_product_owner.py \
-  --entry interactive --force-codex -- "$@"
+  --entry interactive --force-codex "$@"
