@@ -327,9 +327,10 @@ class TheConversationReader(unittest.TestCase):
     """Which sessions count as «проговорили в чате».
 
     The directory holds both, and the background wake-ups outnumber the real
-    conversations roughly six to one — 362 sessions on 2026-08-09, 63 of them
-    with a human in them. Counting a wake-up as something the user heard would
-    let the contour talk itself out of writing to a user who was never there.
+    conversations by roughly nineteen to one — 375 sessions on 2026-08-09, 19 of
+    them with a human in them. Counting a wake-up as something the user heard
+    would let the contour talk itself out of writing to a user who was never
+    there.
     """
 
     def _session(self, root: Path, name: str, turns: list[tuple[str, str]]) -> None:
