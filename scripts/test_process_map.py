@@ -2791,6 +2791,99 @@ class DoneButNeverShown(unittest.TestCase):
         self.assertTrue(hand["delivered"])
         self.assertIn("deliverable_sent", hand["delivered_src"])
 
+    def two_documents(self, delivered: tuple[str, ...] = ("sent.txt",)) -> Path:
+        """The fixture of review 843: one document sent, the larger one refused.
+
+        The refused file is the bigger of the two, so it is the one the card
+        names — and the board still called the task delivered on the strength of
+        the receipt belonging to the other file.
+        """
+        box = self.task / "deliverables"
+        box.mkdir()
+        (box / "sent.txt").write_text("small")
+        (box / "failed.txt").write_text("x" * 64)
+        pipeline = self.task / "dev-pipeline"
+        pipeline.mkdir()
+        lines = ['{"kind": "attempt_completed", "message_id": 18479, '
+                 '"recorded_at": "2026-08-06T14:19:28+00:00"}']
+        for index, name in enumerate(delivered):
+            digest = state._file_sha256(box / name)
+            lines.append(f'{{"kind": "document_delivered", "document": "deliverables/{name}", '
+                         f'"sha256": "{digest}", "message_id": {18480 + index}, '
+                         f'"recorded_at": "2026-08-06T14:19:3{index}+00:00"}}')
+        if "failed.txt" not in delivered:
+            lines.append('{"kind": "document_delivery_refused", '
+                         '"document": "deliverables/failed.txt", "sha256": "bb", '
+                         '"message_id": null, "notice_message_id": 18481, '
+                         '"recorded_at": "2026-08-06T14:19:31+00:00"}')
+        (pipeline / "notification-receipts.jsonl").write_text("\n".join(lines) + "\n")
+        return self.task
+
+    def test_one_delivered_document_does_not_deliver_the_other_one(self):
+        hand = state.handoff(self.two_documents())
+        self.assertFalse(hand["delivered"])
+        self.assertEqual(hand["missing"], ["deliverables/failed.txt"])
+        self.assertIn("failed.txt", hand["delivered_src"])
+        self.assertIn("1 из 2", hand["delivered_src"])
+        self.assertEqual(state.board_area("completed", [], False, None, undelivered=True),
+                         "undelivered")
+
+    def test_a_receipt_for_every_document_closes_it(self):
+        hand = state.handoff(self.two_documents(("sent.txt", "failed.txt")))
+        self.assertTrue(hand["delivered"])
+        self.assertEqual(hand["missing"], [])
+        self.assertIn("2 из 2", hand["delivered_src"])
+
+    def test_a_refusal_alone_is_not_delivery(self):
+        task = self.like_783()
+        with (task / "dev-pipeline" / "notification-receipts.jsonl").open("a") as handle:
+            handle.write('{"kind": "document_delivery_refused", "document": '
+                         '"deliverables/moex-portfolio-history-sources-2026-08-06.html", '
+                         '"message_id": null, "notice_message_id": 18491, '
+                         '"recorded_at": "2026-08-06T15:20:00+00:00"}\n')
+        hand = state.handoff(task)
+        self.assertFalse(hand["delivered"])
+        self.assertIsNone(state.delivery_receipt(task))
+        # And the sentence says what was actually read: a journal that refused
+        # the document is not a journal of lifecycle events only. The live probe
+        # of task 1048 produced exactly this shape against the real bot.
+        self.assertIn("document_delivery_refused", hand["delivered_src"])
+        self.assertNotIn("несут только события", hand["delivered_src"])
+
+    def test_a_document_rewritten_after_its_receipt_is_not_the_one_that_went(self):
+        # The receipt carries the digest of what the sender actually sent, so a
+        # file replaced afterwards is a document the person does not have.
+        task = self.two_documents(("sent.txt", "failed.txt"))
+        (task / "deliverables" / "failed.txt").write_text("y" * 64)
+        hand = state.handoff(task)
+        self.assertFalse(hand["delivered"])
+        self.assertEqual(hand["missing"], ["deliverables/failed.txt"])
+
+    def test_a_receipt_with_a_digest_and_no_name_still_belongs_to_one_document(self):
+        # The sender keys its journal by digest, so a receipt carrying one is
+        # correlatable even without the name and cannot close the whole set.
+        task = self.two_documents(())
+        digest = state._file_sha256(task / "deliverables" / "sent.txt")
+        with (task / "dev-pipeline" / "notification-receipts.jsonl").open("a") as handle:
+            handle.write(f'{{"kind": "document_delivered", "sha256": "{digest}", '
+                         '"message_id": 18490, "recorded_at": "2026-08-06T14:20:00+00:00"}\n')
+        hand = state.handoff(task)
+        self.assertFalse(hand["delivered"])
+        self.assertEqual(hand["missing"], ["deliverables/failed.txt"])
+
+    def test_a_receipt_and_a_saved_attachment_can_close_a_set_together(self):
+        # Two sources of truth for two documents: the contour sent one, the
+        # product owner mailed the other by hand and the mirror recorded it.
+        task = self.two_documents()
+        refused = task / "deliverables" / "failed.txt"
+        observed = {(refused.name, refused.stat().st_size): [
+            {"channel": "email", "message_id": "gmail-2"}
+        ]}
+        hand = state.handoff(task, observed)
+        self.assertTrue(hand["delivered"])
+        self.assertEqual(hand["missing"], [])
+        self.assertIn("email", hand["delivered_src"])
+
     def test_a_task_with_nothing_made_for_a_person_is_not_in_the_area(self):
         (self.task / "plan.md").write_text("# Plan\n")
         self.assertIsNone(state.handoff(self.task))

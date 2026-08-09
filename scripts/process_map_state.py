@@ -758,13 +758,22 @@ def matching_observations(path: Path,
     return legacy + [item for item in hashed if item.get("sha256") == digest]
 
 
-def delivery_receipt(task_dir: Path) -> dict | None:
-    """A receipt about a document rather than about the life of the run."""
+def delivery_receipts(task_dir: Path) -> list[dict]:
+    """Receipts about a document rather than about the life of the run.
+
+    Every one of them, delivered or not, because «квитанций о документах нет
+    вовсе» and «есть, и ни одна не говорит о доставке» are two different things
+    to tell a reader. Which of them arrived is `message_id`: a document that did
+    *not* go — `document_delivery_refused`, a claim whose outcome was lost, a
+    claim still open — carries a null one by contract, and the id of the notice
+    *about* the failure is a different fact under a different name.
+    """
     path = task_dir / "dev-pipeline" / "notification-receipts.jsonl"
     try:
         text = path.read_text()
     except OSError:
-        return None
+        return []
+    found = []
     for line in text.splitlines():
         line = line.strip()
         if not line:
@@ -774,8 +783,41 @@ def delivery_receipt(task_dir: Path) -> dict | None:
         except json.JSONDecodeError:
             continue
         kind = payload.get("kind")
-        if kind and kind not in LIFECYCLE_RECEIPTS and payload.get("message_id"):
-            return {"kind": kind, "at": payload.get("recorded_at")}
+        if kind and kind not in LIFECYCLE_RECEIPTS:
+            found.append({"kind": kind, "at": payload.get("recorded_at"),
+                          "document": payload.get("document"),
+                          "sha256": payload.get("sha256"),
+                          "message_id": payload.get("message_id")})
+    return found
+
+
+def delivery_receipt(task_dir: Path) -> dict | None:
+    """The first receipt that says a person has a document, if there is one."""
+    found = [item for item in delivery_receipts(task_dir) if item.get("message_id")]
+    return found[0] if found else None
+
+
+def receipt_for(name: str, path: Path, receipts: list[dict]) -> dict | None:
+    """The receipt that says a person has *these* bytes under this name.
+
+    The sender keys its own journal by content digest and records the name
+    beside it, so this reads the pair the same way round: a digest decides
+    wherever the receipt carries one, and the name is what is left to go on
+    when it does not. A file rewritten after its receipt therefore stops
+    counting — the person has the old one — which is the rule
+    `matching_observations` already applies to persisted attachments.
+    """
+    digest, hashed = None, False
+    for receipt in receipts:
+        want = receipt.get("sha256")
+        if want:
+            if not hashed:
+                digest, hashed = _file_sha256(path), True
+            if want == digest:
+                return receipt
+            continue
+        if receipt.get("document") == name:
+            return receipt
     return None
 
 
@@ -802,12 +844,21 @@ def delivery_note(task_dir: Path) -> Path | None:
 
 def handoff(task_dir: Path,
             observed: dict[tuple[str, int], list[dict]] | None = None) -> dict | None:
-    """Whether the document this task made ever reached a person, and what said so.
+    """Whether what this task made ever reached a person, and what said so.
 
     Nothing made for a person means nothing to hand over, and the task is not in
-    this area at all. Where there is a document, exactly two observations can
-    close it: the delivery note the contour writes itself, and a receipt that is
-    not one of the run's own lifecycle events.
+    this area at all. Where there are documents, three observations can close
+    them: the delivery note the contour writes itself, receipts that are not the
+    run's own lifecycle events, and persisted attachment observations.
+
+    The question is asked of the whole set. A receipt names the document it is
+    about, so «доставлено» means every document of this task carries evidence —
+    not that at least one does. Cross-review 843 built the case: `sent.txt`
+    delivered, the larger `failed.txt` refused, and this function called the
+    task delivered while the card named the refused file as its document. A
+    partly handed-over task belongs in «сделано, но не доставлено» with the
+    missing names said out loud, which is exactly the area that exists for a
+    result nobody received.
     """
     documents = human_documents(task_dir)
     document = human_document(task_dir)
@@ -815,23 +866,47 @@ def handoff(task_dir: Path,
         return None
     note = delivery_note(task_dir)
     if note:
-        return {**document, "delivered": True,
+        return {**document, "delivered": True, "missing": [],
                 "delivered_src": f"файл {note.name} в каталоге задачи"}
-    receipt = delivery_receipt(task_dir)
-    if receipt:
-        return {**document, "delivered": True,
-                "delivered_src": f"квитанция {receipt['kind']} с идентификатором сообщения "
+    # Only a receipt carrying a message identifier says a person has something.
+    # The rest are kept, because a journal full of refusals is a different story
+    # to tell than a journal with no document receipts at all.
+    about_documents = delivery_receipts(task_dir)
+    receipts = [receipt for receipt in about_documents if receipt.get("message_id")]
+    # A delivery receipt from before receipts said which document they were
+    # about, or from a sender of our own that is not the pipeline: it names
+    # neither a document nor a digest, so it is about this task as a whole and
+    # cannot be correlated. It still closes the task — refusing to believe an
+    # uncorrelatable receipt would be inventing an alarm.
+    nameless = [receipt for receipt in receipts
+                if not receipt.get("document") and not receipt.get("sha256")]
+    if nameless:
+        return {**document, "delivered": True, "missing": [],
+                "delivered_src": f"квитанция {nameless[0]['kind']} с идентификатором сообщения "
                                  f"в dev-pipeline/notification-receipts.jsonl"}
     # The full snapshot passes one index shared by every task. A direct helper
     # call stays local and deterministic unless its caller supplies observations.
     observations = observed or {}
-    matched = {str(path.relative_to(task_dir)): matching_observations(path, observations)
+    names = {path: str(path.relative_to(task_dir)) for path in documents}
+    receipted = {names[path]: receipt_for(names[path], path, receipts)
+                 for path in documents}
+    matched = {names[path]: matching_observations(path, observations)
                for path in documents}
-    if matched and all(matched.values()):
-        channels = sorted({item["channel"] for rows in matched.values() for item in rows})
-        return {**document, "delivered": True,
-                "delivered_src": "сохранённые наблюдения вложений: " + ", ".join(channels)}
+    missing = [name for name in names.values()
+               if not receipted[name] and not matched[name]]
+    receipted_count = sum(bool(item) for item in receipted.values())
     observed_count = sum(bool(rows) for rows in matched.values())
+    if names and not missing:
+        said = []
+        if receipted_count:
+            said.append(f"квитанции с идентификаторами сообщений на {receipted_count} из "
+                        f"{len(names)} документов задачи "
+                        "в dev-pipeline/notification-receipts.jsonl")
+        if observed_count:
+            channels = sorted({item["channel"] for rows in matched.values() for item in rows})
+            said.append("сохранённые наблюдения вложений: " + ", ".join(channels))
+        return {**document, "delivered": True, "missing": [],
+                "delivered_src": "; ".join(said)}
     near = []
     for path in documents:
         versions = [(size, rows) for (name, size), rows in observations.items()
@@ -844,10 +919,26 @@ def handoff(task_dir: Path,
             where = ", ".join([*channels, *dates])
             near.append(f"{path.name}: прежние размеры {sizes} байт ({where})")
     near_text = ("; найдены одноимённые прежние версии — " + "; ".join(near)) if near else ""
-    return {**document, "delivered": False,
+    # Which of the two sentences about receipts is true here. A task whose
+    # journal names documents is not a task whose journal is all lifecycle
+    # events, and saying so would hide exactly the partial hand-over the set
+    # rule exists to show.
+    if receipts:
+        went = [name for name, item in receipted.items() if item]
+        receipt_clause = (f"квитанции с идентификатором сообщения есть на {receipted_count} из "
+                          f"{len(names)}: нет на "
+                          f"{', '.join(name for name in names.values() if name not in went)}"
+                          " — частичная выдача не считается доставкой")
+    elif about_documents:
+        kinds = ", ".join(sorted({receipt["kind"] for receipt in about_documents}))
+        receipt_clause = (f"квитанции о документах в задаче есть ({kinds}), но ни одна не несёт "
+                          "идентификатора сообщения — доставки среди них нет")
+    else:
+        receipt_clause = ("квитанции задачи несут только события жизненного цикла прогона — "
+                          "доставки документа среди них нет")
+    return {**document, "delivered": False, "missing": missing,
             "delivered_src": "записки о доставке в каталоге нет ни под одним из имён "
-                             f"({', '.join(DELIVERY_NOTES)}), а квитанции задачи несут только "
-                             "события жизненного цикла прогона — доставки документа среди них нет; "
+                             f"({', '.join(DELIVERY_NOTES)}), а {receipt_clause}; "
                              f"в сохранённых вложениях найдено {observed_count} из {len(documents)} файлов"
                              f"{near_text}"}
 
