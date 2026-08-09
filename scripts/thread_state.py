@@ -129,7 +129,7 @@ def repo_projection(repo: dict) -> dict:
 
 
 def build(name: str) -> dict:
-    load_thread(name)                       # fail loudly on an unknown thread
+    config = load_thread(name)              # fail loudly on an unknown thread
     snapshot = observer.build(False, only=name)
     thread = snapshot["threads"][0]
 
@@ -181,6 +181,25 @@ def build(name: str) -> dict:
              "decision": task["board"]["decision"]["kind"],
              "src": task["board"]["decision"]["src"]}
             for task in thread["tasks"] if task["board"]["area"] == "decision_unmet"],
+        # Finished work whose document nobody was shown, with how long it has
+        # stood that way. The board has carried this area since 783; what it had
+        # no way to do was wake anybody, so the user watched a task sit in it for
+        # more than forty minutes and then several at once.
+        "undelivered": [
+            {"id": task["id"], "title": task["title"],
+             "age_seconds": task["board"]["age_seconds"],
+             "document": (task["detail"]["handoff"] or {}).get("name"),
+             "src": (task["detail"]["handoff"] or {}).get("delivered_src")}
+            for task in thread["tasks"] if task["board"]["area"] == "undelivered"],
+        # Work standing on an answer from the user. Not something to start, and
+        # exactly one of the named reasons a wake-up may start nothing.
+        "waiting_user": [{"id": task["id"], "title": task["title"]}
+                         for task in thread["tasks"]
+                         if task["board"]["area"] == "waiting_human"],
+        # The repositories this direction owns, as declared rather than as found
+        # on disk: yielding is about who may occupy which tree, and a tree that
+        # is missing today is still this direction's and not a neighbour's.
+        "worktrees": list(config.get("repos", [])),
         # Other instances of the product owner deciding right now. A tick that
         # cannot see one creates the task the other one just created.
         "owners_awake": snapshot["owners_awake"],
@@ -222,8 +241,21 @@ def main() -> None:
     print(f"можно подхватить: {len(report['can_pick_up'])}")
     for item in report["can_pick_up"][:8]:
         print(f"  {item['id']} — {item['title'][:70]}")
+    print(f"сделано, но не доставлено: {len(report['undelivered'])}")
+    for item in report["undelivered"][:8]:
+        stood = "" if item["age_seconds"] is None else f", стоит {item['age_seconds'] // 60} мин"
+        print(f"  {item['id']} — {item['title'][:70]}{stood}")
+        print(f"      документ: {item['document']}; {item['src']}")
+    print(f"ждёт ответа пользователя: {len(report['waiting_user'])}")
+    for item in report["waiting_user"]:
+        print(f"  {item['id']} — {item['title'][:70]}")
     for owner in report["owners_awake"]:
-        print(f"  разбужен ещё один продакт на треде «{owner['thread']}» ({owner['src']})")
+        who = ("фоновое пробуждение треда «{}»".format(owner["thread"])
+               if owner["kind"] == "tick" else
+               "продакт, разбуженный тиком" if owner["kind"] == "woken" else
+               "продакт в консоли")
+        trees = ", ".join(owner["worktrees"]) or "рабочее дерево не названо"
+        print(f"  бодрствует {who}: может занять {trees} ({owner['src']})")
     for repo in report["repos"]:
         if not repo["present"]:
             print(f"  репозиторий отсутствует: {repo['repo']}")

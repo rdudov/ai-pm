@@ -31,7 +31,45 @@ SCHEMA_VERSION = 1
 # ---------------------------------------------------------------------------
 
 SNAPSHOT_FIELDS = ("schema_version", "mode", "threads", "products", "owners_awake")
-THREAD_FIELDS = ("key", "title", "products", "task_count", "tasks", "repos", "channels")
+THREAD_FIELDS = ("key", "title", "products", "task_count", "tasks", "repos", "channels",
+                 # The direction's own last wake-up: when it looked and what came
+                 # of it. `None` until a tick has written one.
+                 "check",
+                 # When it looks next, observed as the snapshot is built rather
+                 # than carried out of that record — a separate field because it
+                 # is a fact about the present, not about the last check.
+                 "next_check")
+
+# What a next-check observation carries. `at` may be `None` — a timer systemd is
+# holding unarmed is an honest gap — but then `src` has to say what was seen
+# instead, because a board that shows «следующая проверка: неизвестно» owes the
+# reader the reason just as much as one that shows a time.
+NEXT_CHECK_FIELDS = ("at", "src")
+
+# What the wake-up record has to carry. `outcome` is the sentence the board
+# prints and `outcome_src` says what produced it, on the same rule every other
+# caption on this board lives under: the outcome is derived from what the tick
+# observed before and after waking the owner, never from what the woken owner
+# wrote about itself.
+CHECK_FIELDS = ("at", "outcome", "outcome_src",
+                # What the check put in motion, or `None` while the owner is
+                # still deciding. «Ещё не запустил» and «не стал запускать» are
+                # two different states, and only the second one owes a reason.
+                "woke_owner", "started", "events", "reasons", "queue", "src")
+
+# One named reason the owner started nothing. The user listed the kinds outright:
+# «занят другой продакт, исчерпан бюджет, занято рабочее дерево, ждём ответа
+# пользователя, нет проверяющего». A reason with no observation behind it is the
+# invented caption the whole board refuses, so `src` is required.
+REASON_FIELDS = ("code", "text", "src")
+
+# The two kinds of product owner instance that can be awake. `tick` is the one
+# `product-thread@<тред>.timer` starts and the only one that was ever observed;
+# `session` is the console owner, which is the *other* half of the pair that
+# created 790/792 and 791/793 in one hour and which no observation matched.
+# `woken` is the owner agent a tick started: same CLI in the same directory,
+# non-interactive, and calling it «продакт в консоли» would name the wrong thing.
+OWNER_KINDS = ("tick", "session", "woken")
 TASK_FIELDS = ("id", "title", "status", "dir", "run", "gates", "flags", "board", "detail",
                # Whose question it is, kept apart in the document rather than
                # rederived by every reader: the areas, the counter above the
@@ -162,6 +200,10 @@ BOARD_FIELDS = ("area", "actor", "actor_src", "role", "role_src",
 # split exists to hold. Everything here is a name, a count or a verdict already
 # written down — no child transcript is read to build it.
 DETAIL_FIELDS = ("review", "delivery", "files", "moved", "moved_age_seconds", "moved_src",
+                 # What the task is, in the words of the person who asked for
+                 # it: `## Summary` of `task.md`. Everything else on the card is
+                 # state, and the card used to carry only state.
+                 "summary",
                  # The document made for a person and whether anything observed
                  # it reaching them. `None` means the task made no document.
                  "handoff")
@@ -253,6 +295,49 @@ def validate_question(question: dict, where: str) -> dict:
     return question
 
 
+def validate_check(check, where: str):
+    """Check one direction's wake-up record; return it unchanged or raise.
+
+    `None` is allowed and means no tick has ever written for this direction. It
+    is not the same claim as «проверял и не нашёл, что запустить», and the board
+    may not print the second when it observed the first.
+    """
+    if check is None:
+        return None
+    if not isinstance(check, dict):
+        raise ContractError(f"{where}: ожидался объект")
+    _require(check, CHECK_FIELDS, where)
+    if not ISO8601.match(str(check["at"])):
+        raise ContractError(f"{where}: время {check['at']!r} не ISO 8601")
+    if not str(check["outcome"]).strip():
+        raise ContractError(f"{where}: чем кончилась проверка — пусто")
+    if check["outcome"] and not str(check["outcome_src"] or "").strip():
+        raise ContractError(f"{where}: итог проверки назван, но не сказано, чем наблюдён")
+    for reason in check["reasons"]:
+        _require(reason, REASON_FIELDS, f"{where}: причина")
+        if not str(reason["text"]).strip() or not str(reason["src"]).strip():
+            raise ContractError(f"{where}: причина названа, но не сказано, чем наблюдена")
+    return check
+
+
+def validate_next_check(value, where: str) -> dict:
+    """Check one direction's next-check observation; return it or raise.
+
+    Unlike the wake-up record this is never `None`: the question «когда продакт
+    проверит статус в следующий раз» is asked of systemd whenever the board is
+    built, so there is always an answer — either a time, or what was seen
+    instead of one. A direction no tick has ever run for still has a timer.
+    """
+    if not isinstance(value, dict):
+        raise ContractError(f"{where}: ожидался объект")
+    _require(value, NEXT_CHECK_FIELDS, where)
+    if value["at"] is not None and not ISO8601.match(str(value["at"])):
+        raise ContractError(f"{where}: время {value['at']!r} не ISO 8601")
+    if not str(value["src"] or "").strip():
+        raise ContractError(f"{where}: не сказано, чем наблюдена")
+    return value
+
+
 def validate_snapshot(snapshot: dict) -> dict:
     """Check a collector snapshot; return it unchanged or raise ContractError."""
     if not isinstance(snapshot, dict):
@@ -266,7 +351,10 @@ def validate_snapshot(snapshot: dict) -> dict:
         raise ContractError("снимок: threads должен быть списком")
 
     for thread in snapshot["threads"]:
-        _require(thread, THREAD_FIELDS, f"направление {thread.get('key')!r}")
+        where_thread = f"направление {thread.get('key')!r}"
+        _require(thread, THREAD_FIELDS, where_thread)
+        validate_check(thread["check"], f"{where_thread}: проверка")
+        validate_next_check(thread["next_check"], f"{where_thread}: следующая проверка")
         for task in thread["tasks"]:
             where = f"задача {task.get('id')!r}"
             _require(task, TASK_FIELDS, where)
@@ -348,11 +436,20 @@ def validate_snapshot(snapshot: dict) -> dict:
     if not isinstance(snapshot["owners_awake"], list):
         raise ContractError("снимок: owners_awake должен быть списком")
     for owner in snapshot["owners_awake"]:
-        _require(owner, ("thread", "since", "age_seconds", "src"), "разбуженный продакт")
+        _require(owner, ("kind", "thread", "worktrees", "since", "age_seconds", "src"),
+                 "разбуженный продакт")
+        if owner["kind"] not in OWNER_KINDS:
+            raise ContractError(f"разбуженный продакт: род {owner['kind']!r}")
         if not str(owner["src"]).strip():
             # Same rule as everywhere else: a second instance of the product
             # owner named on the strip has to say what observed it.
             raise ContractError("разбуженный продакт: не сказано, чем наблюдён")
+        if not isinstance(owner["worktrees"], list):
+            # Yielding is about a working tree and nothing else, so an instance
+            # that cannot say which trees it could occupy cannot be reasoned
+            # about — and «уступить всем» is how three of four directions went
+            # mute on 2026-08-07.
+            raise ContractError("разбуженный продакт: рабочие деревья должны быть списком")
     return snapshot
 
 

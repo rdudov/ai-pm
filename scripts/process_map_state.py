@@ -28,6 +28,7 @@ Exit code 0 always; the caller decides what to do with the report.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -38,7 +39,8 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 
-from process_map_schema import SCHEMA_VERSION, STATIONS, scrub, validate_snapshot
+from process_map_schema import (SCHEMA_VERSION, STATIONS, ContractError, scrub,
+                                validate_check, validate_snapshot)
 
 HOME = Path(__file__).resolve().parents[1]
 PROC = Path("/proc")
@@ -51,9 +53,24 @@ PYTHON = REPO / ".venv" / "bin" / "python"
 MAIL_ROOT = REPO / ".state" / "gmail" / "product-owner"
 MAIL_INBOX = MAIL_ROOT / "inbox"
 MAIL_SENT = MAIL_ROOT / "sent"
+TELEGRAM_SENT = REPO / ".state" / "telegram" / "sent-documents.jsonl"
 
 # Terminal statuses never carry a live figure on the map, however loud the label.
 TERMINAL = {"completed", "cancelled", "superseded"}
+
+
+def tunable(name: str, default: int) -> int:
+    """A whole number from the environment, with the in-code default beside it.
+
+    No bare literal for a duration or a threshold: the value is overridable on
+    the stand, and the default is readable where it is used. `thread_tick.py`
+    imports this one rather than keeping a second copy.
+    """
+    try:
+        value = int(os.environ.get(name, "") or default)
+    except ValueError:
+        return default
+    return value if value > 0 else default
 
 # dev-pipeline event kinds, mapped to the station they say the work is at. The
 # contour declares no role state machine, so this is a reading of observed
@@ -145,7 +162,7 @@ def liveness_owner():
 
     The question already has an implementation and it is not here:
     `task_runner.process_is_live` compares the recorded PID *and* the kernel
-    start tick, and `runner_pid_namespace_visible` decides when a negative
+    start tick, and `runner_pid_namespace_state` decides when a negative
     lookup is evidence at all. Both values are already in the
     `.runner/runner.json` this collector reads. Writing a second answer here
     would be a second implementation of one concept, so the owner is imported
@@ -176,10 +193,22 @@ def run_alive(runner: dict) -> tuple[bool, str | None]:
     * not live, because nothing matches or nothing was recorded to match against;
     * unobservable, because the PID belongs to a namespace this observer cannot
       see — which is not the same as dead, and says so on the plate.
+
+    Which of the last two a foreign namespace is, is not decided here either.
+    `runner_pid_namespace_state` (task 938) separates a namespace that is merely
+    invisible from one that provably no longer exists: a run recorded in a
+    vanished namespace is dead, and only a namespace that still holds processes,
+    or one whose absence cannot be proved from here, keeps the run untouched
+    behind «ненаблюдаема». Reproducing that judgement locally would put the
+    second implementation back.
     """
     if RUNNER is None:
         return False, None
-    if not RUNNER.runner_pid_namespace_visible(runner):
+    namespace_state = RUNNER.runner_pid_namespace_state(runner)
+    if namespace_state == "recorded_namespace_absent":
+        # The namespace itself is gone, so nothing can still be running in it.
+        return False, None
+    if namespace_state != "local":
         return False, "личность процесса ненаблюдаема: другое пространство имён PID"
     if RUNNER.process_is_live(runner.get("pid"), runner.get("process_identity")):
         return True, "pid и стартовый тик ядра совпали с .runner/runner.json"
@@ -529,26 +558,79 @@ LIFECYCLE_RECEIPTS = frozenset({
 # The manifest lists the deliverables; it is not itself a document for a person.
 NOT_A_DOCUMENT = {"manifest.json"}
 
+# These names belong to the execution/review conversation. They are useful to
+# the product owner and to the next agent, but they are not a document the user
+# is waiting to receive. Task 835 established this distinction by checking the
+# real correspondence item by item; treating every file in `deliverables/` as a
+# user document put the same conclusions back on the board at every wake-up.
+INTERNAL_DOCUMENT_NAMES = frozenset({
+    "conclusion-ru.md", "product-owner-review.md", "not-delivered-still-useful.md",
+})
+INTERNAL_DOCUMENT_PATTERNS = (
+    re.compile(r"^(?:cross[-_]?review|review)(?:[-_].*)?\.(?:md|html)$", re.I),
+    re.compile(r"(?:^|[-_])verdict(?:[-_].*)?\.(?:md|html)$", re.I),
+    re.compile(r"^handoff[-_].*\.(?:md|html)$", re.I),
+    re.compile(r"^tail[-_]audit(?:[-_].*)?\.(?:md|html)$", re.I),
+)
 
-def human_document(task_dir: Path) -> dict | None:
-    """A file this task made for a person, by name and size and nothing else.
 
-    Two places, both named by the task: anything in `deliverables/`, and an
-    `*.html` at the top of the task directory — the shape a report has when a
-    run wrote it straight into its own directory. No file is opened.
-    """
+def review_task(task_dir: Path) -> bool:
+    """Whether the task title itself names a review, not merely quoted prose."""
+    try:
+        text = (task_dir / "task.md").read_text(errors="replace")
+    except OSError:
+        return False
+    title = next((line[2:] for line in text.splitlines() if line.startswith("# ")), "")
+    return bool(re.search(r"\b(?:review|ревью)\b", title, re.I))
+
+
+def internal_document(task_dir: Path, path: Path) -> bool:
+    """A conventional run conclusion or review hand-off, by its durable name."""
+    name = path.name.casefold()
+    if name in INTERNAL_DOCUMENT_NAMES or any(
+        pattern.search(name) for pattern in INTERNAL_DOCUMENT_PATTERNS
+    ):
+        return True
+    # Older review tasks named the file by subject first and role last. The task
+    # title is the second half of that convention and prevents an ordinary
+    # user-facing `market-review.md` from disappearing merely because of a token.
+    return review_task(task_dir) and bool(re.search(
+        r"(?:^|[-_])review(?:[-_].*)?\.(?:md|html)$", name, re.I))
+
+
+def human_documents(task_dir: Path) -> list[Path]:
+    """Files this task made for the user, excluding internal run/review records."""
     found: list[Path] = []
     box = task_dir / "deliverables"
     if box.is_dir():
         try:
-            found += [p for p in sorted(box.iterdir())
-                      if p.is_file() and p.name not in NOT_A_DOCUMENT]
+            found += [
+                path for path in sorted(box.iterdir())
+                if path.is_file()
+                and path.name not in NOT_A_DOCUMENT
+                and not internal_document(task_dir, path)
+            ]
         except OSError:
             pass
     try:
-        found += sorted(task_dir.glob("*.html"))
+        found += [
+            path for path in sorted(task_dir.glob("*.html"))
+            if path.is_file() and not internal_document(task_dir, path)
+        ]
     except OSError:
         pass
+    return found
+
+
+def human_document(task_dir: Path) -> dict | None:
+    """A user-facing file this task made, by name and size and nothing else.
+
+    Two places, both named by the task: anything in `deliverables/`, and an
+    `*.html` at the top of the task directory — the shape a report has when a
+    run wrote it straight into its own directory. Internal conclusions and
+    review hand-offs are deliberately absent: they stay inside the work loop.
+    """
+    found = human_documents(task_dir)
     if not found:
         return None
     biggest = max(found, key=lambda p: p.stat().st_size if p.exists() else 0)
@@ -558,7 +640,122 @@ def human_document(task_dir: Path) -> dict | None:
         size = None
     return {"name": str(biggest.relative_to(task_dir)), "bytes": size,
             "count": len(found),
-            "src": "файл в deliverables/ или *.html в каталоге задачи"}
+            "src": "пользовательский файл в deliverables/ или *.html в каталоге задачи"}
+
+
+def _json_lines(path: Path) -> list[dict]:
+    try:
+        lines = path.read_text(errors="replace").splitlines()
+    except OSError:
+        return []
+    rows = []
+    for line in lines:
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            rows.append(payload)
+    return rows
+
+
+def attachment_observations(
+    mail_sent: Path = MAIL_SENT,
+    tasks_root: Path = REPO / "tasks",
+    telegram_sent: Path = TELEGRAM_SENT,
+) -> dict[tuple[str, int], list[dict]]:
+    """Persisted evidence that a file with this name and size reached the user.
+
+    The live mail mirror is the primary source. Historical email and Telegram
+    exports are also durable observations: task 835 made them once from the real
+    correspondence and verified ten samples byte-for-byte. Future direct bot
+    sends may append the same compact shape to `telegram_sent`; task-local
+    runner deliveries remain covered by their own receipt journal.
+    """
+    found: dict[tuple[str, int], list[dict]] = {}
+
+    def add(attachment: dict, channel: str, message_id: object,
+            at: object = None) -> None:
+        name = attachment.get("filename") or attachment.get("file_name")
+        size = attachment.get("size")
+        if not isinstance(name, str) or not name or not isinstance(size, int):
+            return
+        observation = {"channel": channel, "message_id": message_id,
+                       "sha256": attachment.get("sha256"), "at": at}
+        bucket = found.setdefault((name, size), [])
+        if observation not in bucket:
+            bucket.append(observation)
+
+    try:
+        metadata_paths = sorted(mail_sent.glob("*/metadata.json"))
+    except OSError:
+        metadata_paths = []
+    for path in metadata_paths:
+        try:
+            row = json.loads(path.read_text(errors="replace"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        for attachment in row.get("attachments", []) or []:
+            if isinstance(attachment, dict):
+                add(attachment, "email", row.get("message_id") or path.parent.name,
+                    row.get("date"))
+
+    try:
+        email_exports = sorted(tasks_root.glob("*/evidence/gmail-sent.jsonl"))
+        telegram_exports = sorted(tasks_root.glob("*/evidence/telegram-documents.jsonl"))
+    except OSError:
+        email_exports, telegram_exports = [], []
+    for path in email_exports:
+        for row in _json_lines(path):
+            for attachment in row.get("attachments", []) or []:
+                if isinstance(attachment, dict):
+                    add(attachment, "email", row.get("id") or row.get("message_id"),
+                        row.get("date"))
+    for path in telegram_exports:
+        for row in _json_lines(path):
+            # The historical export spans every private dialog. Only files the
+            # user sent themselves or received from the product's delivery bot
+            # establish this product's hand-off; a coincidental third-party file
+            # does not. Calypso is the named delivery channel in audit 835.
+            if row.get("from_me") is True or str(row.get("dialog", "")).casefold() == "calypso":
+                add(row, "telegram", row.get("message_id"), row.get("date"))
+    for row in _json_lines(telegram_sent):
+        # This compact runtime journal is written only after our own bot send.
+        add(row, "telegram", row.get("message_id"), row.get("date"))
+    return found
+
+
+def _file_size(path: Path) -> int | None:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return None
+
+
+def _file_sha256(path: Path) -> str | None:
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1 << 20), b""):
+                digest.update(chunk)
+    except OSError:
+        return None
+    return digest.hexdigest()
+
+
+def matching_observations(path: Path,
+                          observed: dict[tuple[str, int], list[dict]]) -> list[dict]:
+    """Matches for these bytes; digest decides wherever a source carries one."""
+    size = _file_size(path)
+    if size is None:
+        return []
+    candidates = observed.get((path.name, size), [])
+    legacy = [item for item in candidates if not item.get("sha256")]
+    hashed = [item for item in candidates if item.get("sha256")]
+    if not hashed:
+        return candidates
+    digest = _file_sha256(path)
+    return legacy + [item for item in hashed if item.get("sha256") == digest]
 
 
 def delivery_receipt(task_dir: Path) -> dict | None:
@@ -603,7 +800,8 @@ def delivery_note(task_dir: Path) -> Path | None:
     return None
 
 
-def handoff(task_dir: Path) -> dict | None:
+def handoff(task_dir: Path,
+            observed: dict[tuple[str, int], list[dict]] | None = None) -> dict | None:
     """Whether the document this task made ever reached a person, and what said so.
 
     Nothing made for a person means nothing to hand over, and the task is not in
@@ -611,6 +809,7 @@ def handoff(task_dir: Path) -> dict | None:
     close it: the delivery note the contour writes itself, and a receipt that is
     not one of the run's own lifecycle events.
     """
+    documents = human_documents(task_dir)
     document = human_document(task_dir)
     if not document:
         return None
@@ -623,10 +822,34 @@ def handoff(task_dir: Path) -> dict | None:
         return {**document, "delivered": True,
                 "delivered_src": f"квитанция {receipt['kind']} с идентификатором сообщения "
                                  f"в dev-pipeline/notification-receipts.jsonl"}
+    # The full snapshot passes one index shared by every task. A direct helper
+    # call stays local and deterministic unless its caller supplies observations.
+    observations = observed or {}
+    matched = {str(path.relative_to(task_dir)): matching_observations(path, observations)
+               for path in documents}
+    if matched and all(matched.values()):
+        channels = sorted({item["channel"] for rows in matched.values() for item in rows})
+        return {**document, "delivered": True,
+                "delivered_src": "сохранённые наблюдения вложений: " + ", ".join(channels)}
+    observed_count = sum(bool(rows) for rows in matched.values())
+    near = []
+    for path in documents:
+        versions = [(size, rows) for (name, size), rows in observations.items()
+                    if name == path.name and size != _file_size(path) and rows]
+        if versions:
+            sizes = ", ".join(str(size) for size, _rows in sorted(versions))
+            channels = sorted({row["channel"] for _size, rows in versions for row in rows})
+            dates = sorted({str(row["at"])[:10] for _size, rows in versions for row in rows
+                            if row.get("at")})
+            where = ", ".join([*channels, *dates])
+            near.append(f"{path.name}: прежние размеры {sizes} байт ({where})")
+    near_text = ("; найдены одноимённые прежние версии — " + "; ".join(near)) if near else ""
     return {**document, "delivered": False,
             "delivered_src": "записки о доставке в каталоге нет ни под одним из имён "
                              f"({', '.join(DELIVERY_NOTES)}), а квитанции задачи несут только "
-                             "события жизненного цикла прогона — доставки документа среди них нет"}
+                             "события жизненного цикла прогона — доставки документа среди них нет; "
+                             f"в сохранённых вложениях найдено {observed_count} из {len(documents)} файлов"
+                             f"{near_text}"}
 
 
 # Entries of the task directory the card lists. Names, sizes and mtimes only:
@@ -696,7 +919,13 @@ def board_area(status: str | None, flags: list[str], asked_user: bool,
         # the other is work somebody already decided must go out.
         if decision_unmet:
             return "decision_unmet"
-        return "undelivered" if undelivered else "done"
+        # «Сделано, но не доставлено» promises a finished task, and a cancelled
+        # one is not finished — nobody is owed its document. Task 669 was
+        # cancelled as superseded by 722, kept files in `deliverables/`, and so
+        # stood among 46 genuinely completed tasks as the 47th (finding MEDIUM-1
+        # of review 826). Every terminal status still counts as «Сделано» here,
+        # exactly as before; only the undelivered claim narrows.
+        return "undelivered" if undelivered and status == "completed" else "done"
     # The user owing an answer comes first: it is the whole of one acceptance
     # question, and an answer nobody gives blocks everything behind it.
     if asked_user:
@@ -942,6 +1171,35 @@ def busy_repository_map(entries: list[dict]) -> dict:
 OPEN_QUESTIONS = re.compile(r"^##\s+Open Questions\s*$(.*?)(?=^##\s|\Z)",
                             re.MULTILINE | re.DOTALL)
 
+# Что задача такое, словами человека, а не состоянием. Единственное место на
+# диске, где это написано, — раздел `## Summary` в `task.md`; карточка задачи
+# показывала всё остальное и не показывала этого (пункт 5 задачи 864).
+SUMMARY = re.compile(r"^##\s+Summary\s*$(.*?)(?=^##\s|\Z)", re.MULTILINE | re.DOTALL)
+
+# Сколько знаков описания попадает в снимок. Карточка ничего не обрезает, но
+# снимок ездит в каждой живой выдаче целиком, и описание на сто задач — это
+# полезная нагрузка, которую никто не читает. Отсечка щедрая: она длиннее любого
+# наблюдавшегося `## Summary` и стоит здесь как предел, а не как формат.
+SUMMARY_CHARS = 1200
+
+
+def summary(task_dir: Path) -> str | None:
+    """Текст раздела `## Summary` из `task.md`, одной строкой абзацев."""
+    try:
+        text = (task_dir / "task.md").read_text()
+    except OSError:
+        return None
+    match = SUMMARY.search(text)
+    if not match:
+        return None
+    body = "\n".join(line.rstrip() for line in match.group(1).strip().splitlines()).strip()
+    if not body:
+        return None
+    if len(body) > SUMMARY_CHARS:
+        # Обрезка называет себя: молчаливая выглядела бы как конец описания.
+        body = body[:SUMMARY_CHARS].rstrip() + "… (описание длиннее, чем показано)"
+    return body
+
 # A bullet that answers itself in the same breath. The contour writes exactly
 # this shape — «Продуктовый ответ: да, потому что…» under the question it settles
 # (task 723) — and reading it as an open question is how the board reported a
@@ -1074,17 +1332,38 @@ def mail_message(path: Path) -> dict | None:
             "at": at, "subject": payload.get("subject") or ""}
 
 
+def mail_moment(at: datetime) -> str:
+    """A mail instant as the board says it: one zone for both sides of a pair.
+
+    Two letters in the plate's own sentence are compared by the reader, so they
+    have to be stated in the same zone; UTC is the one both sides of the seam
+    already store.
+    """
+    return at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+
 def mailbox() -> dict:
-    """The product owner's mail as two facts: which thread a message is in, and
-    when the user last wrote into each thread.
+    """The product owner's mail as three facts: which thread a message is in,
+    when the question itself went out, and when the user last wrote into each
+    thread.
 
     Read once per snapshot from `metadata.json` files that are already on disk —
     no network, no message body, and the same cost whatever was discussed. `sent`
     is what makes an outgoing question resolvable to a thread at all; `inbox` is
     where the answer lands.
+
+    `sent_at` is the instant, not the day. The written mark on a question line
+    carries a date and nothing finer, so a board that compares dates cannot tell
+    a letter that arrived two hours *before* the question from one that answered
+    it. The instant is already in the stored metadata; keeping it here is what
+    lets `answer_observed` require an answer that came afterwards (finding HIGH-1
+    of review 826: the questions of `19fd7e7ea2c3f7fb` went out at 16:28:48 UTC
+    and `19fd75ff10dd7605`, sent 2 h 28 min earlier about a forgotten document,
+    was read as their answer).
     """
     threads: dict[str, str] = {}
     replies: dict[str, datetime] = {}
+    sent_at: dict[str, datetime] = {}
     for box, incoming in ((MAIL_SENT, False), (MAIL_INBOX, True)):
         if not box.is_dir():
             continue
@@ -1095,11 +1374,13 @@ def mailbox() -> dict:
             if not message:
                 continue
             threads[message["id"]] = message["thread"]
+            if not incoming and message["at"]:
+                sent_at[message["id"]] = message["at"]
             if incoming and message["at"]:
                 current = replies.get(message["thread"])
                 if current is None or message["at"] > current:
                     replies[message["thread"]] = message["at"]
-    return {"threads": threads, "replies": replies,
+    return {"threads": threads, "replies": replies, "sent_at": sent_at,
             "sent_known": MAIL_SENT.is_dir()}
 
 
@@ -1125,12 +1406,28 @@ def answer_observed(asked: dict, mail: dict) -> dict:
     if reply is None:
         return {"answered": False, "src": None,
                 "note": f"в треде письма {asked['ref']} писем от пользователя нет"}
+    sent_at = mail.get("sent_at", {}).get(asked["ref"])
+    if sent_at is not None:
+        # The instant, when the outgoing letter is on disk. A letter that arrived
+        # before the question was sent cannot be its answer, even by minutes and
+        # even on the same day — that is exactly the case the board hid.
+        if reply <= sent_at:
+            return {"answered": False, "src": None,
+                    "note": f"последнее письмо пользователя в треде — "
+                            f"{mail_moment(reply)}, не позже самого вопроса, "
+                            f"отправленного {mail_moment(sent_at)}"}
+        return {"answered": True,
+                "src": f"письмо пользователя в том же треде от {mail_moment(reply)}, "
+                       f"позже вопроса, отправленного {mail_moment(sent_at)}",
+                "note": None}
+    # No stored outgoing letter: the written mark carries a date and nothing
+    # finer, so the day is all this observer honestly has.
     try:
-        sent_at = datetime.fromisoformat(asked["at"]).replace(tzinfo=timezone.utc)
+        marked = datetime.fromisoformat(asked["at"]).replace(tzinfo=timezone.utc)
     except ValueError:
         return {"answered": False, "src": None,
                 "note": f"дата вопроса {asked['at']!r} не читается как дата"}
-    if reply.date() < sent_at.date():
+    if reply.date() < marked.date():
         return {"answered": False, "src": None,
                 "note": f"последнее письмо пользователя в треде — {reply.date().isoformat()}, "
                         f"раньше вопроса от {asked['at']}"}
@@ -1174,7 +1471,8 @@ def owed_by(entries: list[dict], owner: str) -> list[dict]:
     return [entry for entry in entries if entry["owner"] == owner]
 
 
-def task_entry(task: dict, mail: dict) -> dict:
+def task_entry(task: dict, mail: dict,
+               observed: dict[tuple[str, int], list[dict]] | None = None) -> dict:
     task_dir = REPO / task["path"]
     run = run_state(task_dir)
     verdicts = gates(task_dir)
@@ -1226,7 +1524,7 @@ def task_entry(task: dict, mail: dict) -> dict:
     questions = questions_of(unsettled_questions(open_questions(task_dir)), mail)
     asked_user = owed_by(questions, "user")
     ours = owed_by(questions, "product")
-    hand = handoff(task_dir)
+    hand = handoff(task_dir, observed)
     actor, actor_src = observed_actor(task_dir, run)
     role, role_src = observed_role(task_dir)
     since, age, since_src = state_age(task_dir)
@@ -1255,6 +1553,9 @@ def task_entry(task: dict, mail: dict) -> dict:
         # fetched its own detail would be a second door into the contour past
         # the boundary this split exists to hold.
         "detail": {
+            # Что задача такое, словами человека. Всё остальное в карточке —
+            # состояние; это единственное, что объясняет, зачем она есть.
+            "summary": summary(task_dir),
             "review": review_verdict(task_dir),
             "delivery": delivery(task_dir),
             "files": task_files(task_dir),
@@ -1511,25 +1812,74 @@ def products(catalogue: list[dict] | None = None, mail: dict | None = None) -> l
 # nothing here observed. `--plan-links` prints the whole judgement, line by line,
 # with the evidence for each.
 
-NUMBER = re.compile(r"(?<![\w])(\d{3})(?![\w])")
+# Три цифры стояли здесь не как длина номера, а как признак: они заодно не
+# пускали в ссылки годы и прочие четырёхзначные числа прозы. Номера задач дошли
+# до 840 и придут к тысяче за считанные дни, и тогда «заведена задачей 1002»
+# перестанет совпадать вовсе — строка исчезнет с табло молча, без единой ошибки.
+#
+# Расширить шаблон до «три-четыре» и оставить признак прежним нельзя: проверка
+# на настоящих продуктовых записях (3323 строки) показала, что тогда ссылками
+# становятся `$0,2758`, «убытке 7920», «(390 и 1440)», «(1056/1056, 1ч33м)» и
+# «годы (2026)» — то есть ровно та ловушка, о которой предупреждала постановка,
+# и не только с годами. Хуже, что 1056 и 1440 сами станут номерами задач через
+# недели, и тогда счётчик прогонов молча превратится в ссылку на чужую задачу.
+#
+# Поэтому четырёхзначное число признаётся ссылкой не везде, где признавалось
+# трёхзначное, а только там, где строка называет его задачей:
+#   «заведена задачей 1002»          — слово-задача прямо перед ним;
+#   «2026-08-07 — **1002 принята**»  — голова датированного утверждения;
+#   «(1002 → 1005)»                  — стрелка к задаче, которая его заменила.
+# Скобка с закрывающей пунктуацией — «(736)», «(805, 806, идут)» — остаётся
+# признаком только для трёхзначного: в этой прозе четырёхзначное в скобках почти
+# всегда количество, цена или год. Настоящее упоминание четырёхзначной задачи в
+# такой позиции подхватывает не она, а сверка по словам названия ниже
+# (`corroborated`), и подхватывает с напечатанным свидетельством.
+NUMBER = re.compile(r"(?<![\w])(\d{3,4})(?![\w])")
+LEGACY_WIDTH = 3
 
-# A число is a reference to a task when it is written the way this contour
-# writes one, not merely when it is three digits long. Three positions, all
-# taken from the product records as they are actually written:
-#   «Работа заведена задачей 813»  — a task word right in front of it;
-#   «2026-08-06 — **806 принята**» — the head of the claim, after the date;
-#   «(736)», «(805 → 808)», «(805, 806, идут)» — inside brackets, with the
-#                                                 number not counting a noun.
-# The last one is why the bracket alone is not enough: «(266 тестов)» and «(630
-# строк)» are brackets too, and a number immediately followed by a word is
-# counting that word.
+# Год внутри даты — не число строки, а часть отметки времени; `2026-08-07`
+# начинает ровно ту же позицию, в которой пишется номер задачи. Дробная часть
+# десятичного числа — тоже: `$0,2758` стоит в скобках с запятой после, то есть
+# в позиции, которую разбор считает ссылочной. Обе проверки узкие нарочно.
+# Год ловится только по полной ISO-дате, потому что широкая проверка «цифры,
+# разделитель, цифры» съедала настоящую ссылку в «112/15/0» и в перечислении
+# «242, 245, 249». Дробь — только когда целая часть в одну-две цифры, иначе
+# «(805,806)» перестало бы быть перечислением номеров.
+YEAR_TAIL = re.compile(r"^-\d{2}-\d{2}(?![\w])")
+YEAR_HEAD = re.compile(r"\d{2}\.\d{2}\.$")
+FRACTION_HEAD = re.compile(r"(?<!\d)\d{1,2}[.,]$")
+
+
+def numbers(text: str) -> list[re.Match]:
+    """Числа строки, кроме годов внутри дат и дробных частей десятичных чисел."""
+    found = []
+    for match in NUMBER.finditer(text):
+        before, after = text[:match.start()], text[match.end():]
+        if FRACTION_HEAD.search(before):
+            continue
+        if len(match.group(1)) == 4 and (YEAR_TAIL.match(after) or YEAR_HEAD.search(before)):
+            continue
+        found.append(match)
+    return found
+
+
 TASK_WORD = re.compile(r"(?:задач\w*|таск\w*|task|№)\s*$", re.IGNORECASE)
-CLAIM_HEAD = re.compile(r"^\s*(?:\d{4}-\d{2}-\d{2})?(?:\s+\d{2}:\d{2})?\s*[—–-]*\s*"
-                        r"[*`_«»\s]*(?:\d{3}[\s,и–—-]*)*$")
+# Голова утверждения. Датированная принимает четырёхзначные номера, включая
+# второй и третий в перечислении: после даты в этой позиции ничего, кроме
+# номеров, не пишется. Недатированная остаётся трёхзначной с обеих сторон —
+# иначе «1440 и 390 без переполнений» отдаёт и 1440, и существующую задачу 390.
+CLAIM_HEAD = re.compile(r"^\s*(?:\d{4}-\d{2}-\d{2}(?:\s+\d{2}:\d{2})?\s*[—–-]*\s*"
+                        r"[*`_«»\s]*(?:\d{3,4}[\s,и–—-]*)*"
+                        r"|\s*[—–-]*\s*[*`_«»\s]*(?:\d{3}[\s,и–—-]*)*)$")
+DATED_HEAD = re.compile(r"^\s*\d{4}-\d{2}-\d{2}")
 # What may stand right after a reference: punctuation that closes or separates
 # it, an arrow to the task that replaced it, or the end of the line. A letter or
 # a digit there means the number is counting something.
 AFTER_REFERENCE = re.compile(r"^\s*(?:[)\]},;.!?]|→|$)")
+# Стрелка — «(805 → 808)» — называет задачу, заменившую другую, и потому годится
+# для номера любой длины с обеих сторон.
+ARROW_AFTER = re.compile(r"^\s*→")
+ARROW_BEFORE = re.compile(r"→\s*$")
 OPEN_BRACKET = re.compile(r"[(\[]")
 CLOSE_BRACKET = re.compile(r"[)\]]")
 
@@ -1553,11 +1903,22 @@ def inside_brackets(text: str, position: int) -> bool:
 def task_references(item: str) -> list[int]:
     """Numbers of the line that are written as references to a task."""
     found: list[int] = []
-    for match in NUMBER.finditer(item):
+    for match in numbers(item):
         before, after = item[:match.start()], item[match.end():]
-        reference = bool(TASK_WORD.search(before)) or bool(CLAIM_HEAD.match(before))
-        if not reference and inside_brackets(item, match.start()):
-            reference = bool(AFTER_REFERENCE.match(after))
+        # Трёхзначное число этот контур пишет как номер задачи в любой из трёх
+        # позиций. Четырёхзначное — только там, где строка называет его задачей:
+        # в прозе, где считают вызовы, тесты, пиксели и рубли, четырёхзначных
+        # количеств столько, что позиция сама по себе перестаёт быть признаком.
+        narrow = len(match.group(1)) <= LEGACY_WIDTH
+        if TASK_WORD.search(before):
+            reference = True
+        elif CLAIM_HEAD.match(before):
+            reference = narrow or bool(DATED_HEAD.match(before))
+        elif inside_brackets(item, match.start()) and AFTER_REFERENCE.match(after):
+            reference = narrow or bool(ARROW_AFTER.match(after)
+                                       or ARROW_BEFORE.search(before))
+        else:
+            reference = False
         if reference:
             found.append(int(match.group(1)))
     return found
@@ -1635,7 +1996,7 @@ def promise_link(item: str, catalogue: list[dict]) -> dict | None:
     # ждёт её)» reads exactly like «(266 тестов)» — still names a task when the
     # line also carries that task's own words. The число alone never decides
     # anything here: the words are the observation and they are printed with it.
-    for number in {n for n in map(int, NUMBER.findall(item))}:
+    for number in {int(match.group(1)) for match in numbers(item)}:
         task = known.get(number)
         shared = corroborated(item, task) if task else []
         if shared:
@@ -1694,18 +2055,91 @@ def ticked_thread(cmdline: list[str]) -> str | None:
     return None
 
 
-def owner_wakeups() -> list[dict]:
+# The CLI binaries an interactive product owner is driven by. Matched on the
+# executable argument alone, exactly like `ticked_thread` matches the script: a
+# `bash -c` wrapper carries the whole command in one argument and would otherwise
+# put «/bin/bash» on the strip as the name of an owner.
+OWNER_CLIS = ("claude", "codex", "cursor-agent")
+
+
+def runs_the_tick(cmdline: list[str], executable: Path | None) -> bool:
+    """Whether this process *is* a tick, rather than one that mentions it.
+
+    Two observations, because argv alone is not enough. `ticked_thread` requires
+    the script to be an argument of its own, which already rules out a `bash -c`
+    wrapper carrying the whole command in one string — but not `timeout 600
+    python3 scripts/thread_tick.py process`, where the script *is* an argument of
+    its own and the process is `timeout`. That wrapper was observed being counted
+    as a second owner on 2026-08-07, so the executable has to be a Python
+    interpreter as well. The unit runs `/usr/bin/python3 …/thread_tick.py %i`, so
+    the real tick passes both.
+    """
+    if ticked_thread(cmdline) is None:
+        return False
+    return bool(executable) and executable.name.startswith("python")
+
+
+def session_owner(cmdline: list[str], cwd: Path | None) -> str | None:
+    """Which kind of non-tick product owner this process is, if any.
+
+    The console session is the *other* instance of the two that created 790/792
+    and 791/793 in one hour, and it was never observed: `ticked_thread` matches
+    the tick script and an interactive `claude` never runs it. That is the whole
+    of why «Другой я» has been empty on every board the user has opened — the
+    only thing it could ever match lives for a second or two per twenty minutes,
+    between two timer firings nobody is looking at.
+
+    Two observations, both from `/proc` and neither from anything the process
+    says about itself: the executable is one of the owner's CLIs, and its working
+    directory is the product owner's own tree. A child run started *by* a task
+    sits in its task's repository and is a run, not an owner; it is already on
+    the board as a live run and must not be counted twice.
+
+    `--print` splits the two that remain. A tick runs its owner agent
+    non-interactively from the same directory, so calling that «продакт в
+    консоли» would be a caption that names the wrong thing — and this board is
+    built on not doing that.
+    """
+    if cwd is None or cwd != HOME:
+        return None
+    head = Path(cmdline[0]).name if cmdline and cmdline[0] else ""
+    # `node /usr/local/bin/codex …` and the like: the interpreter is argv[0] and
+    # the CLI is the argument after it. Still an argument of its own, never a
+    # substring of a shell command.
+    if head not in OWNER_CLIS and not (len(cmdline) > 1
+                                       and Path(cmdline[1]).name in OWNER_CLIS):
+        return None
+    return "woken" if ("--print" in cmdline or "-p" in cmdline) else "session"
+
+
+def thread_worktrees(config: dict) -> dict[str, list[str]]:
+    """Which repositories each direction owns, from the one configuration file."""
+    return {key: list(thread.get("repos", []))
+            for key, thread in config.get("threads", {}).items()}
+
+
+def owner_wakeups(config: dict | None = None) -> list[dict]:
     """Other instances of the product owner that are awake right now.
 
     Named by the user as the sixth question after two pairs of duplicate tasks
     (790/792 and 791/793) were created in one hour: the product owner in the
     chat and the product owner woken by `product-thread@<тред>.timer` each had
-    their own queue and neither could see the other's. A live tick is the
-    observation that another instance is deciding something.
+    their own queue and neither could see the other's. A live tick is one such
+    instance; an interactive session in the owner's own tree is the other, and
+    it used not to be observed at all.
 
-    Read from `/proc` command lines only — no transcript, no session file, and
-    nothing the other instance says about itself.
+    Every entry carries the working trees it could occupy, because that is the
+    only thing yielding is actually about. Four timers fired in the same second
+    on 2026-08-07 and three of the four directions stood down for a neighbour
+    that could not have collided with them: `companion` yielded to `process`,
+    `deep-research` to `companion` and `process`, `moex` to all three, and the
+    four directions own four disjoint sets of repositories.
+
+    Read from `/proc` command lines and working directories only — no
+    transcript, no session file, and nothing the other instance says about
+    itself.
     """
+    owned = thread_worktrees(config if config is not None else load_config())
     awake = []
     for entry in PROC.iterdir():
         if not entry.name.isdigit():
@@ -1715,17 +2149,157 @@ def owner_wakeups() -> list[dict]:
             started = entry.stat().st_mtime
         except OSError:
             continue
+        try:
+            cwd = Path(os.readlink(entry / "cwd"))
+        except OSError:
+            cwd = None
+        try:
+            executable = Path(os.readlink(entry / "exe"))
+        except OSError:
+            executable = None
         thread = ticked_thread(cmdline)
-        if thread is None:
+        if runs_the_tick(cmdline, executable):
+            kind, worktrees = "tick", owned.get(thread, [])
+            src = "командная строка и исполняемый файл процесса в /proc"
+        elif (kind := session_owner(cmdline, cwd)):
+            # Neither a console owner nor a woken one declares a direction, so
+            # what it could occupy is what it is standing in and nothing wider.
+            # Guessing «все деревья» here would put every tick back to yielding
+            # to every chat window.
+            thread, worktrees = None, [str(cwd)]
+            src = "командная строка и рабочий каталог процесса в /proc"
+        else:
             continue
         awake.append({
             "pid": int(entry.name),
+            "kind": kind,
             "thread": thread,
+            "worktrees": worktrees,
             "since": datetime.fromtimestamp(started, timezone.utc).isoformat(),
             "age_seconds": max(int(time.time() - started), 0),
-            "src": "командная строка процесса в /proc",
+            "src": src,
         })
     return sorted(awake, key=lambda w: w["since"])
+
+
+# Where a tick leaves what it saw and what it did. The board reads it and does
+# not recompute it: «когда проверял в прошлый раз и чем та проверка кончилась»
+# is an observation taken at the moment of the check, and a board that derived
+# it later would be answering a different question from a different instant.
+#
+# «Когда продакт проверит статус в следующий раз» is the opposite case and is
+# not in that file: it is a fact about *now*, and the only moment at which the
+# tick could have written it is the one moment it is guaranteed to be missing —
+# see `next_check` below.
+THREAD_STATE = HOME / "state" / "threads"
+
+# `systemctl show` prints a timestamp as «Fri 2026-08-07 17:00:00 CEST» whatever
+# `--timestamp=` is asked of it, so the instant is taken out of it by shape.
+SYSTEMD_STAMP = re.compile(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
+# States in which the paired service is not occupying its timer. Anything else
+# means the timer is not armed *because a check is running right now*, which is
+# the difference between «неизвестно» and «неизвестно, и вот почему».
+SERVICE_AT_REST = {"inactive", "failed"}
+SYSTEMCTL_TIMEOUT = tunable("PRODUCT_OWNER_SYSTEMCTL_TIMEOUT_SECONDS", 10)
+
+
+def systemd(command: list[str]) -> str | None:
+    """One systemd query, or `None` if this host has no answer to give.
+
+    A stand without systemd is a supported place to build this snapshot, so
+    every question asked of it has to survive not being answered.
+    """
+    try:
+        done = subprocess.run(command, capture_output=True, text=True,
+                              timeout=SYSTEMCTL_TIMEOUT, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return done.stdout if done.returncode == 0 else None
+
+
+def next_check(thread: str) -> dict:
+    """When this direction is due to look again, asked at the instant of asking.
+
+    Asked of systemd, and *only* of what systemd itself reports as armed.
+    Computing the next calendar minute instead — from `systemd-analyze calendar`,
+    or from the `next_elapse=` systemd prints inside `TimersCalendar`, which is
+    the same computation — looks like an observation and is not one: the calendar
+    answers «when would this spec fire», systemd answers «when is this timer set
+    to fire», and a woken owner that runs past the twenty-minute step makes the
+    two disagree. A check started at 18:05 and still running at 18:26 has lost
+    the 18:25 firing; systemd arms 18:45 and the calendar still says 18:25.
+
+    Collected here, with the rest of the board, rather than written into the
+    direction's state file by the tick. The tick *is* the service paired with the
+    timer, so the one moment it could write this field is the one moment
+    `NextElapseUSecRealtime` is empty by construction — and review 900 found the
+    result: `next_at=null` in all four live files while systemd was holding real
+    future times for three of them. The question «когда проверит в следующий
+    раз» is about the present, so it is answered when the board is built.
+    """
+    unit = f"product-thread@{thread}.timer"
+    armed = systemd(["systemctl", "show", unit, "--property=NextElapseUSecRealtime", "--value"])
+    match = SYSTEMD_STAMP.search(armed or "")
+    if match:
+        try:
+            local = datetime.strptime(match.group(1), "%Y-%m-%d %H:%M:%S").astimezone()
+            return {"at": local.isoformat(), "src": f"NextElapseUSecRealtime таймера {unit}"}
+        except ValueError:
+            pass
+    # An unknown instant is said as unknown — but why it is unknown is itself
+    # observable, and the common case has an ordinary answer: a check running
+    # right now is what is holding the timer unarmed.
+    service = f"product-thread@{thread}.service"
+    state = (systemd(["systemctl", "show", service, "--property=ActiveState", "--value"])
+             or "").strip()
+    if state and state not in SERVICE_AT_REST:
+        return {"at": None,
+                "src": f"таймер {unit} не взведён, пока идёт проверка этого направления: "
+                       f"{service} в состоянии {state}, а NextElapseUSecRealtime пуст — "
+                       "systemd назовёт следующее срабатывание, когда проверка закончится"}
+    return {"at": None,
+            "src": f"systemd не сообщил следующего срабатывания таймера {unit}: "
+                   "NextElapseUSecRealtime пуст, а вычислять время по календарю "
+                   "вместо наблюдения эта панель не станет"}
+
+
+# What the board says when a record exists but does not match the contract the
+# renderer is promised. A state file is runtime state, rebuilt by the next tick
+# within the wake-up interval, so a record written by an older version of the
+# tick is a normal transient — and taking the whole board down for twenty
+# minutes over one stale field would be a far worse answer than saying so. It is
+# still not «проверок не было»: that would be a false claim about the world.
+UNREADABLE_CHECK_QUEUE = {"live": 0, "pickup": 0, "ready": 0, "decided": 0,
+                          "undelivered": 0, "waiting_user": 0}
+
+
+def thread_check(key: str) -> dict | None:
+    """The last wake-up of one direction, as that wake-up recorded it.
+
+    `None` means no tick has ever written for this direction — which is a real
+    answer and not the same as «проверял и ничего не нашёл». The board prints
+    the difference, and prints a third answer for a record it cannot read.
+    """
+    path = THREAD_STATE / f"{key}.json"
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    check = payload.get("check")
+    if not isinstance(check, dict):
+        return None
+    try:
+        return validate_check(check, f"проверка направления {key!r}")
+    except ContractError as broken:
+        return {
+            "at": str(payload.get("updated_at") or "1970-01-01T00:00:00+00:00"),
+            "outcome": "запись прошлой проверки не читается: она не сходится с "
+                       f"нынешним контрактом ({broken})",
+            "outcome_src": f"файл {path.name}, разобранный контрактом снимка",
+            "woke_owner": False, "started": None, "events": [], "reasons": [],
+            "queue": dict(UNREADABLE_CHECK_QUEUE),
+            "src": f"state/threads/{key}.json",
+        }
 
 
 def build(anonymize: bool, only: str | None = None) -> dict:
@@ -1741,13 +2315,14 @@ def build(anonymize: bool, only: str | None = None) -> dict:
     # Read once: whose question is still unanswered is asked of every task and
     # every product, and the mailbox may not answer it differently between them.
     mail = mailbox()
+    observed = attachment_observations()
     statuses = {task["id"]: task.get("status") for task in catalogue if task.get("id")}
     threads = []
     for key, thread in config["threads"].items():
         if only and key != only:
             continue
         source = thread_tasks(thread)
-        tasks = [task_entry(task, mail) for task in source]
+        tasks = [task_entry(task, mail, observed) for task in source]
         # A start condition may name a task of another direction, and the index
         # is the same one the board is already built from, so the answer to «эта
         # задача закрыта?» cannot depend on which thread is being collected.
@@ -1763,6 +2338,14 @@ def build(anonymize: bool, only: str | None = None) -> dict:
             # on the direction that owns the contour rather than invented for all
             # four.
             "channels": thread_channels(tasks, is_owner=str(REPO) in thread.get("repos", [])),
+            # When the owner of this direction last looked and what came of it.
+            # Read from what the tick wrote at the moment of the check, never
+            # from the prose of a woken agent.
+            "check": thread_check(key),
+            # When it looks next — asked of systemd here and now, because that
+            # is the instant the answer is about. `None` with a named reason
+            # when systemd is holding nothing armed.
+            "next_check": next_check(key),
         })
     if only and not threads:
         raise SystemExit(f"unknown thread: {only}; known: {sorted(config['threads'])}")
@@ -1773,7 +2356,7 @@ def build(anonymize: bool, only: str | None = None) -> dict:
         "products": products(catalogue, mail),
         # Who else is deciding right now. Not a thread and not a task: it is the
         # contour watching itself, and it belongs above the columns.
-        "owners_awake": owner_wakeups(),
+        "owners_awake": owner_wakeups(config),
     }
     if anonymize:
         snapshot = scrub(snapshot)

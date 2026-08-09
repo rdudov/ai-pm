@@ -440,6 +440,14 @@ def build_board(snapshot: dict) -> dict:
             # disk ties a commit to a task number, and the map does not invent
             # a tie it cannot observe.
             "repos": [r for r in thread["repos"] if r.get("present")],
+            # When this direction last looked and what came of it. Carried
+            # through untouched: the tick recorded it at the moment of the
+            # check, and a renderer that recomputed any of it would be answering
+            # from a different instant than the one it labels.
+            "check": thread["check"],
+            # And when it looks next, as systemd reported it while the snapshot
+            # was being collected. Carried through on the same rule.
+            "next_check": thread["next_check"],
         })
     # A strip above the columns, so the two questions a person opens the board
     # for — who is working, where the jam is — are answered without scrolling

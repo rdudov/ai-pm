@@ -2,8 +2,8 @@
 """One wake-up of a product thread.
 
 Cheap by construction: it compares the current observable state with the last
-snapshot and exits silently when nothing changed. Only a real transition costs
-an agent run, and that run starts from disk state, never from a transcript.
+snapshot and wakes the product owner only when there is something to wake them
+for. That run starts from disk state, never from a transcript.
 
 Transitions that wake the product owner:
   - a live run finished since the last tick
@@ -13,17 +13,37 @@ Transitions that wake the product owner:
   - a task's recorded start condition became met, so it is startable now
   - a decision recorded on a task is still not carried out
 
-The last two exist because the first four could not answer «что теперь можно
-запускать». On 2026-08-06 task 831 named its condition in a sentence — «после
-завершения прогона 830, то же рабочее дерево» — and the tick saw only «прогон
-830 завершился». Nothing said what that made possible, so 831 stood forty
-minutes and moved when the user asked. A condition that is a field becomes a
-transition like any other.
+Those two last ones exist because the first four could not answer «что теперь
+можно запускать». On 2026-08-06 task 831 named its condition in a sentence —
+«после завершения прогона 830, то же рабочее дерево» — and the tick saw only
+«прогон 830 завершился». Nothing said what that made possible, so 831 stood
+forty minutes and moved when the user asked. A condition that is a field becomes
+a transition like any other.
 
-And when the tick yields to another instance of the product owner, it leaves the
-list of what it did not start on disk beside the snapshot. Yielding is right —
-two children in one working tree is the collision the condition exists to
-prevent — but yielding silently is how the list ends up in nobody's hands.
+And two *states* wake it too, because a transition is not the only kind of news:
+
+  - идёт простой: no live run of this direction while its queue is not empty
+  - «сделано, но не доставлено» стоит дольше разумного порога
+
+Both are the same defect seen from two sides, and both were invisible here by
+construction. A direction with ten startable tasks and no live run produces no
+edge at all, so `if not events: return 0` made it mute forever: on 2026-08-07 all
+four timers fired at 16:06:56, sixteen tasks stood startable across the contour,
+nothing was running, and neither a letter nor a line on the board appeared. The
+user's words for it were «панель показывает, что в работе ничего нет… тогда
+почему ничего не делаешь?». Standing idle with work available *is* the event.
+
+Chatter is answered with a rate, not with silence: the same reminder is not
+repeated inside `PRODUCT_OWNER_IDLE_REMIND_SECONDS`, and a queue that changed is
+news again immediately.
+
+Whatever the tick decides, it records what it saw and what came of it in the
+direction's own state file. That record — not the prose of a woken agent — is
+what the board reads to answer «когда продакт проверял в прошлый раз и чем та
+проверка кончилась». When the *next* check falls is not written here: this
+process is the service paired with the timer, so it would always be recording
+the one instant systemd holds that timer unarmed. The board asks systemd itself,
+as it is built (`process_map_state.next_check`).
 
 Usage: thread_tick.py <thread> [--dry-run] [--force]
 """
@@ -32,6 +52,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import urllib.parse
@@ -40,12 +61,34 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import codex_budget  # noqa: E402
+import outbound  # noqa: E402
+import runner_contract  # noqa: E402
+from process_map_state import RUNNER_SCRIPTS, tunable  # noqa: E402
+from process_map_state import THREAD_STATE as STATE_DIR  # noqa: E402
 from thread_state import HOME, REPO, build  # noqa: E402
 
-STATE_DIR = HOME / "state" / "threads"
 CLAUDE_PRODUCT_OWNER = HOME / "scripts" / "claude_product_owner.py"
 COMPANION = Path("/opt/projects/companion-agent")
 MAIL_TO = "rdudov@gmail.com"
+
+
+# How often the same standing reminder may be repeated. The tick itself runs
+# every twenty minutes, so this is the frequency of the *reminder*, not of the
+# observation: a queue that has not moved is said once an hour, and a queue that
+# moved is news at the next tick.
+IDLE_REMIND_SECONDS = tunable("PRODUCT_OWNER_IDLE_REMIND_SECONDS", 3600)
+# How long a finished task may hold a document nobody was shown before that
+# becomes an event. The user saw one stand over forty minutes, and then several
+# at once; half an hour is inside the span they were already unhappy about.
+UNDELIVERED_SECONDS = tunable("PRODUCT_OWNER_UNDELIVERED_SECONDS", 1800)
+# How long the woken owner may take, and how long the two side channels may.
+WAKE_TIMEOUT = tunable("PRODUCT_OWNER_WAKE_TIMEOUT_SECONDS", 1800)
+MAIL_TIMEOUT = tunable("PRODUCT_OWNER_MAIL_TIMEOUT_SECONDS", 180)
+NOTIFY_TIMEOUT = tunable("PRODUCT_OWNER_NOTIFY_TIMEOUT_SECONDS", 10)
+# Above this share of the weekly Codex window, heavy work does not start — the
+# same threshold `codex_budget.py` prints its verdict against.
+CODEX_HEAVY_PERCENT = tunable("PRODUCT_OWNER_CODEX_HEAVY_PERCENT", 80)
 
 
 def snapshot(report: dict) -> dict:
@@ -60,6 +103,12 @@ def snapshot(report: dict) -> dict:
         # this file does not have.
         "ready": sorted(item["id"] for item in report["ready_to_start"]),
         "decided": sorted(item["id"] for item in report["decided_not_done"]),
+        # Not a transition and never was: what can be picked up simply *stands*,
+        # and it standing next to zero live runs is the whole of the idle event.
+        # It is in the snapshot so the reminder can tell «та же очередь» from «в
+        # очереди что-то изменилось» without a second file to keep in step.
+        "pickup": sorted(item["id"] for item in report["can_pick_up"]),
+        "undelivered": sorted(item["id"] for item in report["undelivered"]),
     }
 
 
@@ -87,8 +136,207 @@ def transitions(previous: dict, current: dict) -> list[str]:
     return events
 
 
-def send_mail(subject: str, body: str) -> None:
-    """Deliver the verdict to the mailbox the user actually reads.
+def queue(report: dict) -> dict:
+    """How much work of each kind is standing, and none of it is a transition.
+
+    One place, so the event, the reminder's «та же очередь» test and the line the
+    board prints cannot disagree about what «непустая очередь» meant.
+    """
+    return {
+        "live": len(report["live_runs"]),
+        "pickup": len(report["can_pick_up"]),
+        "ready": len(report["ready_to_start"]),
+        "decided": len(report["decided_not_done"]),
+        "undelivered": len(report["undelivered"]),
+        "waiting_user": len(report["waiting_user"]),
+    }
+
+
+def startable(report: dict) -> int:
+    """Work this direction could put a child on right now.
+
+    «Можно подхватить», «готово к запуску» and «решено, но не исполнено» are the
+    three areas that say nothing observable is holding the task. What stands in
+    «в очереди» is held by something named and is not idleness.
+    """
+    return (len(report["can_pick_up"]) + len(report["ready_to_start"])
+            + len(report["decided_not_done"]))
+
+
+def overdue_undelivered(report: dict) -> list[dict]:
+    """Finished tasks whose document has waited longer than the threshold."""
+    return [item for item in report["undelivered"]
+            if (item["age_seconds"] or 0) >= UNDELIVERED_SECONDS]
+
+
+def repeatable(previous: dict | None, signature: str, now: datetime) -> bool:
+    """Whether a standing reminder may be said again.
+
+    Two guards, and the second one is why this is a frequency rather than a mute
+    button. The same queue is not repeated inside `IDLE_REMIND_SECONDS`; a queue
+    that changed is news at the very next tick. A missing or unreadable previous
+    record means «say it» — the failure mode this whole file is repairing is
+    silence, so the doubtful case is loud.
+    """
+    if not previous or previous.get("signature") != signature:
+        return True
+    try:
+        last = datetime.fromisoformat(previous["at"])
+    except (KeyError, TypeError, ValueError):
+        return True
+    return (now - last).total_seconds() >= IDLE_REMIND_SECONDS
+
+
+def standing_events(report: dict, current: dict, stored: dict,
+                    moment: datetime) -> tuple[list[str], dict | None, dict | None]:
+    """The two states that wake the owner without being transitions.
+
+    Idleness with work available is the first, and it is the whole of the defect
+    the user named: `transitions()` can only speak on an edge, and a direction
+    with ten startable tasks and no live run has no edge to offer. It stood mute
+    forever, which on 2026-08-07 read as «панель показывает, что в работе ничего
+    нет… тогда почему ничего не делаешь?».
+
+    A document nobody was shown, standing longer than the threshold, is the
+    second. That area has been on the board since 783 and could wake nobody, so
+    the user watched one entry pass forty minutes and then several appear at once.
+
+    Both are rate-limited rather than silenced, and the signature is the queue
+    itself: the same queue is not repeated inside `IDLE_REMIND_SECONDS`, and a
+    queue that moved is news at the very next tick.
+    """
+    now = moment.isoformat()
+    events = []
+
+    idle_signature = json.dumps(current["pickup"] + current["ready"] + current["decided"])
+    idle_reminder = stored.get("idle_reminder")
+    if not report["live_runs"] and startable(report) and repeatable(
+            idle_reminder, idle_signature, moment):
+        events.append(
+            f"идёт простой: живых прогонов нет, а к запуску {startable(report)} "
+            f"(можно подхватить {len(report['can_pick_up'])}, "
+            f"готово к запуску {len(report['ready_to_start'])}, "
+            f"решено и не исполнено {len(report['decided_not_done'])})")
+        idle_reminder = {"at": now, "signature": idle_signature}
+
+    overdue = overdue_undelivered(report)
+    held_signature = json.dumps(sorted(item["id"] for item in overdue))
+    held_reminder = stored.get("undelivered_reminder")
+    if overdue and repeatable(held_reminder, held_signature, moment):
+        events.append(
+            f"«сделано, но не доставлено» стоит дольше {UNDELIVERED_SECONDS // 60} мин: задачи "
+            + ", ".join(str(item["id"]) for item in overdue))
+        held_reminder = {"at": now, "signature": held_signature}
+    return events, idle_reminder, held_reminder
+
+
+def codex_window() -> dict | None:
+    """The weekly Codex window, from the CLI's own session records."""
+    try:
+        return codex_budget.latest()
+    except Exception:
+        return None
+
+
+def idle_reasons(report: dict, standing: dict) -> list[dict]:
+    """Why this direction may be standing still, in the words the user named.
+
+    «Занят другой продакт, исчерпан бюджет, занято рабочее дерево, ждём ответа
+    пользователя, нет проверяющего» — each one observed, or not stated. And when
+    nothing observable explains it, that is said out loud too: «везде нули» with
+    no reason is the defect, so the absence of a reason is itself the finding and
+    not an empty list somebody has to notice.
+    """
+    reasons = []
+    others = (standing.get("yielded_to_awake_owner") or {}).get("to") or []
+    if others:
+        who = ", ".join(f"{o['kind']} «{o['thread'] or 'консоль'}»" for o in others)
+        reasons.append({
+            "code": "awake_owner",
+            "text": f"занят другой продакт: {who} — он может занять то же рабочее дерево",
+            "src": "командные строки и рабочие каталоги процессов в /proc",
+        })
+    busy = [item for item in report["live_runs"]
+            if (item["run"] or {}).get("process_alive")]
+    if busy:
+        reasons.append({
+            "code": "worktree_busy",
+            "text": "занято рабочее дерево: живёт прогон "
+                    + ", ".join(str(item["id"]) for item in busy),
+            "src": "pid и стартовый тик ядра из .runner/runner.json",
+        })
+    window = codex_window()
+    if window and window["used_percent"] >= CODEX_HEAVY_PERCENT:
+        reasons.append({
+            "code": "codex_budget",
+            "text": f"исчерпан бюджет: недельное окно Codex израсходовано на "
+                    f"{window['used_percent']}%, сброс {window['resets_at']}. "
+                    "Пара «автор — проверяющий» жёсткая, поэтому по работе Claude "
+                    "проверяющего сейчас нет",
+            "src": f"снимок rate_limits в сессии Codex {window['observed_from']}",
+        })
+    # The only reason on this list tied to particular tasks, and therefore the
+    # only one that can be said about the wrong ones. «Занят другой продакт»,
+    # «занято рабочее дерево» and «исчерпан бюджет» hold the whole direction, so
+    # they explain standing still whatever is in the queue. A question standing
+    # on task 827 holds task 827 and nothing else: with nine free tasks next to
+    # it, printing it as the reason for idleness explains the nine by the tenth.
+    # It also cost the honest answer — `none_observed` below stands under `if not
+    # reasons`, so a single open question silenced «значит запускать надо» — and
+    # went into the wake-up prompt, handing the woken owner a ready excuse made
+    # of somebody else's task.
+    if report["waiting_user"] and not startable(report):
+        waiting = ", ".join(str(item["id"]) for item in report["waiting_user"])
+        reasons.append({
+            "code": "waiting_user",
+            "text": f"свободной работы нет, а что стоит — стоит на ответе пользователя: "
+                    f"задачи {waiting}",
+            "src": "область «ждёт решения пользователя» наблюдаемого состояния треда, "
+                   "сверенная с пустыми «можно подхватить», «готово к запуску» и "
+                   "«решено, но не исполнено»",
+        })
+    # And the case the user actually wrote in about. It is only a finding when
+    # the direction really is standing still with work available: on a direction
+    # that has nothing to start, «значит запускать надо» would be a false claim,
+    # and an empty list there is the honest answer.
+    if not reasons and not report["live_runs"] and startable(report):
+        reasons.append({
+            "code": "none_observed",
+            "text": "причина простоя не наблюдается: ни другого продакта, ни занятого "
+                    "дерева, ни исчерпанного бюджета, ни вопроса к пользователю — "
+                    "значит запускать надо",
+            "src": "тот же снимок треда, в котором ни одна из известных причин не сработала",
+        })
+    return reasons
+
+
+def started_runs(before: dict, after: dict | None) -> list[int]:
+    """Runs that were not live before the wake-up and are live after it."""
+    return sorted(set((after or {}).get("live", [])) - set(before["live"]))
+
+
+def outcome(before: dict, after: dict | None, woke: bool, report: dict) -> str:
+    """What the check came to, in ordinary words, from what was observed.
+
+    Never from the text the woken owner returned. The owner's own account of what
+    it did is exactly the prose the board is not allowed to believe: what is
+    printed here is the difference between the live runs before the wake-up and
+    the live runs after it.
+    """
+    if not woke:
+        return "не будился: ни событий, ни простоя при доступной работе"
+    started = started_runs(before, after)
+    if started:
+        return f"запустил {len(started)} — задачи " + ", ".join(str(i) for i in started)
+    if startable(report):
+        return f"не нашёл, что запустить, хотя работы к запуску {startable(report)}"
+    if report["waiting_user"]:
+        return "жду ответов на вопросы пользователю"
+    return "запускать нечего: свободной работы в очереди нет"
+
+
+def send_mail(subject: str, body: str) -> bool:
+    """Put one letter in the mailbox the user actually reads.
 
     The telegram path below needs a bot token in the environment, and the
     systemd unit that runs this tick has none: on 2026-08-04 the wake-up for
@@ -96,18 +344,73 @@ def send_mail(subject: str, body: str) -> None:
     dropped it on the floor, so the user learned nothing until they asked.
     Mail is the channel that is provably wired in both directions, so the
     verdict goes there first and telegram stays a bonus.
+
+    Whether a letter *should* go is not decided here — `outbound.decide` owns
+    that, and `deliver` below is the only caller. What is decided here is
+    whether it went, which the ledger needs: a send that failed must stay held
+    rather than be written down as said.
     """
     script = COMPANION / "skills" / "gmail-client" / "scripts" / "send_email.py"
     python = COMPANION / ".venv" / "bin" / "python"
     if not script.is_file() or not python.is_file():
-        return
+        return False
     try:
-        subprocess.run(
+        result = subprocess.run(
             [str(python), str(script), "--to", MAIL_TO, "--subject", subject, "--body", body],
-            cwd=str(COMPANION), capture_output=True, text=True, timeout=180, check=False,
+            cwd=str(COMPANION), capture_output=True, text=True,
+            timeout=MAIL_TIMEOUT, check=False,
         )
     except Exception:
-        return
+        return False
+    return result.returncode == 0
+
+
+def deliver(thread: str, kind: str, subject: str, body: str,
+            report: dict | None, moment: datetime, chat: dict | None = None) -> dict:
+    """The one door mail leaves this contour through.
+
+    The push above is unconditional and stays that way: «прогон стартовал»,
+    «прогон закончился», «репозиторий двинулся» are news the user asked to keep
+    seeing, and what they asked to stop is a *letter* about each of them. So the
+    gate is on this side only, and everything it turns away is still on the push
+    and on the board.
+
+    A failed send is held, not recorded: the ledger's whole worth is that it
+    says what the user was told, and a letter that never left was not told.
+    """
+    if kind != "verdict":
+        chat = outbound.no_chat()
+    elif chat is None:
+        chat = outbound.heard_in_chat(moment)
+    with outbound.Ledger() as ledger:
+        entry = ledger.thread(thread)
+        decision = outbound.decide(thread, kind, subject, body, report or {},
+                                   moment, entry, chat)
+        delivered = None
+        if decision["action"] == "send":
+            delivered = send_mail(subject, decision["body"])
+            if not delivered:
+                # Held as it was written, not as it was merged: what accumulated
+                # is still in `pending` because nothing was flushed, and holding
+                # the merged text would put every one of those items in twice.
+                decision = {**decision, "action": "hold",
+                            "reason": "отправка не удалась, письмо ждёт следующего",
+                            "body": decision["raw_body"], "flush": []}
+        outbound.apply(entry, decision, subject, moment, report, kind)
+        record = {"at": moment.isoformat(), "thread": thread, "kind": kind,
+                  "subject": subject, "action": decision["action"],
+                  "reason": decision["reason"],
+                  "delivered": None if delivered is None else bool(delivered),
+                  "asks_user": outbound.asks_user(decision["raw_body"]),
+                  "chat": chat["src"]}
+        # Appended rather than written into the direction's state file, which is
+        # rewritten whole on every tick: on 2026-08-09 a review could show only
+        # the later of two production ticks having gone through this gate,
+        # because the earlier one's evidence had lasted twenty minutes.
+        ledger.record(record)
+    return {**record,
+            "src": "state/outbound.json — реестр сказанного пользователю; "
+                   "state/outbound-journal.jsonl — все решения шлюза подряд"}
 
 
 def notify(text: str) -> None:
@@ -120,10 +423,53 @@ def notify(text: str) -> None:
         f"https://api.telegram.org/bot{token}/sendMessage", data=payload, method="POST"
     )
     try:
-        with urllib.request.urlopen(request, timeout=10) as response:
+        with urllib.request.urlopen(request, timeout=NOTIFY_TIMEOUT) as response:
             response.read()
     except Exception:
         return
+
+
+def runner_contract_alarm(thread: str, stored: dict, moment: datetime,
+                          announce: bool) -> tuple[list[dict], dict | None]:
+    """Whether this repository can still ask the runner what it asks it.
+
+    The observation of every direction is built on names imported from
+    `companion-agent`. On 2026-08-08 one of them was renamed there, nothing here
+    noticed, and all four directions spent about ten hours answering
+    `AttributeError` instead of answering. Nobody was told: the failure lived in
+    a systemd journal, and the board simply kept showing the state files of the
+    previous night.
+
+    A test guarded the names, and review 954 (HIGH-1) pointed out that no live
+    mechanism ran that test — so the guard runs from here, where a mechanism
+    genuinely exists: four timers, every twenty minutes each. What it changes is
+    not the breakage but the silence around it. A divergence now leaves through
+    the two channels the verdicts leave through, is written into the direction's
+    own state file where the board reads it, and makes the unit fail.
+
+    Rate-limited like the other standing reminders, and for the same reason: the
+    contour wakes twelve times an hour and the same alarm twelve times an hour is
+    a mute button by other means. A *changed* set of violations is news at once.
+    """
+    violations = runner_contract.check()
+    reminder = stored.get("runner_contract_reminder")
+    print(runner_contract.report(violations, RUNNER_SCRIPTS), file=sys.stderr)
+    if not violations:
+        # Nothing to remember: the next divergence must be loud even if an
+        # identical one was announced an hour ago and then repaired.
+        return [], None
+    signature = json.dumps(sorted(item["text"] for item in violations))
+    if announce and repeatable(reminder, signature, moment):
+        told = (f"[{thread}] наблюдение продакта держится на именах из companion-agent, "
+                f"и они разошлись:\n\n"
+                + "\n".join(f"- {item['text']}\n  ({item['src']})" for item in violations)
+                + "\n\nПока это не починено, живые прогоны, простой и свежесть работы "
+                  "считаются кодом, который может отвечать ошибкой вместо ответа.")
+        notify(told)
+        deliver(thread, "alarm", "Продакт: контракт с task_runner разошёлся",
+                told, None, moment)
+        reminder = {"at": moment.isoformat(), "signature": signature}
+    return violations, reminder
 
 
 def yielded(report: dict) -> dict | None:
@@ -139,13 +485,29 @@ def yielded(report: dict) -> dict | None:
     else was seen awake, and which tasks were startable at that moment. The
     interactive owner reads the same file the tick writes, which is the whole
     point — a timer wakes a process, never a conversation.
+
+    What changed on 2026-08-07 is *whom* it yields to. Yielding used to mean «any
+    other process with thread_tick.py in its command line», and the four timers
+    all fired in the same second, so on every synchronous wake-up exactly one
+    direction could act and it was always the same one: `companion` stood down
+    for `process`, `deep-research` for `companion` and `process`, `moex` for all
+    three, and `process` for nobody. The four directions own four disjoint sets
+    of repositories, so not one of those collisions was real. A collision is a
+    working tree two children would land in, and nothing else.
     """
-    # Every awake owner except this very process. Excluding by thread instead
-    # would have thrown away exactly the case that cost the forty minutes: the
-    # second owner of 2026-08-06 was awake on the *same* direction, and it is a
-    # same-direction second owner that must not put a second child into one
-    # working tree.
-    others = [owner for owner in report["owners_awake"] if owner["pid"] != os.getpid()]
+    mine = set(report["worktrees"])
+    others = []
+    for owner in report["owners_awake"]:
+        if owner["pid"] == os.getpid():
+            # Excluding by thread instead would throw away exactly the case that
+            # cost the forty minutes: the second owner of 2026-08-06 was awake on
+            # the *same* direction, and it is a same-direction second owner that
+            # must not put a second child into one working tree.
+            continue
+        shared = sorted(mine & set(owner.get("worktrees") or []))
+        if not shared:
+            continue
+        others.append({**owner, "shared_worktrees": shared})
     if not others:
         return None
     return {
@@ -153,16 +515,55 @@ def yielded(report: dict) -> dict | None:
         "to": others,
         "ready_to_start": report["ready_to_start"],
         "decided_not_done": report["decided_not_done"],
-        "src": "командные строки процессов в /proc и области наблюдаемого состояния треда",
+        "src": "командные строки и рабочие каталоги процессов в /proc, сверенные с "
+               "репозиториями направления из threads.json",
     }
 
 
-def prompt(report: dict, events: list[str]) -> str:
+def heard_block(said: list[dict], chat: dict) -> str:
+    """What the user has already been told, put in front of the owner.
+
+    The gate in `outbound` can only refuse a repeat after it is written; this is
+    the half that keeps it from being written. Both sources were on disk all
+    along and neither was read: «меня например раздражают письма примерно про
+    одно и то же. Особенно если мы проговорили в чате CLI, а потом приходит
+    письмо „А знаешь, мы тут такое сделали за это время! …“».
+    """
+    if not said and not chat["sessions"]:
+        return ""
+    letters = "\n".join(
+        f"- {item['at'][:16].replace('T', ' ')} UTC «{item['subject']}»: "
+        f"{' '.join(item['excerpt'].split())[:220]}" for item in said
+    ) or "- писем в этом окне не было"
+    spoken = (f"Разговоры в CLI, где говорил человек: {len(chat['sessions'])} сессий, "
+              f"{chat['chars']} символов, названы задачи "
+              + (", ".join(str(i) for i in chat["tasks"]) or "нет")
+              + f" [{chat['src']}]") if chat["sessions"] else (
+        "Разговоров в CLI с человеком в этом окне не было.")
+    return f"""
+Что пользователь уже слышал (письма — из реестра отправленного, разговор — из
+стенограмм CLI; и то и другое наблюдаемо, не со слов):
+{letters}
+{spoken}
+
+Пиши только разницу. Пересказ уже сказанного письмом не идёт: он будет отброшен
+как повтор, и пользователь увидит вместо него пуш. Если разницы нет — SILENT.
+"""
+
+
+def prompt(report: dict, events: list[str], reasons: list[dict],
+           said: list[dict], chat: dict) -> str:
+    # Shown only when there is something observed to show. A heading over an
+    # empty list reads as «причин нет», which is a different claim.
+    seen = ("\nЧто наблюдение говорит о простое (это не приговор, а то, что видно с диска):\n"
+            + "\n".join(f"- {item['text']} [{item['src']}]" for item in reasons) + "\n"
+            ) if reasons else ""
     return f"""Ты продакт-агент на фоновом пробуждении треда «{report['title']}».
+{heard_block(said, chat)}
 
 Произошло с прошлого пробуждения:
 {chr(10).join('- ' + event for event in events)}
-
+{seen}
 Наблюдаемое состояние треда (собрано механически, не со слов исполнителя):
 {json.dumps(report, ensure_ascii=False, indent=2)}
 
@@ -178,13 +579,27 @@ def prompt(report: dict, events: list[str]) -> str:
 4. Верни короткий текст для пользователя в формате вердикта продакта: что теперь
    может пользователь, цена, что осталось, и строка «Риск/долг», если в
    verification есть GAP. Если сказать нечего — верни ровно слово SILENT.
+   Первой строкой поставь `ПОВОД: вопрос|польза|готово|механика` — зачем это
+   письмо. `вопрос` — нужен выбор пользователя, и такое письмо доходит всегда.
+   `польза` — изменилось, что пользователь может. `готово` — закончилась работа,
+   которую он заказывал. `механика` — прогон стартовал или закончился,
+   репозиторий двинулся: это не письмо, это пуш и табло.
+   Второй строкой поставь `ВОПРОС: да|нет` — есть ли в тексте то, на что ты
+   ждёшь ответа или выбора пользователя. Это отдельный вопрос от `ПОВОД`:
+   письмо про изменившуюся пользу тоже может кончаться просьбой выбрать, и
+   тогда здесь `да`. Просьба выбрать, кончающаяся точкой, — это `да`.
 
-Разделы «готово к запуску» и «решено, но не исполнено» в состоянии выше — это
-работа, у которой условие уже снято или решение уже принято: по ней нужен либо
-запуск, либо названная причина, почему нет. Если бодрствует ещё один продакт,
-уступи ему дорогу — двух детей в одном рабочем дереве быть не должно; список
-того, что ты не стал запускать, уже лежит на диске в файле состояния треда, так
-что пересказывать его в тексте не нужно.
+Разделы «готово к запуску», «можно подхватить» и «решено, но не исполнено» в
+состоянии выше — это работа, у которой ничего не держит: по ней нужен либо
+запуск, либо названная причина, почему нет. Простой при непустой очереди — сам
+по себе повод: если ты ничего не запустил, причина обязана быть в твоём ответе
+обычными словами, иначе пользователь снова увидит нули без объяснения.
+
+Уступать дорогу надо только тому продакту, который может занять то же рабочее
+дерево: `yielded_to_awake_owner` в файле состояния треда уже содержит только
+таких и называет общие деревья. Продакт на чужих репозиториях тебе не мешает —
+останавливаться из-за него нельзя. Список того, что ты не стал запускать, уже
+лежит на диске рядом, пересказывать его в тексте не нужно.
 
 Запуск ребёнка в режиме записи по нашему коду в нашем репозитории разрешения не
 требует: это обычная доставка, и на пробуждении она делается молча. Разрешение
@@ -202,19 +617,34 @@ def main() -> int:
     parser.add_argument("--force", action="store_true", help="разбудить агента даже без событий")
     args = parser.parse_args()
 
-    report = build(args.thread)
-    current = snapshot(report)
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     state_path = STATE_DIR / f"{args.thread}.json"
-    previous = {}
+    stored = {}
     if state_path.is_file():
         try:
-            previous = json.loads(state_path.read_text()).get("snapshot", {})
+            stored = json.loads(state_path.read_text())
         except (json.JSONDecodeError, OSError):
-            previous = {}
+            stored = {}
+    moment = datetime.now(timezone.utc)
+    now = moment.isoformat()
+
+    # Before anything is observed, because a broken contract with the runner is
+    # what makes the observation itself worthless — and it comes first so the
+    # alarm is already out even if `build` then dies on that very name.
+    contract, contract_reminder = runner_contract_alarm(
+        args.thread, stored, moment, announce=not args.dry_run)
+
+    report = build(args.thread)
+    current = snapshot(report)
+    previous = stored.get("snapshot", {})
 
     events = transitions(previous, current) if previous else ["первый запуск треда"]
-    now = datetime.now(timezone.utc).isoformat()
+
+    standing_now, idle_reminder, held_reminder = standing_events(
+        report, current, stored, moment)
+    events += standing_now
+    idle = bool(not report["live_runs"] and startable(report))
+
     # Written whether or not an agent is woken, and before it is: the list of
     # work standing ready has to survive a tick that decides to say nothing, and
     # it must not depend on what the woken agent chose to write down.
@@ -223,44 +653,134 @@ def main() -> int:
         "decided_not_done": report["decided_not_done"],
         "yielded_to_awake_owner": yielded(report),
     }
+    reasons = idle_reasons(report, standing)
+    woke = bool(events) or args.force
+
+    def record(final: dict | None, done: bool) -> dict:
+        """The direction's state file, in the one shape the board reads."""
+        return {
+            "thread": args.thread, "updated_at": now, "snapshot": current,
+            "last_events": events, **standing,
+            "idle_reminder": idle_reminder,
+            "undelivered_reminder": held_reminder,
+            # Written on every tick, healthy or not, so the board can tell «эта
+            # проверка была и прошла» from «этой проверки никто не делал». The
+            # observation the previous outage never produced.
+            "runner_contract": {
+                "at": now,
+                "violations": contract,
+                "src": f"скан RUNNER.<имя> в scripts/*.py против {RUNNER_SCRIPTS}",
+            },
+            "runner_contract_reminder": contract_reminder,
+            # What this check saw and what came of it, at the moment of the
+            # check. When the *next* one falls is deliberately not here: this
+            # process is the service paired with the timer, so the only instant
+            # it could write that field is the one instant systemd is holding
+            # the timer unarmed. `process_map_state.next_check` asks systemd
+            # when the board is built, which is the moment the answer is about.
+            "check": {
+                "at": now,
+                "outcome": (outcome(current, final, woke, report) if done
+                            else "проверка идёт: продакт разбужен, решение ещё не принято"),
+                "outcome_src": (
+                    "события и очередь треда в момент проверки" if not woke else
+                    "живые прогоны треда, наблюдённые до и после пробуждения" if done else
+                    "тик записал начало проверки до запуска продакта"),
+                "woke_owner": woke,
+                # What the check actually put in motion. `None` while the owner
+                # is still deciding: «ещё не запустил» and «не стал запускать»
+                # are two different states, and the board shows the reasons for
+                # standing still only for the second one. Without the split the
+                # panel printed «запустил 3 — задачи 823, 872, 873» and «причина
+                # простоя не наблюдается» on the same column.
+                "started": started_runs(current, final) if done and woke else None,
+                "events": events,
+                "reasons": reasons,
+                "queue": queue(report),
+                "src": f"state/threads/{args.thread}.json — запись тика в момент проверки",
+            },
+        }
+
+    # A divergence with the runner makes the unit fail even when this tick still
+    # managed to observe something: an exit code is the one signal that survives
+    # a wake-up nobody reads, and «наблюдение считает сломанным кодом» is not a
+    # success whatever came out of it.
+    verdict = 1 if contract else 0
 
     if args.dry_run:
-        print(json.dumps({"events": events, "snapshot": current, **standing},
+        print(json.dumps({"events": events, "snapshot": current, **standing,
+                          "check": record(None, not woke)["check"]},
                          ensure_ascii=False, indent=2))
-        return 0
+        return verdict
 
-    state_path.write_text(json.dumps(
-        {"thread": args.thread, "updated_at": now, "snapshot": current,
-         "last_events": events, **standing},
-        ensure_ascii=False, indent=2,
-    ))
+    state_path.write_text(json.dumps(record(None, not woke), ensure_ascii=False, indent=2))
 
-    if not events and not args.force:
-        return 0
+    if not woke:
+        return verdict
 
     # Same trust level as the user's own `claude-full` session: sibling projects
     # under /opt/projects must be reachable or the tick is blind to every thread
     # but this one. IS_SANDBOX=1 is what lets Claude Code skip permissions as
     # root. The prompt goes through stdin because `--add-dir` is variadic and
     # would otherwise swallow a trailing positional prompt.
+    # Read before the owner is woken, not after it has written: a repeat that
+    # was never composed costs nothing, and one that was costs a wake-up.
+    chat = outbound.heard_in_chat(moment)
+    with outbound.Ledger() as ledger:
+        said = outbound.already_said(ledger.thread(args.thread), moment)
+
     environment = {**os.environ, "IS_SANDBOX": "1"}
     result = subprocess.run(
         [str(CLAUDE_PRODUCT_OWNER), "--print", "--add-dir", "/opt/projects",
          "--dangerously-skip-permissions"],
-        input=prompt(report, events), env=environment,
-        capture_output=True, text=True, cwd=HOME, timeout=1800,
+        input=prompt(report, events, reasons, said, chat), env=environment,
+        capture_output=True, text=True, cwd=HOME, timeout=WAKE_TIMEOUT,
     )
     message = (result.stdout or "").strip()
     if result.returncode != 0:
         failure = f"[{args.thread}] пробуждение треда не отработало: {(result.stderr or '')[:300]}"
         notify(failure)
-        send_mail(f"Продакт: пробуждение треда «{report['title']}» не отработало", failure)
+        deliver(args.thread, "wake_failure",
+                f"Продакт: пробуждение треда «{report['title']}» не отработало",
+                failure, report, moment)
         return 1
+
+    # What the wake-up came to, observed rather than believed: the same
+    # projection taken again, and the difference in live runs is the answer.
+    try:
+        after = snapshot(build(args.thread))
+    except Exception:
+        after = None
+    state_path.write_text(json.dumps(record(after, True), ensure_ascii=False, indent=2))
+
+    mail = []
     if message and message != "SILENT":
         notify(f"[{report['title']}]\n{message}")
-        send_mail(f"Продакт: {report['title']}", message)
+        mail.append(deliver(args.thread, "verdict", f"Продакт: {report['title']}",
+                            message, report, moment, chat))
+    elif idle and not (after or {}).get("live"):
+        # The owner was woken because the direction is standing still and said
+        # nothing. Silence is what the user complained about in as many words —
+        # «ни письма не было с вопросами/проблемами, ни информации на доске» — so
+        # the observed reason goes out on the same channel the verdict does.
+        told = (f"[{report['title']}] простоя не сняли: живых прогонов нет, "
+                f"к запуску {startable(report)}.\n\nПочему, по наблюдению:\n"
+                + "\n".join(f"- {item['text']}" for item in reasons))
+        notify(told)
+        mail.append(deliver(
+            args.thread, "idle",
+            f"Продакт: «{report['title']}» ничего не запустил при непустой очереди",
+            told, report, moment))
+    if mail:
+        # Written after the fact and into the same file the board reads, because
+        # «письмо не ушло» is an observation about this check like every other
+        # one here, and the only place it could otherwise be seen is a journal
+        # nobody opens.
+        final = record(after, True)
+        final["mail"] = mail
+        state_path.write_text(json.dumps(final, ensure_ascii=False, indent=2))
     print(message)
-    return 0
+    return verdict
 
 
 if __name__ == "__main__":

@@ -159,6 +159,23 @@
   .colhead { padding: 10px 12px 8px; border-bottom: 1px solid var(--edge); }
   .colhead h2 { margin: 0; font-size: 13.5px; font-weight: 620; }
   .colhead .meta { color: var(--dim); font-size: 11.5px; margin-top: 3px; }
+  /* «Когда проверит в следующий раз, когда проверял в прошлый и чем то кончилось».
+     It sits in the column head rather than in an area because it is a fact about
+     the direction's owner and not about any one task, and a person who opens the
+     board on a column of zeros reads it before they read the zeros. */
+  .check { display: flex; flex-direction: column; gap: 2px;
+           margin-top: 5px; font-size: 11.5px; line-height: 1.35; }
+  .check .next { color: var(--ink); font-weight: 560; }
+  /* Why the next check is unknown, as ordinary readable text. It used to live
+     only in a `title` attribute, which a phone or a tablet never shows at all
+     (finding MEDIUM-1 of review 900): the line promised an explanation and then
+     kept it for pointer users. */
+  .check .nextwhy { color: var(--dim); }
+  .check .last, .check.none { color: var(--dim); }
+  .check .why { color: var(--ours); }
+  /* A direction standing still for no observable reason is the user's own
+     complaint made visible, so it is not another grey line. */
+  .check .why.alarm { color: var(--undelivered); font-weight: 560; }
   /* Neither the column nor an area scrolls inside itself any more. The two
      previous versions of this file both tried to divide a fixed window height
      between nine areas — first by letting each area scroll, then by adding a
@@ -176,8 +193,18 @@
   .area.void .rule { display: none; }
   .area .plates { display: flex; flex-direction: column; }
   .area > h3 { margin: 0 0 6px; font-size: 11.5px; letter-spacing: .07em; text-transform: uppercase;
-               color: var(--dim); cursor: pointer; display: flex; gap: 7px; align-items: baseline;
+               color: var(--dim); display: flex; gap: 7px; align-items: baseline;
                flex-wrap: wrap; }
+  /* The heading folds the area, so the thing that folds it is a button and says
+     whether the area is open. It was an `h3` with a hand cursor: thirty-six of
+     them, none reachable by Tab, none telling a screen reader what pressing
+     would do. The button keeps the heading's own look — it is still a heading,
+     not a widget dropped into one. */
+  .area > h3 > .areahead { font: inherit; color: inherit; letter-spacing: inherit;
+               text-transform: inherit; background: none; border: 0; padding: 0;
+               margin: 0; border-radius: 4px; cursor: pointer; text-align: left; width: 100%;
+               display: flex; gap: 7px; align-items: baseline; flex-wrap: wrap; }
+  .area > h3 > .areahead:hover { background: none; color: var(--ink); }
   .area > h3 .n { color: var(--ink); font-size: 12.5px; font-weight: 650; }
   .area > h3 .old { margin-left: auto; font-weight: 400; text-transform: none; letter-spacing: 0; }
   .area.a-waiting_human > h3 { color: var(--stale); }
@@ -227,9 +254,46 @@
   .plate.p-ready_to_start { border-left-color: var(--pick); }
   .plate.p-decision_unmet { border-left-color: var(--undelivered); }
   /* A plate opens its card. It is a control, so it says so before it is clicked
-     rather than after — a board nobody knows is clickable has no drill-down. */
-  .plate { cursor: pointer; }
-  .plate:hover { border-color: #9fb0c6; background: var(--plate-hover); }
+     rather than after — a board nobody knows is clickable has no drill-down.
+     The cursor is only half of saying so: it was the *whole* signal, so on a
+     phone there was none, and forty presses of Tab over the whole board reached
+     two buttons and no plate at all. What makes it a control is the role, the
+     focus and the name; the cursor stays as the pointing device's share of it. */
+  .plate[role="button"] { cursor: pointer; }
+  .plate[role="button"]:hover { border-color: #9fb0c6; background: var(--plate-hover); }
+  /* A plate that opens nothing looks like nothing. Thirty-three product
+     questions and promises carried the hand cursor and the hover of a control
+     and did nothing when pressed, which is the board teaching a reader that
+     pressing means nothing. */
+  .plate.q { cursor: default; }
+  :focus-visible { outline: 2px solid #1e6fd9; outline-offset: 2px; }
+  body.mapmode :focus-visible { outline-color: #7dd3fc; }
+
+  /* Where an observation is named, and how it is opened. It used to live in the
+     browser's own `title`: 223 elements carried one, 53 of them longer than 80
+     characters and the longest 178, and on a phone that channel does not exist
+     at all. So the plate carries one real button instead — reachable by mouse,
+     by Tab and by touch alike — and it opens a block that shows every source of
+     that plate whole, next to the claim it stands behind. */
+  .srcbtn { font: inherit; font-size: 11.5px; line-height: 1.3; margin-top: 6px;
+            padding: 1px 7px; border: 1px dashed var(--edge); border-radius: 5px;
+            background: transparent; color: var(--dim); cursor: pointer; }
+  .srcbtn::before { content: "ⓘ "; }
+  .srcbtn:hover { border-style: solid; color: var(--ink); }
+  .srcbtn[aria-expanded="true"] { border-style: solid; color: var(--ink); }
+  .srcbox { display: none; margin-top: 5px; padding: 6px 8px; border-radius: 6px;
+            background: var(--surface); border: 1px solid var(--edge);
+            font-size: 11.5px; line-height: 1.4; color: var(--dim);
+            overflow-wrap: anywhere; }
+  .srcbox.open { display: block; }
+  .srcbox div { margin-bottom: 3px; }
+  .srcbox div:last-child { margin-bottom: 0; }
+  .srcbox b { color: var(--ink); font-weight: 600; }
+  /* In the strip the marker is the glyph alone, and the source block it opens
+     takes the whole width of the item rather than sitting on its line. */
+  #strip .srcbtn { margin: 0 0 0 6px; padding: 0 4px; }
+  #strip .srcbtn .w { display: none; }
+  #strip .srcbox { flex: 1 1 100%; margin-top: 4px; }
   .plate .head { display: flex; gap: 7px; align-items: baseline; flex-wrap: wrap; }
   .plate .num { color: var(--dim); font-variant-numeric: tabular-nums; font-size: 12.5px; flex: none; }
   .plate .name { font-size: 13.5px; font-weight: 600; line-height: 1.35; }
@@ -271,7 +335,11 @@
   .chan { border-top: 1px solid var(--edge); padding: 9px 12px 11px; font-size: 12px;
           color: var(--dim); }
   .chan.shut .body { display: none; }
-  .chan .sum { cursor: pointer; }
+  /* Folds the block, so it is a button and says whether the block is open —
+     the same rule as the area headings above it. */
+  .chan .sum { cursor: pointer; font: inherit; color: inherit; background: none;
+               border: 0; padding: 0; text-align: left; width: 100%; border-radius: 4px; }
+  .chan .sum:hover { background: none; color: var(--ink); }
   .chan .sum::before { content: "▸ "; color: var(--idle); }
   .chan:not(.shut) .sum::before { content: "▾ "; }
   .chan div { margin-top: 3px; }
@@ -351,6 +419,16 @@
   #cardbody .files .m { color: var(--dim); flex: none; font-variant-numeric: tabular-nums; }
   #cardbody .src { color: var(--idle); font-size: 11.5px; margin-top: 4px; }
   #cardbody .warn { color: var(--stale); }
+  /* The user's own words about the task, which the card never showed. It reads
+     as prose, not as a field: it is the one thing on the card written by a
+     person rather than observed from a file. */
+  #cardbody .summary { font-size: 13.5px; line-height: 1.5; white-space: pre-wrap;
+                       overflow-wrap: anywhere; }
+  #cardbody .tech { margin-top: 18px; border-top: 1px solid var(--edge); padding-top: 10px; }
+  #cardbody .tech > summary { cursor: pointer; font-size: 11px; letter-spacing: .07em;
+                              text-transform: uppercase; color: var(--dim); font-weight: 600; }
+  #cardbody .tech .kv { margin-top: 8px; }
+  #cardbody .tech .files { margin-top: 8px; }
   @media (max-width: 760px) { #cardbox { border-left: none; border-right: none; border-radius: 0; } }
 
   /* ---------- the map screen keeps its own dark chrome ----------
@@ -374,11 +452,19 @@
   body.mapmode button.primary { background: #1e4f38; border-color: #2f7a55; color: var(--ink); }
   body.mapmode .tag { background: transparent; }
 
-  #tip { position: fixed; z-index: 9; background: rgba(9,14,24,.96); border: 1px solid var(--edge);
+  /* The tooltip of the map states its own colours and inherits none. It used to
+     take `--edge` and the page's `--ink` while keeping a dark background of its
+     own, so on the light board it drew ink #16202e over #12171f — 1,09:1 at
+     12,5 px, measured, which is dark text on dark. A tooltip is one small box
+     that has to be readable wherever it is drawn, so it does not participate in
+     the theme at all: opaque background, its own two text colours, its own
+     border. Measured after the change on the live board: 15,3:1 for the body and
+     9,6:1 for the secondary lines. */
+  #tip { position: fixed; z-index: 9; background: #0e1524; border: 1px solid #33415c;
          border-radius: 10px; padding: 9px 11px; max-width: 300px; font-size: 12.5px;
-         display: none; pointer-events: none; }
-  #tip b { display: block; margin-bottom: 4px; }
-  #tip .st { color: var(--dim); font-size: 11.5px; }
+         color: #f2f6fd; display: none; pointer-events: none; }
+  #tip b { display: block; margin-bottom: 4px; color: #f2f6fd; }
+  #tip .st { color: #b9c6dd; font-size: 11.5px; }
 
   /* On a phone the two panels would bury the map, so they collapse to two taps:
      the counts stay visible, the lines open on demand. */
@@ -952,7 +1038,23 @@ function fmt(realMs) {
   return d.toISOString().slice(5, 16).replace("T", " ");
 }
 
+/* Whether the map screen is the one being looked at. `showBoard()` is the only
+   writer, the same way it is the only writer of `body.mapmode`: the tooltip, the
+   pointer handler and the frame loop all ask this instead of guessing from the
+   canvas geometry. A hidden canvas keeps its last screen rectangle, so «did the
+   pointer land on the canvas» answered yes over a board the canvas was not even
+   drawing — twelve leak points at 1440×900 and twelve at 390×844, measured. */
+let mapOpen = false;
+
 let hover = null;
+
+/* One place that puts the tooltip away, so «hover is stale» and «the box is
+   still on screen» cannot drift apart. */
+function hideTip() {
+  hover = null;
+  el("tip").style.display = "none";
+}
+
 function frame(ts) {
   if (!lastFrame) lastFrame = ts;
   const dt = ts - lastFrame; lastFrame = ts;
@@ -965,7 +1067,7 @@ function frame(ts) {
   const st = draw(clock);
   paintNow(st);
   el("clock").textContent = `${fmt(st.at)} · ${st.index}/${REAL.length}`;
-  if (hover) tipFor(hover);
+  if (mapOpen && hover) tipFor(hover);
   requestAnimationFrame(frame);
 }
 
@@ -988,7 +1090,13 @@ window.addEventListener("keydown", e => {
 let drag = null;
 cv.addEventListener("pointerdown", e => { drag = { x: e.clientX, y: e.clientY, vx: view.x, vy: view.y }; cv.classList.add("dragging"); });
 window.addEventListener("pointerup", () => { drag = null; cv.classList.remove("dragging"); });
+/* The listener stays on the window on purpose — a drag whose pointer leaves the
+   canvas must not be dropped mid-gesture — and asks which screen is open instead
+   of asking where the pointer is. Moving the listener to the canvas would not
+   have fixed the leak anyway: an event dispatched on the board bubbles to the
+   window all the same, which is how the leak was reproduced. */
 window.addEventListener("pointermove", e => {
+  if (!mapOpen) { if (hover) hideTip(); return; }
   if (drag) { view.x = drag.vx + (e.clientX - drag.x); view.y = drag.vy + (e.clientY - drag.y); return; }
   const r = cv.getBoundingClientRect();
   hover = pick(e.clientX - r.left, e.clientY - r.top, e.clientX, e.clientY);
@@ -1065,6 +1173,78 @@ function ago(seconds) {
 const ROLE_RU = { analysis: "анализ", development: "разработка", tests: "тесты",
                   review: "ревью", commit: "коммит", report: "отчёт" };
 
+/* ---------- Russian for what a person actually reads ----------
+   The board is read by one person, in Russian, and it was showing them
+   `in_progress`, `danger-full-access`, `decision=deliver` and whole English
+   sentences written by a runner. Those are field values of our own contour, so
+   they are translated where they are shown rather than left for the reader to
+   decode.
+
+   Two kinds, kept apart on purpose. An enumeration has a closed set of values
+   and every one of them is named here. Free text does not: a child writes its
+   own progress line, and translating it by guesswork would be inventing a fact.
+   So free text is passed through a table of the machine tokens and the fixed
+   runner phrases this contour writes itself, and anything else reaches the
+   screen as it was written — which is honest, and points at the writer of the
+   line rather than hiding it. */
+const STATUS_RU = { planned: "запланирована", in_progress: "в работе",
+                    blocked: "заблокирована", completed: "завершена",
+                    cancelled: "отменена", done: "завершена" };
+const RUN_STATE_RU = { running: "идёт", completed: "завершён", blocked: "остановлен на блокировке",
+                       failed: "провалился", stopped: "остановлен", killed: "убит надзором" };
+const WORKFLOW_RU = { standard: "обычный прогон одним ребёнком",
+                      "dev-pipeline": "конвейер разработки с ревью" };
+const SANDBOX_RU = { "danger-full-access": "полный доступ к диску",
+                     "workspace-write": "запись в рабочем каталоге",
+                     "read-only": "только чтение" };
+const VERDICT_RU = { approved: "принято", rework: "на доработку", changes: "нужны правки" };
+const REFUSAL_RU = { premature_completion: "преждевременное завершение" };
+
+/* Fixed phrases this contour writes into `current_step`, longest first so a
+   prefix never eats a longer match. */
+const PHRASE_RU = [
+  ["Standard child completed and durable gates passed",
+   "обычный ребёнок завершился, долговечные гейты пройдены"],
+  ["Dev-pipeline owner attempt completed", "попытка владельца конвейера завершена"],
+  ["Rejected premature completion:", "отказано в преждевременном завершении:"],
+  ["Starting child agent via", "запускается ребёнок через"],
+  ["Review complete with rework", "ревью закончено с вердиктом «на доработку»"],
+  ["Cross-review complete", "кросс-ревью закончено"],
+  ["Review complete", "ревью закончено"],
+];
+
+/* Machine tokens the contour writes into otherwise human text. */
+const TOKEN_RU = [
+  [/\bdecision=deliver\b/g, "решение продакта: доставить"],
+  [/\bdecision=([a-z_]+)/g, "решение продакта: $1"],
+  [/\bstarts_after=(\d+)/g, "начинать после задачи $1"],
+  [/\bworktree=(\S+)/g, "занимает рабочее дерево $1"],
+  /* The review protocol writes exactly one line, `Verdict: approved|rework`, and
+     children quote it inside otherwise free prose. It is a keyword of ours, not
+     someone's wording, so it is translated wherever it stands. */
+  [/\bVerdict:?\s*rework\b/gi, "вердикт: на доработку"],
+  [/\bVerdict:?\s*approved\b/gi, "вердикт: принято"],
+  [/\bpremature_completion\b/g, "преждевременное завершение"],
+  [/\bin_progress\b/g, "в работе"],
+];
+
+/* One value of a closed set, in Russian; the raw value when the set has grown
+   and nobody taught this table about it — a name we do not know is still a name,
+   and hiding it would be worse than showing it in English. */
+function ru(table, value) {
+  if (value === null || value === undefined || value === "") return value;
+  return table[value] || String(value);
+}
+
+/* Free text on its way to a person. */
+function human(text) {
+  if (!text) return text;
+  let out = String(text);
+  for (const [from, to] of PHRASE_RU) out = out.split(from).join(to);
+  for (const [pattern, to] of TOKEN_RU) out = out.replace(pattern, to);
+  return out;
+}
+
 function tag(text, cls) {
   const s = document.createElement("span");
   s.className = "tag" + (cls ? " " + cls : "");
@@ -1072,12 +1252,100 @@ function tag(text, cls) {
   return s;
 }
 
+/* ---------- where a claim came from ----------
+   Every «наблюдено: …» on the board used to be a browser `title`, and a `title`
+   is three different things depending on the device: a tooltip after a pause on
+   a desktop, nothing at all on a phone, and nothing at all for a keyboard. 223
+   of them were on the live board, 53 longer than 80 characters.
+
+   One button per plate, not one per label: a plate has four or five sources and
+   five buttons in a row would be five tab stops saying the same word. The button
+   opens a block that names each claim next to the observation behind it, in
+   full — it is the same text, shown rather than hovered. */
+let srcSeq = 0;
+
+function sourceNote(node, pairs) {
+  const items = pairs.filter(pair => pair[1]);
+  if (!items.length) return;
+  const id = "src" + (++srcSeq);
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "srcbtn";
+  /* The word is what makes the marker readable, and the strip is the one place
+     that cannot afford it: the same button with its word took the strip from
+     315 px to 419 px of a 900-tall window — measured — and the strip's whole
+     budget exists to leave the columns on the first screen. So the word is
+     hidden there by CSS and the button keeps its name for anything that is not
+     looking at the pixels. */
+  const word = document.createElement("span");
+  word.className = "w";
+  word.textContent = "источник";
+  btn.appendChild(word);
+  btn.setAttribute("aria-label", "Показать, чем это наблюдено");
+  btn.setAttribute("aria-expanded", "false");
+  btn.setAttribute("aria-controls", id);
+  const box = document.createElement("div");
+  box.className = "srcbox";
+  box.id = id;
+  for (const [label, text] of items) {
+    const line = document.createElement("div");
+    const key = document.createElement("b");
+    key.textContent = label + ": ";
+    line.appendChild(key);
+    line.appendChild(document.createTextNode(text));
+    box.appendChild(line);
+  }
+  /* The plate around it is a control too, so the press must not reach it: the
+     source of a task and the details of a task are two different answers. */
+  const stop = event => event.stopPropagation();
+  btn.addEventListener("click", event => {
+    stop(event);
+    const open = box.classList.toggle("open");
+    btn.setAttribute("aria-expanded", open ? "true" : "false");
+  });
+  btn.addEventListener("keydown", stop);
+  node.appendChild(btn);
+  node.appendChild(box);
+}
+
+/* A plate that opens its card, said in the three ways a control is said: what it
+   is, that it can be reached, and what pressing it will do. */
+function asButton(node, label, act) {
+  node.setAttribute("role", "button");
+  node.tabIndex = 0;
+  node.setAttribute("aria-label", label);
+  node.addEventListener("click", act);
+  node.addEventListener("keydown", event => {
+    if (event.key === "Enter" || event.key === " " || event.key === "Spacebar") {
+      event.preventDefault();
+      act();
+    }
+  });
+}
+
+/* A folding heading: a real button that says whether what it folds is open. */
+function asFolder(btn, shut, act) {
+  btn.type = "button";
+  btn.setAttribute("aria-expanded", shut ? "false" : "true");
+  btn.addEventListener("click", () => {
+    const nowShut = act();
+    btn.setAttribute("aria-expanded", nowShut ? "false" : "true");
+  });
+}
+
 function plateNode(p, areaKey) {
   const node = document.createElement("div");
   node.className = "plate p-" + areaKey;
   /* The drill-down the user asked for: the card opens over the board and the
-     board stays where it was, so nothing reloads and nothing is navigated to. */
-  node.addEventListener("click", () => openCard(p));
+     board stays where it was, so nothing reloads and nothing is navigated to.
+     It is announced as what it is — a control with a name — because the hand
+     cursor that used to be the whole announcement says nothing to a phone and
+     nothing to a keyboard. */
+  asButton(node, "Открыть детали задачи " + (p.id === null ? "" : "#" + p.id + ": ") + p.title,
+           () => openCard(p));
+  /* Every «наблюдено» of this plate, gathered as it is built and shown by one
+     button at the bottom instead of by five invisible tooltips. */
+  const sources = [];
 
   const head = document.createElement("div");
   head.className = "head";
@@ -1090,15 +1358,15 @@ function plateNode(p, areaKey) {
 
   const row = document.createElement("div");
   row.className = "row";
-  row.appendChild(tag(p.status || "без статуса"));
+  row.appendChild(tag(ru(STATUS_RU, p.status) || "без статуса"));
   /* Who and in what role — only when a file actually said so. An empty cell is
      the honest answer and beats a confident untruth in a caption. */
   const who = p.actor ? tag(p.actor, "who") : tag("исполнитель неизвестен");
-  if (p.actor_src) who.title = "наблюдено: " + p.actor_src;
+  if (p.actor_src) sources.push(["Исполнитель", p.actor_src]);
   row.appendChild(who);
   if (p.role) {
     const role = tag(ROLE_RU[p.role] || p.role);
-    if (p.role_src) role.title = "наблюдено: " + p.role_src;
+    if (p.role_src) sources.push(["Станция", p.role_src]);
     row.appendChild(role);
   }
   /* A live process and a label claiming one are two facts, kept apart on the
@@ -1113,14 +1381,14 @@ function plateNode(p, areaKey) {
   if (age) {
     const a = tag(ageCaption(age), "age");
     a.dataset.since = p.since || "";
-    if (p.since_src) a.title = "наблюдено: " + p.since_src;
+    if (p.since_src) sources.push(["Без изменений", p.since_src]);
     row.appendChild(a);
   }
   node.appendChild(row);
 
   if (p.happening) {
     const doing = document.createElement("div");
-    doing.className = "doing"; doing.textContent = p.happening;
+    doing.className = "doing"; doing.textContent = human(p.happening);
     node.appendChild(doing);
   }
   /* Why it stands here. `happening` comes from a live child's progress line and
@@ -1133,8 +1401,10 @@ function plateNode(p, areaKey) {
     /* A queue and a jam are two different sentences. «За чем стоит» is what the
        user asked the queue column for by name, and calling it «почему» would
        read as something being wrong when nothing is. */
-    why.textContent = (p.blocked_by && p.why === p.blocked_by ? "стоит за: " : "почему: ") + p.why;
-    if (p.why_src) why.title = "наблюдено: " + p.why_src;
+    why.textContent = (p.blocked_by && p.why === p.blocked_by ? "стоит за: " : "почему: ")
+      + human(p.why);
+    if (p.why_src) sources.push([p.blocked_by && p.why === p.blocked_by ? "Стоит за" : "Почему",
+                                 p.why_src]);
     node.appendChild(why);
   }
   /* Every open question of the task, whole, and each one saying whose it is and
@@ -1155,10 +1425,11 @@ function plateNode(p, areaKey) {
     const doc = tag("документ человеку: " + hand.name +
       (hand.bytes ? " · " + bytes(hand.bytes) : "") +
       (hand.count > 1 ? " (и ещё " + (hand.count - 1) + ")" : ""), "doc");
-    doc.title = "наблюдено: " + hand.src + "; " + hand.delivered_src;
+    sources.push(["Документ человеку", hand.src + "; " + hand.delivered_src]);
     row2.appendChild(doc);
     node.appendChild(row2);
   }
+  sourceNote(node, sources);
   return node;
 }
 
@@ -1198,23 +1469,30 @@ let openTask = null;
 function row(dl, key, value, src) {
   if (value === null || value === undefined || value === "") return;
   const dt = document.createElement("dt"); dt.textContent = key;
-  const dd = document.createElement("dd"); dd.textContent = value;
-  if (src) dd.title = "наблюдено: " + src;
+  const dd = document.createElement("dd");
+  dd.appendChild(document.createTextNode(value));
+  /* The card has room, so the observation is printed under the value instead of
+     being hidden in a `title` nobody on a phone can open. */
+  if (src) {
+    const note = document.createElement("div");
+    note.className = "src"; note.textContent = "наблюдено: " + src;
+    dd.appendChild(note);
+  }
   dl.appendChild(dt); dl.appendChild(dd);
 }
 
+/* A section that has nothing to say is not drawn. It used to print «нечего
+   показать: на диске об этом ничего нет», and on the live board four of the
+   nine sections said exactly that — with the first of them standing fourth,
+   above everything a reader had opened the card for. */
 function section(title, build) {
   const s = document.createElement("section");
   const h = document.createElement("h4"); h.textContent = title;
   s.appendChild(h);
-  const filled = build(s);
-  if (!filled) {
-    const none = document.createElement("div");
-    none.className = "none"; none.textContent = "нечего показать: на диске об этом ничего нет";
-    s.appendChild(none);
-  }
-  return s;
+  return build(s) ? s : null;
 }
+
+function add(body, node) { if (node) body.appendChild(node); }
 
 function bytes(n) {
   if (n === null || n === undefined) return "";
@@ -1229,89 +1507,128 @@ function stamp(iso) {
   return isNaN(t) ? iso : new Date(t).toLocaleString("ru-RU");
 }
 
+/* ---------- the order a person reads a card in ----------
+   Top to bottom: what the task is in the user's own words, what is happening,
+   why it stands where it stands, what happens next, what came out of it — and
+   the machinery of the run last, folded. The previous order was the order the
+   fields were collected in: «Прогон» — the runner, the workflow and the sandbox —
+   stood second, above the review, the gates and the delivery, and the user's own
+   description of the task was not on the card at all. */
 function cardBody(p) {
   const d = p.detail || {};
   const body = document.createElement("div");
 
-  body.appendChild(section("Где стоит и почему", s => {
-    const dl = document.createElement("dl"); dl.className = "kv";
-    row(dl, "Статус", p.status);
-    row(dl, "Исполнитель", p.actor, p.actor_src);
-    row(dl, "Станция", p.role ? (ROLE_RU[p.role] || p.role) : null, p.role_src);
-    row(dl, "Попытка", p.attempt > 1 ? p.attempt : null);
-    const age = ago(ageOf(p));
-    row(dl, "Без изменений", age, p.since_src);
-    row(dl, p.blocked_by && p.why === p.blocked_by ? "Стоит за" : "Почему", p.why, p.why_src);
-    s.appendChild(dl);
-    return dl.children.length > 0;
-  }));
-
-  body.appendChild(section("Прогон", s => {
-    const dl = document.createElement("dl"); dl.className = "kv";
-    row(dl, "Раннер", d.runner);
-    row(dl, "Рабочий процесс", d.workflow);
-    row(dl, "Песочница", d.sandbox);
-    row(dl, "Репозиторий предмета", d.repo, "поле --repo в .runner/runner.json");
-    /* A live process and a label claiming one are two facts and stay two lines:
-       the contour has been burned by reading one as the other. */
-    row(dl, "Ярлык прогона", d.state);
-    row(dl, "Процесс", p.alive ? "жив" : (p.stale_label ? "мёртв, а ярлык говорит running" : "не запущен"),
-        p.alive ? "pid и стартовый тик ядра совпали с .runner/runner.json" : null);
-    row(dl, "Код возврата", d.exit_code === null || d.exit_code === undefined ? null : String(d.exit_code));
-    row(dl, "Остановлен надзором", d.stop_reason, "watcher_stop_reason в .runner/runner.json");
-    row(dl, "Шаг", d.current_step);
-    if (d.refusal) {
-      row(dl, "Отказ в завершении", d.refusal, "completion_refusal в status.json");
-      row(dl, "Что именно отказано", d.refusal_summary, "completion_refusal в status.json");
-    }
-    s.appendChild(dl);
-    return dl.children.length > 0;
-  }));
-
-  body.appendChild(section("Последняя запись прогресса", s => {
-    const pr = d.progress;
-    if (!pr) return false;
-    const dl = document.createElement("dl"); dl.className = "kv";
-    row(dl, "Что делает", pr.activity);
-    if (pr.total) row(dl, "Сделано", pr.done + " из " + pr.total);
-    /* When it was written is the mtime of the file, never the timestamp the
-       child put inside it: children routinely write local time into a UTC field
-       and the contour has already paid for believing one. */
-    row(dl, "Записано", pr.minutes_ago === null || pr.minutes_ago === undefined
-        ? null : pr.minutes_ago + " мин назад", "mtime файла progress.json");
-    s.appendChild(dl);
-    return dl.children.length > 0;
-  }));
-
-  body.appendChild(section("Вердикт ревью", s => {
-    const r = d.review;
-    if (!r) return false;
-    const dl = document.createElement("dl"); dl.className = "kv";
-    row(dl, "Вердикт", r.verdict, r.src);
-    const by = Object.entries(r.by_severity || {}).map(([k, v]) => k + " " + v).join(", ");
-    row(dl, "Находок", r.findings + (by ? " (" + by + ")" : ""), r.src);
-    s.appendChild(dl);
-    return dl.children.length > 0;
-  }));
-
-  body.appendChild(section("Гейты verification.md", s => {
-    const gates = d.gates || [];
-    if (!gates.length) return false;
-    for (const g of gates) {
-      const line = document.createElement("div");
-      line.className = "gate";
-      const r = document.createElement("span");
-      r.className = "r " + (g.result === "OK" ? "ok" : "bad");
-      r.textContent = g.result;
-      const n = document.createElement("span"); n.textContent = g.gate;
-      line.appendChild(r); line.appendChild(n);
-      s.appendChild(line);
-    }
+  /* What the person asked for, in their words. It comes from `## Summary` of
+     `task.md` — the one place on disk that says what the task is about rather
+     than what state it is in. */
+  add(body, section("Своими словами", s => {
+    if (!d.summary) return false;
+    const text = document.createElement("div");
+    text.className = "summary"; text.textContent = d.summary;
+    s.appendChild(text);
+    const src = document.createElement("div");
+    src.className = "src"; src.textContent = "наблюдено: раздел «Summary» в task.md";
+    s.appendChild(src);
     return true;
   }));
 
-  body.appendChild(section("Доставлено человеку", s => {
+  add(body, section("Что происходит", s => {
     const dl = document.createElement("dl"); dl.className = "kv";
+    row(dl, "Статус", ru(STATUS_RU, p.status));
+    row(dl, "Исполнитель", p.actor, p.actor_src);
+    row(dl, "Станция", p.role ? (ROLE_RU[p.role] || p.role) : null, p.role_src);
+    /* The child's own line about what it is doing, and when it wrote it. The
+       time is the mtime of the file, never the timestamp the child put inside
+       it: children routinely write local time into a UTC field and the contour
+       has already paid for believing one. */
+    const pr = d.progress || {};
+    row(dl, "Сейчас делает", human(pr.activity || p.happening),
+        pr.activity ? "строка activity в progress.json" : null);
+    if (pr.total) row(dl, "Сделано", pr.done + " из " + pr.total, "progress.json");
+    row(dl, "Записано", pr.minutes_ago === null || pr.minutes_ago === undefined
+        ? null : pr.minutes_ago + " мин назад", "mtime файла progress.json");
+    row(dl, "Шаг", human(d.current_step), "поле current_step в status.json");
+    /* A live process and a label claiming one are two facts and stay two lines:
+       the contour has been burned by reading one as the other. */
+    row(dl, "Процесс", p.alive ? "жив"
+        : (p.stale_label ? "мёртв, хотя ярлык говорит «идёт»" : "не запущен"),
+        p.alive ? "pid и стартовый тик ядра совпали с .runner/runner.json" : null);
+    row(dl, "Попытка", p.attempt > 1 ? p.attempt : null);
+    const age = ago(ageOf(p));
+    row(dl, "Без изменений", age, p.since_src);
+    s.appendChild(dl);
+    return dl.children.length > 0;
+  }));
+
+  add(body, section("Почему так", s => {
+    const dl = document.createElement("dl"); dl.className = "kv";
+    row(dl, p.blocked_by && p.why === p.blocked_by ? "Стоит за" : "Почему",
+        human(p.why), p.why_src);
+    if (d.refusal) {
+      row(dl, "Отказ в завершении", ru(REFUSAL_RU, d.refusal), "completion_refusal в status.json");
+      row(dl, "Что именно отказано", human(d.refusal_summary), "completion_refusal в status.json");
+    }
+    row(dl, "Остановлен надзором", human(d.stop_reason), "watcher_stop_reason в .runner/runner.json");
+    s.appendChild(dl);
+    /* The whole point of the observation: a directory that kept moving after
+       its owner refused its closing step is work that may already be finished
+       and that nobody has been back to. It is said in words, not in a flag. */
+    if ((p.flags || []).includes("work_outside_owner")) {
+      const warn = document.createElement("div");
+      warn.className = "src warn";
+      warn.textContent = "Владелец кончился раньше своего закрывающего шага, а файлы каталога "
+        + "двигались после этого: работа могла доработать снаружи — стоит посмотреть артефакты.";
+      s.appendChild(warn);
+      return true;
+    }
+    return dl.children.length > 0;
+  }));
+
+  add(body, section("Что дальше", s => {
+    let filled = false;
+    const r = d.review;
+    /* A verdict that asks for more work is «что дальше»; a verdict that accepted
+       the work is «результат», and it stands in the next section. */
+    if (r && r.verdict && r.verdict !== "approved") {
+      const dl = document.createElement("dl"); dl.className = "kv";
+      row(dl, "Ревью", ru(VERDICT_RU, r.verdict), r.src);
+      const by = Object.entries(r.by_severity || {}).map(([k, v]) => k + " " + v).join(", ");
+      row(dl, "Находок", r.findings + (by ? " (" + by + ")" : ""), r.src);
+      s.appendChild(dl);
+      filled = true;
+    }
+    for (const q of p.questions) {
+      const line = document.createElement("div");
+      line.className = "gate";
+      const mark = document.createElement("span"); mark.className = "r";
+      mark.textContent = q.owner === "user" ? "?" : "·";
+      const n = document.createElement("span");
+      n.textContent = q.text + (q.owner === "user" ? " — ждёт пользователя" : " — наш вопрос");
+      line.appendChild(mark); line.appendChild(n);
+      s.appendChild(line);
+      const bits = [];
+      if (q.asked_src) bits.push(q.asked_src);
+      if (q.answer_src) bits.push("ответ: " + q.answer_src);
+      if (q.note) bits.push(q.note);
+      if (bits.length) {
+        const src = document.createElement("div");
+        src.className = "src"; src.textContent = "наблюдено: " + bits.join(" · ");
+        s.appendChild(src);
+      }
+      filled = true;
+    }
+    return filled;
+  }));
+
+  add(body, section("Результат и доставка", s => {
+    let filled = false;
+    const dl = document.createElement("dl"); dl.className = "kv";
+    const r = d.review;
+    if (r && r.verdict === "approved") {
+      row(dl, "Ревью", ru(VERDICT_RU, r.verdict), r.src);
+      const by = Object.entries(r.by_severity || {}).map(([k, v]) => k + " " + v).join(", ");
+      row(dl, "Находок", r.findings + (by ? " (" + by + ")" : ""), r.src);
+    }
     /* The document first, the receipts after it. The receipts were all anyone
        looked at, and they answer a different question: 783 had two of them and
        its report had still not left the server. */
@@ -1326,63 +1643,57 @@ function cardBody(p) {
       row(dl, "Последнее", stamp(d.delivery.last_at), d.delivery.src);
       row(dl, "По событию", d.delivery.last_kind, d.delivery.src);
     }
-    s.appendChild(dl);
+    if (dl.children.length) { s.appendChild(dl); filled = true; }
     if (hand && !hand.delivered) {
       const warn = document.createElement("div");
       warn.className = "src warn";
       warn.textContent = "Работа закончена, документ лежит в каталоге задачи, а того, "
         + "что его кто-то получил, на диске нет. Так пролежал час отчёт задачи 783.";
       s.appendChild(warn);
+      filled = true;
     }
-    return dl.children.length > 0;
-  }));
-
-  body.appendChild(section("Движение артефактов", s => {
-    if (!d.moved) return false;
-    const dl = document.createElement("dl"); dl.className = "kv";
-    row(dl, "Последнее", stamp(d.moved), d.moved_src);
-    row(dl, "Что двигалось", (d.moved_src || "").replace(/^[^:]*:\s*/, ""), d.moved_src);
-    s.appendChild(dl);
-    /* The whole point of the observation: a directory that kept moving after
-       its owner refused its closing step is work that may already be finished
-       and that nobody has been back to. It is said in words, not in a flag. */
-    if ((p.flags || []).includes("work_outside_owner")) {
-      const warn = document.createElement("div");
-      warn.className = "src warn";
-      warn.textContent = "Владелец кончился раньше своего закрывающего шага, а файлы каталога "
-        + "двигались после этого: работа могла доработать снаружи — стоит посмотреть артефакты.";
-      s.appendChild(warn);
-    }
-    return true;
-  }));
-
-  body.appendChild(section("Вопросы задачи", s => {
-    if (!p.questions.length) return false;
-    for (const q of p.questions) {
-      const line = document.createElement("div");
-      line.className = "gate";
-      const r = document.createElement("span"); r.className = "r";
-      r.textContent = q.owner === "user" ? "?" : "·";
-      const n = document.createElement("span");
-      n.textContent = q.text + (q.owner === "user" ? " — ждёт пользователя" : " — наш вопрос");
-      line.appendChild(r); line.appendChild(n);
-      s.appendChild(line);
-      const bits = [];
-      if (q.asked_src) bits.push(q.asked_src);
-      if (q.answer_src) bits.push("ответ: " + q.answer_src);
-      if (q.note) bits.push(q.note);
-      if (bits.length) {
-        const src = document.createElement("div");
-        src.className = "src"; src.textContent = bits.join(" · ");
-        s.appendChild(src);
+    const gates = d.gates || [];
+    if (gates.length) {
+      const head = document.createElement("div");
+      head.className = "src"; head.textContent = "наблюдено: гейты verification.md";
+      for (const g of gates) {
+        const line = document.createElement("div");
+        line.className = "gate";
+        const mark = document.createElement("span");
+        mark.className = "r " + (g.result === "OK" ? "ok" : "bad");
+        mark.textContent = g.result;
+        const n = document.createElement("span"); n.textContent = g.gate;
+        line.appendChild(mark); line.appendChild(n);
+        s.appendChild(line);
       }
+      s.appendChild(head);
+      filled = true;
     }
-    return true;
+    return filled;
   }));
 
-  body.appendChild(section("Файлы каталога задачи", s => {
-    const files = d.files || [];
-    if (!files.length) return false;
+  /* The machinery of the run. It is reference — which runner, which sandbox,
+     which files moved — so it is last and folded, and `<details>` is used
+     because the browser already gives it a focus, a name and a state. */
+  const tech = document.createElement("details");
+  tech.className = "tech";
+  const sum = document.createElement("summary");
+  sum.textContent = "Технические детали прогона";
+  tech.appendChild(sum);
+  const dl = document.createElement("dl"); dl.className = "kv";
+  row(dl, "Раннер", d.runner, "поле runner в .runner/runner.json");
+  row(dl, "Рабочий процесс", ru(WORKFLOW_RU, d.workflow), "поле workflow в .runner/runner.json");
+  row(dl, "Песочница", ru(SANDBOX_RU, d.sandbox), "поле sandbox в .runner/runner.json");
+  row(dl, "Репозиторий предмета", d.repo, "поле --repo в .runner/runner.json");
+  row(dl, "Ярлык прогона", ru(RUN_STATE_RU, d.state), "поле state в status.json");
+  row(dl, "Код возврата", d.exit_code === null || d.exit_code === undefined
+      ? null : String(d.exit_code), ".runner/runner.json");
+  if (d.moved) {
+    row(dl, "Последнее движение артефактов", stamp(d.moved), d.moved_src);
+  }
+  if (dl.children.length) tech.appendChild(dl);
+  const files = d.files || [];
+  if (files.length) {
     const box = document.createElement("div");
     box.className = "files";
     for (const f of files) {
@@ -1393,16 +1704,16 @@ function cardBody(p) {
       line.appendChild(n); line.appendChild(m);
       box.appendChild(line);
     }
-    s.appendChild(box);
+    tech.appendChild(box);
     const src = document.createElement("div");
     src.className = "src";
     /* Names, sizes and times. Opening any of them would be reading the work
        rather than observing it, and a transcript is never listed at all. */
     src.textContent = "имена, размеры и время изменения: " + d.dir
       + " — содержимое не читается, транскрипты не показываются";
-    s.appendChild(src);
-    return true;
-  }));
+    tech.appendChild(src);
+  }
+  if (dl.children.length || files.length) body.appendChild(tech);
 
   return body;
 }
@@ -1413,8 +1724,13 @@ function cardBody(p) {
    remembered here instead of being kept by a layer that never moved. */
 let boardScroll = 0;
 
-function openCard(p) {
+/* `keepScroll` is for a live refresh redrawing the card that is already open on
+   the same task. Opening a card is a navigation and starts at its top; a
+   ten-second poll is not, and sending the reader back to the top of a card they
+   were halfway down is the same interruption `location.reload()` used to be. */
+function openCard(p, keepScroll) {
   if (!openTask) boardScroll = window.scrollY;
+  const wasAt = window.scrollY;
   openTask = p.task;
   el("cardnum").textContent = p.id === null ? "—" : "#" + p.id;
   el("cardname").textContent = p.title;
@@ -1423,7 +1739,7 @@ function openCard(p) {
   body.appendChild(cardBody(p));
   el("card").classList.add("open");
   el("board").style.display = "none";
-  window.scrollTo(0, 0);
+  window.scrollTo(0, keepScroll ? wasAt : 0);
 }
 
 function closeCard() {
@@ -1454,23 +1770,32 @@ function areaNode(panel, area) {
   node.className = "area a-" + area.key + (shut ? " shut" : "") + (area.count ? "" : " void");
 
   const title = document.createElement("h3");
-  title.appendChild(document.createTextNode(area.title + " "));
+  /* The heading is still a heading; what folds it is a button inside it, so the
+     fold has a focus, a name and a stated state. */
+  const head = document.createElement("button");
+  head.className = "areahead";
+  head.appendChild(document.createTextNode(area.title + " "));
   const n = document.createElement("span");
   n.className = "n"; n.textContent = area.count;
-  title.appendChild(n);
-  if (area.hidden) title.appendChild(document.createTextNode(" (показано " +
+  head.appendChild(n);
+  if (area.hidden) head.appendChild(document.createTextNode(" (показано " +
       area.plates.length + ", скрыто " + area.hidden + ")"));
+  /* «Старшая» is a comparison, and one plate has nothing to be older than. The
+     user said so directly: «Если в группе одна задача, слово „старшая“ не
+     показывать». Its age is on the plate itself either way. */
   const oldest = ago(area.oldest);
-  if (oldest && area.count) {
+  if (oldest && area.count > 1) {
     const old = document.createElement("span");
     old.className = "old"; old.textContent = "старшая: " + oldest;
-    title.appendChild(old);
+    head.appendChild(old);
   }
-  title.addEventListener("click", () => {
+  asFolder(head, shut, () => {
     const now = !node.classList.contains("shut");
     node.classList.toggle("shut", now);
     sessionStorage.setItem(shutKey(panel.key, area.key), now ? "1" : "0");
+    return now;
   });
+  title.appendChild(head);
   node.appendChild(title);
 
   if (AREA_RULE[area.key]) {
@@ -1534,9 +1859,8 @@ function questionNode(q, areaKey) {
   node.appendChild(head);
   const row = document.createElement("div");
   row.className = "row";
-  const src = tag("вопрос продукта " + q.product);
-  src.title = "наблюдено: раздел «Открытые вопросы» в products/" + q.product + "/product.md";
-  row.appendChild(src);
+  const sources = [["Вопрос", "раздел «Открытые вопросы» в products/" + q.product + "/product.md"]];
+  row.appendChild(tag("вопрос продукта " + q.product));
   /* When it went out, through what, and with which message. This is the whole
      of the rule: an area that tells a person they are blocking work has to show
      what put the question in front of them, and the date and the message are
@@ -1544,7 +1868,7 @@ function questionNode(q, areaKey) {
   if (q.asked_at) {
     const when = tag("спрошено " + q.asked_at + " · " +
       (q.channel === "email" ? "письмо " : "Telegram ") + q.ref);
-    if (q.asked_src) when.title = "наблюдено: " + q.asked_src;
+    if (q.asked_src) sources.push(["Спрошено", q.asked_src]);
     row.appendChild(when);
   }
   node.appendChild(row);
@@ -1556,6 +1880,7 @@ function questionNode(q, areaKey) {
     note.className = "asked"; note.textContent = bits.join(" · ");
     node.appendChild(note);
   }
+  sourceNote(node, sources);
   return node;
 }
 
@@ -1572,18 +1897,16 @@ function promiseNode(q) {
   node.appendChild(head);
   const row = document.createElement("div");
   row.className = "row";
-  const src = tag("«В работе» продукта " + q.product);
-  src.title = "наблюдено: раздел «В работе» в products/" + q.product + "/product.md";
-  row.appendChild(src);
+  row.appendChild(tag("«В работе» продукта " + q.product));
   /* What the line is claimed to be, in the words the observation supports. «Связь
      с задачей не установлена» is a statement about a comparison that failed;
      «задачи нет» would be a statement about the world, and the previous version
      made it on evidence that could not carry it. The comparison itself hangs on
      the same line, so the reader can check the verdict instead of trusting it. */
-  const said = tag("связь с задачей не установлена");
-  said.title = "сверка: " + (q.checked || "");
-  row.appendChild(said);
+  row.appendChild(tag("связь с задачей не установлена"));
   node.appendChild(row);
+  sourceNote(node, [["Строка", "раздел «В работе» в products/" + q.product + "/product.md"],
+                    ["Сверка", q.checked]]);
   return node;
 }
 
@@ -1596,7 +1919,7 @@ function channelsNode(panel) {
      uncommitted or unpushed work is work that exists and is invisible in prose,
      which is one of the things the board is for. */
   const dirty = panel.repos.filter(r => r.tracked_dirty || r.unpushed);
-  const sum = document.createElement("div");
+  const sum = document.createElement("button");
   sum.className = "sum";
   sum.textContent = "Репозитории и связь: " + panel.repos.length;
   if (dirty.length) {
@@ -1606,10 +1929,11 @@ function channelsNode(panel) {
       (dirty.length === 1 ? " репозитории" : " репозиториях");
     sum.appendChild(warn);
   }
-  sum.addEventListener("click", () => {
+  asFolder(sum, shut, () => {
     const now = !node.classList.contains("shut");
     node.classList.toggle("shut", now);
     sessionStorage.setItem(shutKey(panel.key, "chan"), now ? "1" : "0");
+    return now;
   });
   node.appendChild(sum);
 
@@ -1667,11 +1991,13 @@ function stripItem(p, cls) {
   const why = p.why || p.happening;
   if (why) {
     const w = document.createElement("span");
-    w.className = p.why ? "why" : "doing"; w.textContent = " — " + why;
-    if (p.why && p.why_src) w.title = "наблюдено: " + p.why_src;
+    w.className = p.why ? "why" : "doing"; w.textContent = " — " + human(why);
     s.appendChild(w);
   }
-  s.title = p.thread;
+  /* The direction this item belongs to and what observed its reason. Both used
+     to be `title`, which is to say neither existed on a phone. */
+  sourceNote(s, [["Направление", p.thread],
+                 [p.why ? "Почему" : "Что делает", p.why ? p.why_src : "строка progress.json ребёнка"]]);
   return s;
 }
 
@@ -1753,7 +2079,15 @@ function drawStrip(board) {
      created in one hour — 790/792 and 791/793 — because the owner in the chat
      and the owner woken by the timer each had their own queue and neither could
      see the other's. Knowing another one is awake is what prevents the third
-     pair, so it stands on the strip and not in a column. */
+     pair, so it stands on the strip and not in a column.
+
+     The field stood empty on every board the user ever opened, and the reason
+     was not that nobody was awake. Only a running `thread_tick.py` was ever
+     matched, and a tick that finds nothing lives about a second per twenty
+     minutes — while the *other* half of the pair that created 790/792 and
+     791/793, the console owner, ran for hours and matched nothing at all. Both
+     are observed now, and each says which working trees it could occupy,
+     because that is the only thing a collision is actually about. */
   const awake = board.owners_awake || [];
   const mine = document.createElement("div");
   mine.className = "grp";
@@ -1770,12 +2104,90 @@ function drawStrip(board) {
     const s = document.createElement("span");
     s.className = "item jam";
     const age = ago(ageOf({ since: owner.since, age_seconds: owner.age_seconds }));
-    s.textContent = "тред «" + (owner.thread || "?") + "»" + (age ? " · " + age : "")
+    const who = owner.kind === "tick"
+      ? "фоновое пробуждение треда «" + (owner.thread || "?") + "»"
+      : owner.kind === "woken" ? "продакт, разбуженный тиком" : "продакт в консоли";
+    const trees = (owner.worktrees || []).map(path => path.split("/").pop()).join(", ");
+    s.textContent = who + (age ? " · " + age : "")
+      + (trees ? " · может занять " + trees : " · рабочее дерево не названо")
       + " — сверьтесь с его очередью, прежде чем заводить задачу";
     s.title = "наблюдено: " + owner.src;
     mine.appendChild(s);
   }
   strip.appendChild(mine);
+}
+
+/* When the owner of this direction looks next, when it looked last and what came
+   of that look. The user's question in their own words: «панель показывает, что
+   в работе ничего нет… тогда почему ничего не делаешь?» — a board that shows a
+   column of zeros and never says when anybody last checked leaves that question
+   with nowhere to go.
+
+   Every value about the last check is what the tick wrote into
+   `state/threads/<тред>.json` at the moment of that check; the next check is
+   what systemd reported while this document was being collected. Nothing here
+   is the prose of a woken agent, and nothing is recomputed by the page: the
+   outcome is the difference between the live runs the tick saw before waking
+   the owner and the ones it saw after. */
+function checkNode(check, nextCheck) {
+  const node = document.createElement("div");
+  node.className = "check";
+
+  /* The next check is drawn even when no tick has ever run for this direction:
+     the two answers come from two different observations, and «проверок ещё не
+     было» says nothing about when the timer fires. */
+  if (nextCheck) {
+    const next = document.createElement("span");
+    next.className = "next";
+    next.textContent = nextCheck.at
+      ? "следующая проверка " + stamp(nextCheck.at)
+      : "когда следующая проверка — неизвестно";
+    next.title = "наблюдено: " + nextCheck.src;
+    node.appendChild(next);
+    /* With no time, the observation that came instead of one is the whole
+       answer, so it is printed as text rather than hidden in the tooltip
+       above — on a touch screen that tooltip does not exist. */
+    if (!nextCheck.at) {
+      const why = document.createElement("span");
+      why.className = "nextwhy";
+      why.textContent = "наблюдено: " + nextCheck.src;
+      node.appendChild(why);
+    }
+  }
+
+  if (!check) {
+    const none = document.createElement("span");
+    none.className = "last";
+    none.textContent = "проверок этого направления ещё не было";
+    node.appendChild(none);
+    if (!nextCheck) node.classList.add("none");
+    return node;
+  }
+
+  const last = document.createElement("span");
+  last.className = "last";
+  last.textContent = "прошлая " + stamp(check.at) + " — " + check.outcome;
+  last.title = "наблюдено: " + check.outcome_src + "; " + check.src;
+  node.appendChild(last);
+
+  /* The reasons are shown only when the check finished and started nothing. A
+     direction that put three tasks in motion does not owe an excuse, and a
+     check still in progress (`started === null`) has not decided anything yet —
+     printing «запустил 3 — задачи 823, 872, 873» and «причина простоя не
+     наблюдается» in one column is how the first cut of this line read. What the
+     reasons do answer is the user's own complaint: «везде нули» with nothing
+     said about why. */
+  const idle = !check.queue.live && (check.queue.pickup + check.queue.ready + check.queue.decided);
+  if (idle && Array.isArray(check.started) && !check.started.length) {
+    for (const reason of check.reasons) {
+      const why = document.createElement("span");
+      why.className = "why" + (reason.code === "none_observed" ? " alarm" : "");
+      why.textContent = reason.text;
+      why.title = "наблюдено: " + reason.src;
+      node.appendChild(why);
+    }
+  }
+  return node;
 }
 
 function drawBoard(board, snapshot) {
@@ -1801,6 +2213,7 @@ function drawBoard(board, snapshot) {
                        " · ждёт пользователя " + waiting + " · решает продакт " + ours +
                        " · заторов " + stuck + " · не доставлено " + undelivered;
     head.appendChild(h2); head.appendChild(meta);
+    head.appendChild(checkNode(panel.check, panel.next_check));
     col.appendChild(head);
 
     const body = document.createElement("div");
@@ -1855,8 +2268,11 @@ function applyFresh(fresh) {
       .find(p => p.task === wanted);
     /* Gone from the board — folded into `Сделано`, or dropped by a cap — is not
        the same as unchanged, so the card closes rather than showing a state
-       that is no longer the board's. */
-    if (again) openCard(again); else closeCard();
+       that is no longer the board's. The card that stays keeps the place the
+       reader was at: redrawing it from the top every ten seconds is what the
+       user meant by «при перезагрузке данных на открытой задаче не терять
+       позицию прокрутки». */
+    if (again) openCard(again, true); else closeCard();
   }
 }
 
@@ -1864,6 +2280,11 @@ function applyFresh(fresh) {
 const MAP_PARTS = ["stage", "top", "legend", "panels", "bottom"];
 function showBoard(on) {
   if (on && openTask) closeCard();     // the card belongs to the board screen
+  /* The tooltip belongs to the map, so it leaves with it. Both facts are put
+     away together — the pointer's last pick and the box on screen — because a
+     stale `hover` with a hidden box comes back the moment a frame is drawn. */
+  mapOpen = !on;
+  if (on) hideTip();
   el("board").style.display = on ? "flex" : "none";
   el("card").style.display = on ? "" : "none";
   for (const id of MAP_PARTS) el(id).style.display = on ? "none" : "";

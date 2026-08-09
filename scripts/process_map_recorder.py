@@ -67,6 +67,21 @@ EVENT_STATIONS = {
     "attempt_failed": "report",
 }
 
+TASK_NUMBER = re.compile(r"^(\d+)-")
+
+
+def task_order(task_dir: Path) -> tuple[int, str]:
+    """Порядок каталогов задач — по номеру, не по имени.
+
+    Номер задачи столько цифр, сколько выделил `tasks_index.py`, а не три.
+    `sorted()` по имени ставит `1000-slug` перед `839-slug`, потому что как
+    строки они так и сравниваются; при переходе через тысячу лента наблюдений
+    пошла бы не в том порядке, в каком заводились задачи.
+    """
+    match = TASK_NUMBER.match(task_dir.name)
+    return (int(match.group(1)) if match else -1, task_dir.name)
+
+
 FRONTMATTER_STATUS = re.compile(r'^status:\s*"?([a-z_]+)"?', re.MULTILINE)
 FRONTMATTER_TITLE = re.compile(r'^title:\s*"?(.+?)"?\s*$', re.MULTILINE)
 
@@ -200,7 +215,10 @@ class Scribe:
     # -- observations -----------------------------------------------------
     def tick(self) -> int:
         before = self.written
-        for task_dir in sorted(TASKS.glob("[0-9]*-*")):
+        # По номеру, а не по имени: сравнение имён как строк ставит `1000-slug`
+        # перед `839-slug`, и лента наблюдений начинает идти не в том порядке,
+        # в каком заводились задачи. Имя — запасной ключ для каталога без номера.
+        for task_dir in sorted(TASKS.glob("[0-9]*-*"), key=task_order):
             if not task_dir.is_dir():
                 continue
             self.observe_task(task_dir)
