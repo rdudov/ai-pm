@@ -11,10 +11,20 @@ All interactive, timer and mail entrypoints call
   Codex `gpt-5.6-sol`.
 - Network/API failures and unknown quota schemas never imply exhaustion. They
   keep Opus and make the failure visible.
+- The quota endpoint uses Claude Code's short-lived OAuth access token. If that
+  endpoint returns 401, the router serializes recovery and asks Claude Code—the
+  credential owner—to execute its built-in zero-turn `/usage` command, then
+  retries the exact endpoint once. The router never implements refresh-token
+  exchange itself and never logs credentials or the helper output.
 - `codex-pm` explicitly selects the same owner through the pinned Codex reserve
   for manual use and runtime smoke. Both commands run from
   `/opt/projects/product-owner` with `/opt/projects` access.
 
 Background callers may use `--entry print`; legacy Claude-shaped print argv is
 still translated by the same router during rollout. `--status` prints only
-redacted routing observations and `--show-command` shows the selected argv.
+redacted routing observations: exact shared and explicitly model-scoped reset
+windows, an explicit `published: false` when Opus or Fable has no separate
+field, the live observation time/source, authorization-recovery provenance, and
+a typed authorization/network/schema error when observation is unavailable.
+Unavailable observation contains no fabricated remainder and keeps product work
+on visible Opus behavior. `--show-command` shows the selected argv.

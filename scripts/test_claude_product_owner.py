@@ -1,5 +1,6 @@
 import unittest
 from unittest import mock
+import urllib.error
 
 from claude_product_owner import (
     CODEX_MODEL,
@@ -7,6 +8,8 @@ from claude_product_owner import (
     claude_command,
     codex_command,
     inspect_live,
+    inspect_observation,
+    model_limits,
     model_used_percentages,
     opus_used_percentages,
     select_model,
@@ -29,6 +32,19 @@ class ProductOwnerModelRouterTests(unittest.TestCase):
         self.assertEqual(opus_used_percentages(usage), [98.0])
         self.assertEqual(select_model(usage)[0], "fable")
 
+    def test_model_limit_keeps_reset_and_explicit_absence(self):
+        usage = {"limits": [{
+            "kind": "weekly_scoped",
+            "percent": 35,
+            "resets_at": "2033-05-18T03:33:20Z",
+            "scope": {"model": {"display_name": "Fable"}},
+        }]}
+        self.assertFalse(model_limits(usage, "opus")["published"])
+        fable = model_limits(usage, "fable")
+        self.assertTrue(fable["published"])
+        self.assertEqual(fable["limits"][0]["remaining_percent"], 65.0)
+        self.assertEqual(fable["limits"][0]["resets_at"], "2033-05-18T03:33:20Z")
+
     def test_shared_limits_do_not_masquerade_as_opus_limit(self):
         usage = {
             "five_hour": {"utilization": 100, "resets_at": "soon"},
@@ -44,6 +60,7 @@ class ProductOwnerModelRouterTests(unittest.TestCase):
 
     def test_malformed_values_are_ignored(self):
         self.assertEqual(select_model({"seven_day_opus": {"utilization": "96"}})[0], "opus")
+        self.assertEqual(select_route({"five_hour": {"utilization": 130}}).engine, "claude")
 
     def test_available_opus_and_fable_stay_on_claude(self):
         self.assertEqual(select_route({}).engine, "claude")
@@ -80,6 +97,46 @@ class ProductOwnerModelRouterTests(unittest.TestCase):
         self.assertEqual((route.engine, route.model), ("claude", "opus"))
         self.assertIsNone(usage)
         self.assertIn("OSError", error)
+
+    def test_401_uses_claude_owned_zero_turn_refresh_then_retries(self):
+        unauthorized = urllib.error.HTTPError(
+            "https://example.invalid/usage", 401, "Unauthorized", {}, None
+        )
+        payload = {"five_hour": {"utilization": 4, "resets_at": "later"}, "limits": []}
+        with (
+            mock.patch("claude_product_owner.fetch_usage", side_effect=[unauthorized, unauthorized, payload]),
+            mock.patch("claude_product_owner.refresh_authorization_with_claude") as refresh,
+        ):
+            observation = inspect_observation()
+        refresh.assert_called_once_with()
+        self.assertEqual(observation.authorization_recovery, "claude_cli_zero_turn_usage")
+        self.assertEqual(observation.route.engine, "claude")
+        self.assertIsNone(observation.error)
+
+    def test_authorization_failure_has_no_fabricated_quota(self):
+        unauthorized = urllib.error.HTTPError(
+            "https://example.invalid/usage", 401, "Unauthorized", {}, None
+        )
+        with (
+            mock.patch("claude_product_owner.fetch_usage", side_effect=unauthorized),
+            mock.patch(
+                "claude_product_owner.refresh_authorization_with_claude",
+                side_effect=RuntimeError("refresh failed"),
+            ),
+        ):
+            observation = inspect_observation()
+        self.assertIsNone(observation.usage)
+        self.assertEqual(observation.route.reason, "usage_unavailable")
+        self.assertEqual(observation.error["kind"], "authorization_or_runtime")
+
+    def test_unknown_live_schema_is_visible_not_exhaustion(self):
+        with mock.patch(
+            "claude_product_owner.fetch_usage",
+            side_effect=ValueError("usage response has no recognized quota fields"),
+        ):
+            observation = inspect_observation()
+        self.assertEqual(observation.route, Route("claude", "opus", "usage_unavailable"))
+        self.assertEqual(observation.error["kind"], "schema")
 
     def test_background_engines_have_the_same_owner_cwd_and_access(self):
         claude = claude_command("opus", "print", [])
