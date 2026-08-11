@@ -298,12 +298,15 @@
 пересобираться сканом, а не памятью.
 
 **1. Импортируемые символы Python — под автоматической проверкой.**
-`process_map_state.liveness_owner()` кладёт
-`skills/task-runner/scripts` в `sys.path` и импортирует модуль `task_runner`.
-Берутся `process_is_live` и `runner_pid_namespace_state` (в тестах ещё
-`process_identity`), а из ответов второй функции разбираются состояния `local` и
-`recorded_namespace_absent`. И имена, и словарь ответов сверяются
-`scripts/runner_contract.py` перед каждым тиком и в тестах.
+`process_map_state` кладёт `skills/task-runner/scripts` в `sys.path` и импортирует
+два владельца: `task_runner` через `liveness_owner()` и `companion_runner` через
+`live_run_owner()`. У первого берутся `process_is_live` и
+`runner_pid_namespace_state` (в тестах ещё `process_identity`), а из ответов
+второй функции разбираются состояния `local` и `recorded_namespace_absent`. У
+`companion_runner` берётся `live_run_processes`: identity-проверенная опись
+зарегистрированных child/watcher-процессов, которые нельзя второй раз показать
+как пережившие задачу. Оба имени модулей, все заимствованные функции и словарь
+ответов сверяются `scripts/runner_contract.py` перед каждым тиком и в тестах.
 
 **2. Интерфейсы командной строки — не закрыты.** Ошибка приходит в момент
 работы, а не проверки.
@@ -336,7 +339,10 @@
   намеренно).
 - `.runner/runner.json`: `pid`, `process_identity`, `pid_namespace`, `runner`,
   `sandbox_mode`, `access_grant.sandbox_mode`, `access_grant.granted_directories`,
-  `watcher_stop_reason`, `exit_code`, `command`, `started_at`, `--repo`.
+  `watcher_pid`, `watcher_process_identity`, `watcher_stop_reason`, `exit_code`,
+  `command`, `started_at`, `--repo`. Через `companion_runner.live_run_processes`
+  наблюдатель получает записи `role`, `pid`, `evidence` и использует `pid` как
+  корень внешне наблюдаемой цепочки процесса.
 - `verification.md`: строки `Result: OK|GAP|BLOCKED|FAIL`; `findings.md`: строка
   `Verdict:` и заголовки находок.
 - `deliverables/` и `*.html` в каталоге задачи — то, что считается документом для

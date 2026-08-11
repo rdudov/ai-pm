@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""What this repository borrows from companion-agent's runner, checked.
+"""What this repository borrows from companion-agent's runner modules, checked.
 
 `process_map_state` deliberately does not own «is this recorded process still
 this run»: it puts `companion-agent/skills/task-runner/scripts` on `sys.path`,
-imports `task_runner` and asks. That borrowing is a contract across two
-repositories with no shared test run, and on 2026-08-08 it broke in silence —
+imports `task_runner` and `companion_runner` and asks. Those borrowings are a
+contract across two repositories with no shared test run, and on 2026-08-08 it
+broke in silence —
 task 938 renamed `runner_pid_namespace_visible` to `runner_pid_namespace_state`,
 nothing here changed, and the first thing to notice was the user's board, after
 every direction had been observing nothing for about ten hours behind an
@@ -54,19 +55,23 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import process_map_state as state  # noqa: E402
 
 SCRIPTS = Path(__file__).resolve().parent
-RUNNER_MODULE = "task_runner"
+BORROWED_MODULES = {
+    "RUNNER": "task_runner",
+    "RUN_REGISTRY": "companion_runner",
+}
 # The one runner function whose *answers* this repository branches on. Its name
 # is checked like any other borrowing; this constant names it only so the scan
 # below knows where to look for the vocabulary.
 NAMESPACE_STATE = "runner_pid_namespace_state"
 
 
-def borrowed_names(scripts_dir: Path = SCRIPTS) -> dict[str, set[str]]:
-    """Every `RUNNER.<name>` written in this repository, by file.
+def borrowed_names(scripts_dir: Path = SCRIPTS,
+                   owner_name: str = "RUNNER") -> dict[str, set[str]]:
+    """Every `<owner_name>.<name>` written in this repository, by file.
 
     A scan, not a list: a new borrowing is covered the moment it is written.
     Both spellings count — `RUNNER.x` in the collector, `state.RUNNER.x` in the
-    tests that drive it.
+    tests that drive it — and the caller applies the same scan to RUN_REGISTRY.
     """
     found: dict[str, set[str]] = {}
     for path in sorted(scripts_dir.glob("*.py")):
@@ -78,11 +83,18 @@ def borrowed_names(scripts_dir: Path = SCRIPTS) -> dict[str, set[str]]:
             if not isinstance(node, ast.Attribute):
                 continue
             owner = node.value
-            if isinstance(owner, ast.Attribute) and owner.attr == "RUNNER":
+            if isinstance(owner, ast.Attribute) and owner.attr == owner_name:
                 found.setdefault(path.name, set()).add(node.attr)
-            elif isinstance(owner, ast.Name) and owner.id == "RUNNER":
+            elif isinstance(owner, ast.Name) and owner.id == owner_name:
                 found.setdefault(path.name, set()).add(node.attr)
     return found
+
+
+def borrowed_interfaces(scripts_dir: Path = SCRIPTS) -> dict[str, dict[str, set[str]]]:
+    """Every borrowed module interface, discovered from its owning global."""
+    return {module_name: names
+            for owner_name, module_name in BORROWED_MODULES.items()
+            if (names := borrowed_names(scripts_dir, owner_name))}
 
 
 def _is_namespace_state_call(node: ast.AST) -> bool:
@@ -137,8 +149,8 @@ def returned_states(runner_source: Path) -> set[str]:
     return states
 
 
-def load_runner(runner_scripts: Path):
-    """The runner module living in `runner_scripts`, or `None`.
+def load_borrowed_module(runner_scripts: Path, owner_name: str, module_name: str):
+    """One borrowed module living in `runner_scripts`, or `None`.
 
     The installed one is already imported by `process_map_state`, and asking it
     again would be a second import of one module. Any other directory is loaded
@@ -146,11 +158,11 @@ def load_runner(runner_scripts: Path):
     in `sys.modules`.
     """
     if runner_scripts == state.RUNNER_SCRIPTS:
-        return state.RUNNER
-    source = runner_scripts / f"{RUNNER_MODULE}.py"
+        return getattr(state, owner_name, None)
+    source = runner_scripts / f"{module_name}.py"
     if not source.is_file():
         return None
-    spec = importlib.util.spec_from_file_location(f"{RUNNER_MODULE}_under_check", source)
+    spec = importlib.util.spec_from_file_location(f"{module_name}_under_check", source)
     if spec is None or spec.loader is None:
         return None
     module = importlib.util.module_from_spec(spec)
@@ -172,32 +184,41 @@ def check(runner_scripts: Path | None = None,
     able to tell a live run from a dead one.
     """
     runner_scripts = runner_scripts or state.RUNNER_SCRIPTS
-    runner = load_runner(runner_scripts)
-    source = runner_scripts / f"{RUNNER_MODULE}.py"
     violations: list[dict] = []
-    if runner is None:
-        return [{"kind": "module", "text": f"модуль {RUNNER_MODULE} не импортируется",
-                 "src": str(source)}]
-
-    borrowed = borrowed_names(scripts_dir)
-    if not borrowed:
+    interfaces = borrowed_interfaces(scripts_dir)
+    if not interfaces:
         # A scan that quietly matches nothing would report a healthy contract
         # forever, which is the one failure this file cannot afford.
         violations.append({
             "kind": "scan",
-            "text": f"скан не нашёл ни одного заимствования RUNNER.<имя> — "
+            "text": "скан не нашёл ни одного заимствования runner-модулей — "
                     f"проверять нечего, значит проверка сломана",
             "src": f"{scripts_dir}/*.py"})
-    for filename, names in sorted(borrowed.items()):
-        for name in sorted(names):
-            if not hasattr(runner, name):
-                violations.append({
-                    "kind": "name",
-                    "text": f"{filename} зовёт {RUNNER_MODULE}.{name}, которого в модуле нет",
-                    "src": str(source)})
+    available_modules: set[str] = set()
+    for owner_name, module_name in BORROWED_MODULES.items():
+        claims = interfaces.get(module_name)
+        if not claims:
+            continue
+        source = runner_scripts / f"{module_name}.py"
+        module = load_borrowed_module(runner_scripts, owner_name, module_name)
+        if module is None:
+            violations.append({
+                "kind": "module", "text": f"модуль {module_name} не импортируется",
+                "src": str(source)})
+            continue
+        available_modules.add(module_name)
+        for filename, names in sorted(claims.items()):
+            for name in sorted(names):
+                if not hasattr(module, name):
+                    violations.append({
+                        "kind": "name",
+                        "text": f"{filename} зовёт {module_name}.{name}, "
+                                "которого в модуле нет",
+                        "src": str(source)})
 
     branched = branched_states(scripts_dir)
-    if branched:
+    if branched and BORROWED_MODULES["RUNNER"] in available_modules:
+        source = runner_scripts / f"{BORROWED_MODULES['RUNNER']}.py"
         returned = returned_states(source)
         if not returned:
             violations.append({
@@ -219,11 +240,13 @@ def check(runner_scripts: Path | None = None,
 def report(violations: list[dict], runner_scripts: Path) -> str:
     """The verdict in the words the letter and the journal both carry."""
     if not violations:
-        borrowed = borrowed_names()
-        names = sorted({name for names in borrowed.values() for name in names})
-        return (f"контракт с {RUNNER_MODULE} цел: {len(names)} имён "
+        interfaces = borrowed_interfaces()
+        names = sorted({f"{module}.{name}"
+                        for module, files in interfaces.items()
+                        for borrowed in files.values() for name in borrowed})
+        return (f"контракт с runner-модулями цел: {len(names)} имён "
                 f"({', '.join(names)}) на месте в {runner_scripts}")
-    lines = [f"контракт с {RUNNER_MODULE} разошёлся ({len(violations)}):"]
+    lines = [f"контракт с runner-модулями разошёлся ({len(violations)}):"]
     lines += [f"- {item['text']} [{item['src']}]" for item in violations]
     return "\n".join(lines)
 

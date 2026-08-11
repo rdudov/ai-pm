@@ -1274,6 +1274,11 @@ class Liveness(unittest.TestCase):
         self.assertIsNone(src)
 
     def test_a_recorded_pid_with_no_recorded_identity_is_not_live(self):
+        # This compatibility assertion and its failure both predate the 839
+        # repair: the identical assertion is in parent 5b20364, and the two
+        # earlier product_owner_full_regression sections in task 839's
+        # verification.md record the same sole GAP before candidate 5c6ede1.
+        # Task 839 neither accepts nor changes that separate runner policy.
         self.assertEqual(state.run_alive({"pid": os.getpid()}), (False, None))
         self.assertEqual(state.run_alive({}), (False, None))
 
@@ -1331,7 +1336,8 @@ class RunnerInterface(unittest.TestCase):
     cannot answer differently.
     """
 
-    def fixture(self, tmp: str, consumer: str, runner: str) -> tuple[Path, Path]:
+    def fixture(self, tmp: str, consumer: str, runner: str,
+                registry: str | None = None) -> tuple[Path, Path]:
         """A pair of repositories, one borrowing and one defining.
 
         The negative controls need a *real* divergence between two files, not a
@@ -1346,6 +1352,8 @@ class RunnerInterface(unittest.TestCase):
         runner_scripts = Path(tmp) / "runner"
         runner_scripts.mkdir()
         (runner_scripts / "task_runner.py").write_text(runner)
+        if registry is not None:
+            (runner_scripts / "companion_runner.py").write_text(registry)
         return scripts, runner_scripts
 
     CONSUMER = ("def run_alive(runner):\n"
@@ -1361,6 +1369,10 @@ class RunnerInterface(unittest.TestCase):
                  "    return 'local'\n"
                  "def process_is_live(pid, identity):\n"
                  "    return True\n")
+    REGISTRY_CONSUMER = ("def registered(task):\n"
+                         "    return RUN_REGISTRY.live_run_processes(task)\n")
+    REGISTRY_OK = ("def live_run_processes(task):\n"
+                   "    return []\n")
 
     def test_the_scan_sees_the_borrowings_it_is_supposed_to_guard(self):
         # A scan that quietly matches nothing would pass every other test here.
@@ -1368,6 +1380,9 @@ class RunnerInterface(unittest.TestCase):
         self.assertIn("process_map_state.py", borrowed)
         self.assertLessEqual({"process_is_live", "runner_pid_namespace_state"},
                              borrowed["process_map_state.py"])
+        registry = runner_contract.borrowed_names(owner_name="RUN_REGISTRY")
+        self.assertIn("process_map_state.py", registry)
+        self.assertIn("live_run_processes", registry["process_map_state.py"])
 
     def test_the_installed_contract_holds(self):
         self.assertIsNotNone(state.RUNNER)
@@ -1385,6 +1400,31 @@ class RunnerInterface(unittest.TestCase):
         self.assertTrue(any(item["kind"] == "name"
                             and "runner_pid_namespace_state" in item["text"]
                             for item in violations), violations)
+
+    def test_a_renamed_live_run_registry_function_is_a_violation(self):
+        renamed = self.REGISTRY_OK.replace("live_run_processes", "live_processes")
+        with tempfile.TemporaryDirectory() as tmp:
+            scripts, runner_scripts = self.fixture(
+                tmp, self.REGISTRY_CONSUMER, self.RUNNER_OK, renamed)
+            violations = runner_contract.check(runner_scripts, scripts)
+        self.assertTrue(any(item["kind"] == "name"
+                            and "companion_runner.live_run_processes" in item["text"]
+                            for item in violations), violations)
+
+    def test_a_missing_live_run_registry_module_is_a_violation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            scripts, runner_scripts = self.fixture(
+                tmp, self.REGISTRY_CONSUMER, self.RUNNER_OK)
+            violations = runner_contract.check(runner_scripts, scripts)
+        self.assertTrue(any(item["kind"] == "module"
+                            and "companion_runner" in item["text"]
+                            for item in violations), violations)
+
+    def test_the_matching_live_run_registry_pair_is_clean(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            scripts, runner_scripts = self.fixture(
+                tmp, self.REGISTRY_CONSUMER, self.RUNNER_OK, self.REGISTRY_OK)
+            self.assertEqual(runner_contract.check(runner_scripts, scripts), [])
 
     def test_a_renamed_answer_is_a_violation_even_when_the_name_survives(self):
         # The quiet version of the same blindness: the function keeps its name,
@@ -1410,8 +1450,10 @@ class RunnerInterface(unittest.TestCase):
 
     def test_an_unreadable_runner_is_a_violation_not_a_silence(self):
         with tempfile.TemporaryDirectory() as tmp:
-            violations = runner_contract.check(Path(tmp) / "nowhere", Path(tmp))
-        self.assertEqual([item["kind"] for item in violations], ["module"])
+            violations = runner_contract.check(Path(tmp) / "nowhere")
+        self.assertEqual({item["kind"] for item in violations}, {"module"})
+        self.assertEqual({Path(item["src"]).name for item in violations},
+                         {"task_runner.py", "companion_runner.py"})
 
     def test_the_command_line_says_so_with_its_exit_code(self):
         # What a hook, a timer or a CI step actually reads. The healthy run is
