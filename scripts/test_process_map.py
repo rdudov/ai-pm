@@ -2304,6 +2304,75 @@ class TheOtherProductOwner(unittest.TestCase):
 class LongLivedTaskProcesses(unittest.TestCase):
     """A closed task's daemon is still work the thread must make visible."""
 
+    def test_thread_membership_comes_from_the_task_s_linked_project(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            companion = root / "companion-agent"
+            cwd = companion / "tasks" / "692-moex" / "artifacts"
+            cwd.mkdir(parents=True)
+            repo = root / "moex-trading-engine"
+            proc = root / "proc"
+            entry = proc / "101"
+            (entry / "fd").mkdir(parents=True)
+            (entry / "fdinfo").mkdir()
+            (entry / "cmdline").write_bytes(
+                (str(repo / ".venv/bin/python") + "\0forts_field_probe.py\0").encode())
+            (entry / "cwd").symlink_to(cwd)
+            (entry / "exe").symlink_to("/usr/bin/python3")
+
+            task = {"id": 692, "slug": "692-moex", "title": "probe",
+                    "status": "completed",
+                    "projects": ["data/projects/moex-strategy-lab/project.md"]}
+            with (mock.patch.object(state, "PROC", proc),
+                  mock.patch.object(state, "REPO", companion),
+                  mock.patch.object(state, "thread_tasks", side_effect=[[], [task]]),
+                  mock.patch.object(state.time, "time", return_value=300)):
+                process_thread = state.long_lived_processes(
+                    {"projects": ["process-visualization"],
+                     "repos": [str(companion)]})
+                moex_thread = state.long_lived_processes(
+                    {"projects": ["moex-strategy-lab"], "repos": [str(repo)]})
+
+            self.assertEqual(process_thread, [])
+            self.assertEqual([(item["pid"], item["task"], item["repo"])
+                              for item in moex_thread], [(101, 692, str(repo))])
+
+    def test_a_registered_live_chain_is_not_detached_when_the_task_is_terminal(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            companion = root / "companion-agent"
+            cwd = companion / "tasks" / "839-long-lived-process-inventory"
+            cwd.mkdir(parents=True)
+            repo = root / "product-owner"
+            proc = root / "proc"
+            proc.mkdir()
+
+            for pid, parent in ((101, 1), (102, 101)):
+                entry = proc / str(pid)
+                (entry / "fd").mkdir(parents=True)
+                (entry / "fdinfo").mkdir()
+                (entry / "cmdline").write_bytes(
+                    (str(repo / ".venv/bin/python") + "\0owner.py\0" +
+                     str(cwd) + "\0").encode())
+                (entry / "cwd").symlink_to(repo)
+                (entry / "exe").symlink_to("/usr/bin/python3")
+                (entry / "status").write_text(f"Name:\towner\nPPid:\t{parent}\n")
+
+            catalogue = [{"id": 839, "slug": cwd.name, "title": "owner",
+                          "status": "completed"}]
+            registry = mock.Mock()
+            registry.live_run_processes.return_value = [
+                {"role": "child", "pid": 101, "evidence": "identity_match"}]
+            with (mock.patch.object(state, "PROC", proc),
+                  mock.patch.object(state, "REPO", companion),
+                  mock.patch.object(state, "RUN_REGISTRY", registry),
+                  mock.patch.object(state.time, "time", return_value=300)):
+                processes = state.long_lived_processes(
+                    {"repos": [str(repo)]}, catalogue)
+
+            self.assertEqual(processes, [])
+            registry.live_run_processes.assert_called_once_with(cwd)
+
     def test_external_observation_attributes_outputs_and_duplicate_instances(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

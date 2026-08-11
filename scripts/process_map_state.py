@@ -181,6 +181,20 @@ def liveness_owner():
 RUNNER = liveness_owner()
 
 
+def live_run_owner():
+    """The Companion adapter that exposes every registered live run process."""
+    if str(RUNNER_SCRIPTS) not in sys.path:
+        sys.path.insert(0, str(RUNNER_SCRIPTS))
+    try:
+        import companion_runner
+    except ImportError:
+        return None
+    return companion_runner
+
+
+RUN_REGISTRY = live_run_owner()
+
+
 def run_alive(runner: dict) -> tuple[bool, str | None]:
     """Whether the process this task recorded is still running, and what said so.
 
@@ -247,13 +261,13 @@ def task_catalogue() -> list[dict]:
     return query_tasks(["--status", "all"], limit=5000)
 
 
-def thread_tasks(thread: dict) -> list[dict]:
+def thread_tasks(thread: dict, limit: int = 60) -> list[dict]:
     seen: dict[str, dict] = {}
     for project in thread.get("projects", []):
-        for task in query_tasks(["--project", project, "--status", "all"]):
+        for task in query_tasks(["--project", project, "--status", "all"], limit=limit):
             seen[task["path"]] = task
     for term in thread.get("task_search", []):
-        for task in query_tasks(["--search", term, "--status", "all"]):
+        for task in query_tasks(["--search", term, "--status", "all"], limit=limit):
             seen[task["path"]] = task
     return sorted(seen.values(), key=lambda t: t.get("id", 0), reverse=True)
 
@@ -2427,6 +2441,46 @@ def _process_command(cmdline: list[str]) -> str:
     return Path(cmdline[0]).name if cmdline and cmdline[0] else "unknown"
 
 
+def _ancestor_pids(entry: Path) -> list[int]:
+    """Observed parent chain for one process, stopping at an unreadable edge."""
+    ancestors = []
+    current = entry
+    seen = {entry.name}
+    while True:
+        try:
+            parent_line = next(line for line in (current / "status").read_text().splitlines()
+                               if line.startswith("PPid:"))
+            parent = int(parent_line.split()[1])
+        except (OSError, StopIteration, IndexError, ValueError):
+            break
+        if parent <= 0 or str(parent) in seen:
+            break
+        ancestors.append(parent)
+        seen.add(str(parent))
+        current = PROC / str(parent)
+    return ancestors
+
+
+def _registered_live_pids(catalogue: list[dict]) -> set[int]:
+    """Identity-checked child and watcher roots owned by the existing runner."""
+    if RUN_REGISTRY is None:
+        return set()
+    live = set()
+    for task in catalogue:
+        directory = task.get("dir") or task.get("slug")
+        if not directory:
+            continue
+        try:
+            processes = RUN_REGISTRY.live_run_processes(REPO / "tasks" / directory)
+        except OSError:
+            continue
+        for process in processes:
+            pid = process.get("pid")
+            if isinstance(pid, int):
+                live.add(pid)
+    return live
+
+
 def _output_entry(path: Path, observed_by: str, now: float,
                   direct: bool) -> dict | None:
     try:
@@ -2465,9 +2519,14 @@ def long_lived_processes(thread: dict, catalogue: list[dict] | None = None) -> l
     so a regular file beside the process's task cwd is also included when its
     mtime is newer than the process; the evidence kind remains explicit.
     """
-    catalogue = catalogue if catalogue is not None else task_catalogue()
+    # Thread membership has one existing owner: the task index filtered by the
+    # direction's linked projects/search terms. Looking at the whole catalogue
+    # made every task appear to belong to `process`, because every task cwd is
+    # below that direction's shared companion-agent repository.
+    catalogue = catalogue if catalogue is not None else thread_tasks(thread, limit=5000)
     tasks_by_dir = {(task.get("dir") or task.get("slug")): task for task in catalogue
                     if task.get("dir") or task.get("slug")}
+    registered = _registered_live_pids(catalogue)
     repos = [Path(path) for path in thread.get("repos", [])]
     now = time.time()
     found = []
@@ -2486,6 +2545,11 @@ def long_lived_processes(thread: dict, catalogue: list[dict] | None = None) -> l
             continue
         if not any(cmdline):
             continue
+        # A terminal frontmatter value does not end a still-running registered
+        # chain. Its child, watcher and descendants remain the ordinary live
+        # run and must never be projected a second time as detached work.
+        if int(entry.name) in registered or registered.intersection(_ancestor_pids(entry)):
+            continue
         try:
             executable = Path(os.readlink(entry / "exe"))
         except OSError:
@@ -2502,8 +2566,11 @@ def long_lived_processes(thread: dict, catalogue: list[dict] | None = None) -> l
         task, task_root = attributed
         if task.get("status") not in TERMINAL:
             continue
+        task_storage = REPO / "tasks"
+        repository_paths = [path for path in observed_paths
+                            if not _under(path, task_storage)]
         matched_repos = [repo for repo in repos
-                         if any(_under(path, repo) for path in observed_paths)]
+                         if any(_under(path, repo) for path in repository_paths)]
         if not matched_repos:
             continue
         try:
