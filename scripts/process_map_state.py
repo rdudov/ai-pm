@@ -2151,6 +2151,7 @@ def ticked_thread(cmdline: list[str]) -> str | None:
 # `bash -c` wrapper carries the whole command in one argument and would otherwise
 # put «/bin/bash» on the strip as the name of an owner.
 OWNER_CLIS = ("claude", "codex", "cursor-agent")
+OWNER_PROMPT_MARKER = "Ты работаешь как самостоятельный продакт-владелец"
 
 
 def runs_the_tick(cmdline: list[str], executable: Path | None) -> bool:
@@ -2170,7 +2171,74 @@ def runs_the_tick(cmdline: list[str], executable: Path | None) -> bool:
     return bool(executable) and executable.name.startswith("python")
 
 
-def session_owner(cmdline: list[str], cwd: Path | None) -> str | None:
+def owner_cli(cmdline: list[str]) -> str | None:
+    """The owner CLI named by argv, tolerating a Node launcher."""
+    for part in cmdline[:2]:
+        if part and Path(part).name in OWNER_CLIS:
+            return Path(part).name
+    return None
+
+
+def ancestor_cmdlines(entry: Path, limit: int = 32) -> list[list[str]]:
+    """Observable command lines from this process's parent chain."""
+    ancestors = []
+    seen = {entry.name}
+    current = entry
+    for _ in range(limit):
+        try:
+            # Field two may contain spaces inside parentheses. Everything after
+            # the final `) ` starts with state and then PPID.
+            fields = (current / "stat").read_text().rsplit(") ", 1)[1].split()
+            parent = fields[1]
+        except (OSError, IndexError):
+            break
+        if parent == "0" or parent in seen:
+            break
+        seen.add(parent)
+        current = PROC / parent
+        try:
+            command = (current / "cmdline").read_bytes().decode(
+                "utf-8", "replace").split("\0")
+        except OSError:
+            break
+        ancestors.append(command)
+    return ancestors
+
+
+def process_started(entry: Path) -> float:
+    """Kernel process start tick converted with the observed boot time.
+
+    `/proc/<pid>` mtime is not a process start clock: on the live 692 probe it
+    was four days newer than `ps`'s start time. Field 22 of stat is the identity
+    tick the runner also trusts, and `/proc/stat` supplies the boot epoch.
+    """
+    try:
+        fields = (entry / "stat").read_text().rsplit(") ", 1)[1].split()
+        start_ticks = int(fields[19])
+        boot = next(int(line.split()[1]) for line in (PROC / "stat").read_text().splitlines()
+                    if line.startswith("btime "))
+        return boot + start_ticks / os.sysconf("SC_CLK_TCK")
+    except (OSError, IndexError, StopIteration, ValueError):
+        return entry.stat().st_mtime
+
+
+def command_has(cmdline: list[str], name: str) -> bool:
+    """A script is an argv item of its own, never a shell-command substring."""
+    return any(part and Path(part).name == name for part in cmdline)
+
+
+def owner_tree(cmdline: list[str], cwd: Path | None) -> Path | None:
+    """The product-owner tree observed as cwd or as the CLI's cwd option."""
+    if cwd == HOME:
+        return HOME
+    for index, part in enumerate(cmdline[:-1]):
+        if part in ("-C", "--cd") and Path(cmdline[index + 1]) == HOME:
+            return HOME
+    return None
+
+
+def session_owner(cmdline: list[str], cwd: Path | None,
+                  ancestors: list[list[str]] | None = None) -> str | None:
     """Which kind of non-tick product owner this process is, if any.
 
     The console session is the *other* instance of the two that created 790/792
@@ -2191,16 +2259,27 @@ def session_owner(cmdline: list[str], cwd: Path | None) -> str | None:
     консоли» would be a caption that names the wrong thing — and this board is
     built on not doing that.
     """
-    if cwd is None or cwd != HOME:
+    if owner_tree(cmdline, cwd) is None:
         return None
-    head = Path(cmdline[0]).name if cmdline and cmdline[0] else ""
-    # `node /usr/local/bin/codex …` and the like: the interpreter is argv[0] and
-    # the CLI is the argument after it. Still an argument of its own, never a
-    # substring of a shell command.
-    if head not in OWNER_CLIS and not (len(cmdline) > 1
-                                       and Path(cmdline[1]).name in OWNER_CLIS):
+    cli = owner_cli(cmdline)
+    if cli is None:
         return None
-    return "woken" if ("--print" in cmdline or "-p" in cmdline) else "session"
+    ancestors = ancestors or []
+    if any(command_has(command, "mail_product_owner.py") for command in ancestors):
+        return "mail"
+    if any(command_has(command, "thread_tick.py") for command in ancestors):
+        return "woken"
+    # A repository-local Codex `exec` can be a development child whose cwd is
+    # HOME. Unlike Claude's explicit --name, that is not enough to call it a
+    # product owner. The installed product-owner launcher puts this stable role
+    # marker in an interactive Codex argv; observing it avoids counting task 839
+    # itself as another product owner.
+    named = any(part in ("product-owner", "product-owner-background")
+                for part in cmdline)
+    prompted = any(OWNER_PROMPT_MARKER in part for part in cmdline)
+    if not (named or prompted):
+        return None
+    return "session"
 
 
 def thread_worktrees(config: dict) -> dict[str, list[str]]:
@@ -2226,7 +2305,7 @@ def owner_wakeups(config: dict | None = None) -> list[dict]:
     `deep-research` to `companion` and `process`, `moex` to all three, and the
     four directions own four disjoint sets of repositories.
 
-    Read from `/proc` command lines and working directories only — no
+    Read from `/proc` command lines, process ancestry and working trees only — no
     transcript, no session file, and nothing the other instance says about
     itself.
     """
@@ -2237,7 +2316,6 @@ def owner_wakeups(config: dict | None = None) -> list[dict]:
             continue
         try:
             cmdline = (entry / "cmdline").read_bytes().decode("utf-8", "replace").split("\0")
-            started = entry.stat().st_mtime
         except OSError:
             continue
         try:
@@ -2252,14 +2330,31 @@ def owner_wakeups(config: dict | None = None) -> list[dict]:
         if runs_the_tick(cmdline, executable):
             kind, worktrees = "tick", owned.get(thread, [])
             src = "командная строка и исполняемый файл процесса в /proc"
-        elif (kind := session_owner(cmdline, cwd)):
+        elif owner_cli(cmdline) and owner_tree(cmdline, cwd):
+            ancestors = ancestor_cmdlines(entry)
+            kind = session_owner(cmdline, cwd, ancestors)
+            if kind is None:
+                continue
+            # A Codex launcher and its native child are one owner instance. Keep
+            # the highest observable CLI process and do not turn one window into
+            # a duplicate warning about itself.
+            if any(owner_cli(parent) for parent in ancestors):
+                continue
+            # The tick process is already the observable timer-wakeup instance.
+            # Its CLI child is implementation detail, not a fourth owner.
+            if kind == "woken":
+                continue
             # Neither a console owner nor a woken one declares a direction, so
             # what it could occupy is what it is standing in and nothing wider.
             # Guessing «все деревья» here would put every tick back to yielding
             # to every chat window.
-            thread, worktrees = None, [str(cwd)]
-            src = "командная строка и рабочий каталог процесса в /proc"
+            thread, worktrees = None, [str(owner_tree(cmdline, cwd))]
+            src = "командная строка, цепочка родителей и рабочее дерево процесса в /proc"
         else:
+            continue
+        try:
+            started = process_started(entry)
+        except OSError:
             continue
         awake.append({
             "pid": int(entry.name),
@@ -2271,6 +2366,242 @@ def owner_wakeups(config: dict | None = None) -> list[dict]:
             "src": src,
         })
     return sorted(awake, key=lambda w: w["since"])
+
+
+def _under(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _observed_path(value: str) -> Path | None:
+    if not value or not value.startswith("/"):
+        return None
+    # Linux appends this suffix to fd links after unlinking the target. The
+    # location is still observed, but statting it is no longer possible.
+    return Path(value.removesuffix(" (deleted)"))
+
+
+def _writable_fd_paths(entry: Path) -> list[Path]:
+    paths = []
+    try:
+        descriptors = list((entry / "fd").iterdir())
+    except OSError:
+        return paths
+    for descriptor in descriptors:
+        try:
+            info = (entry / "fdinfo" / descriptor.name).read_text()
+            flags_line = next(line for line in info.splitlines() if line.startswith("flags:"))
+            flags = int(flags_line.split()[1], 8)
+            if (flags & os.O_ACCMODE) not in (os.O_WRONLY, os.O_RDWR):
+                continue
+            target = _observed_path(os.readlink(descriptor))
+        except (OSError, StopIteration, ValueError):
+            continue
+        if target is not None and target.is_file():
+            paths.append(target)
+    return paths
+
+
+def _task_for_paths(paths: list[Path], tasks_by_dir: dict[str, dict]) -> tuple[dict, Path] | None:
+    tasks_root = REPO / "tasks"
+    for path in paths:
+        try:
+            relative = path.relative_to(tasks_root)
+        except ValueError:
+            continue
+        if not relative.parts:
+            continue
+        task = tasks_by_dir.get(relative.parts[0])
+        if task:
+            return task, tasks_root / relative.parts[0]
+    return None
+
+
+def _process_command(cmdline: list[str]) -> str:
+    for part in cmdline[1:]:
+        if part and not part.startswith("-") and Path(part).suffix in (".py", ".sh"):
+            return Path(part).name
+    return Path(cmdline[0]).name if cmdline and cmdline[0] else "unknown"
+
+
+def _output_entry(path: Path, observed_by: str, now: float,
+                  direct: bool) -> dict | None:
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    if not path.is_file():
+        return None
+    return {
+        "path": str(path),
+        "size": stat.st_size,
+        "modified_at": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
+        "modified_age_seconds": max(int(now - stat.st_mtime), 0),
+        "observed_by": observed_by,
+        "direct": direct,
+        "growing": None,
+        "growth_bytes": None,
+        "growth_src": "нужны два наблюдения размера файла",
+    }
+
+
+def _write_chars(entry: Path) -> int | None:
+    try:
+        fields = dict(line.split(":", 1) for line in (entry / "io").read_text().splitlines())
+        return int(fields["wchar"].strip())
+    except (OSError, KeyError, ValueError):
+        return None
+
+
+def long_lived_processes(thread: dict, catalogue: list[dict] | None = None) -> list[dict]:
+    """Processes attributable to a finished task and this thread's repositories.
+
+    Attribution is entirely external to the child: paths observed in `/proc`
+    connect it to a task directory and to a configured repository. A writable
+    fd names an output directly. A short-lived append may close between scans,
+    so a regular file beside the process's task cwd is also included when its
+    mtime is newer than the process; the evidence kind remains explicit.
+    """
+    catalogue = catalogue if catalogue is not None else task_catalogue()
+    tasks_by_dir = {(task.get("dir") or task.get("slug")): task for task in catalogue
+                    if task.get("dir") or task.get("slug")}
+    repos = [Path(path) for path in thread.get("repos", [])]
+    now = time.time()
+    found = []
+    try:
+        entries = list(PROC.iterdir())
+    except OSError:
+        return []
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        try:
+            cmdline = (entry / "cmdline").read_bytes().decode(
+                "utf-8", "replace").split("\0")
+            cwd = Path(os.readlink(entry / "cwd"))
+        except OSError:
+            continue
+        if not any(cmdline):
+            continue
+        try:
+            executable = Path(os.readlink(entry / "exe"))
+        except OSError:
+            executable = None
+        writable = _writable_fd_paths(entry)
+        observed_paths = [cwd, *writable]
+        if executable is not None:
+            observed_paths.append(executable)
+        observed_paths.extend(path for part in cmdline
+                              if (path := _observed_path(part)) is not None)
+        attributed = _task_for_paths(observed_paths, tasks_by_dir)
+        if attributed is None:
+            continue
+        task, task_root = attributed
+        if task.get("status") not in TERMINAL:
+            continue
+        matched_repos = [repo for repo in repos
+                         if any(_under(path, repo) for path in observed_paths)]
+        if not matched_repos:
+            continue
+        try:
+            started = process_started(entry)
+        except OSError:
+            continue
+        outputs: dict[str, dict] = {}
+        for path in writable:
+            item = _output_entry(path, "writable fd in /proc", now, direct=True)
+            if item:
+                outputs[item["path"]] = item
+        # The concrete 692 probe opens its JSONL only for the append itself, so
+        # its fd is normally absent during a scan. Its cwd is the task artifacts
+        # directory and only files changed after process start are candidates.
+        if _under(cwd, task_root):
+            try:
+                neighbours = list(cwd.iterdir())
+            except OSError:
+                neighbours = []
+            for path in neighbours:
+                try:
+                    changed_after_start = path.is_file() and path.stat().st_mtime >= started
+                except OSError:
+                    continue
+                if changed_after_start:
+                    item = _output_entry(
+                        path, "mtime файла в рабочем каталоге задачи новее процесса",
+                        now, direct=False)
+                    if item:
+                        outputs.setdefault(item["path"], item)
+        found.append({
+            "pid": int(entry.name),
+            "task": task.get("id"),
+            "task_title": task.get("title"),
+            "task_status": task.get("status"),
+            "repo": str(matched_repos[0]),
+            "command": _process_command(cmdline),
+            "launcher": cmdline[0],
+            "since": datetime.fromtimestamp(started, timezone.utc).isoformat(),
+            "age_seconds": max(int(now - started), 0),
+            "outputs": sorted(outputs.values(), key=lambda item: item["path"]),
+            "write_chars": _write_chars(entry),
+            "duplicate": False,
+            "duplicate_group": None,
+            "duplicate_count": 1,
+            "src": "cmdline, cwd, exe, fd и mtime в /proc/{}".format(entry.name),
+        })
+    groups: dict[tuple, list[dict]] = {}
+    for process in found:
+        signature = (process["task"], process["repo"], process["command"])
+        groups.setdefault(signature, []).append(process)
+    for signature, group in groups.items():
+        if len(group) < 2:
+            continue
+        group_id = hashlib.sha256(repr(signature).encode()).hexdigest()[:12]
+        for process in group:
+            process.update(duplicate=True, duplicate_group=group_id,
+                           duplicate_count=len(group))
+    return sorted(found, key=lambda item: (item["task"] or 0, item["command"], item["pid"]))
+
+
+def process_growth(current: list[dict], previous: dict | None) -> list[dict]:
+    """Compare observer-owned file sizes from two real process-table scans."""
+    prior = {}
+    for process in (previous or {}).get("processes", []):
+        identity = (process.get("pid"), process.get("since"))
+        for output in process.get("outputs", []):
+            prior[(*identity, output.get("path"))] = output
+    prior_processes = {(process.get("pid"), process.get("since")): process
+                       for process in (previous or {}).get("processes", [])}
+    previous_at = (previous or {}).get("observed_at")
+    for process in current:
+        for output in process["outputs"]:
+            old = prior.get((process["pid"], process["since"], output["path"]))
+            if old is None or not isinstance(old.get("size"), int):
+                continue
+            delta = output["size"] - old["size"]
+            old_process = prior_processes.get((process["pid"], process["since"]), {})
+            old_chars = old_process.get("write_chars")
+            new_chars = process.get("write_chars")
+            wrote = (isinstance(old_chars, int) and isinstance(new_chars, int)
+                     and new_chars > old_chars)
+            # A writable fd directly associates the process and file. An mtime
+            # neighbour is only a candidate until both the file and this
+            # process's kernel write counter advance in the same interval; this
+            # prevents a sleeping neighbour from claiming another probe's file.
+            attributed = output.get("direct") or wrote
+            output["growing"] = delta > 0 if attributed else None
+            output["growth_bytes"] = delta
+            if not attributed and delta > 0:
+                output["growth_src"] = (
+                    f"файл вырос {old['size']} → {output['size']} байт, но счётчик "
+                    "записи этого процесса не вырос; файл ему не приписан")
+            else:
+                output["growth_src"] = (
+                    f"размер {old['size']} → {output['size']} байт между наблюдениями"
+                    + (f" (предыдущее {previous_at})" if previous_at else ""))
+    return current
 
 
 # Where a tick leaves what it saw and what it did. The board reads it and does

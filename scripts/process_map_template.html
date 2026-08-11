@@ -2106,6 +2106,7 @@ function drawStrip(board) {
     const age = ago(ageOf({ since: owner.since, age_seconds: owner.age_seconds }));
     const who = owner.kind === "tick"
       ? "фоновое пробуждение треда «" + (owner.thread || "?") + "»"
+      : owner.kind === "mail" ? "почтовое пробуждение продакта"
       : owner.kind === "woken" ? "продакт, разбуженный тиком" : "продакт в консоли";
     const trees = (owner.worktrees || []).map(path => path.split("/").pop()).join(", ");
     s.textContent = who + (age ? " · " + age : "")

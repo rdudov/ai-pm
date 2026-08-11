@@ -37,7 +37,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -58,6 +60,7 @@ CLOSED_TASK_STATUSES = {"completed", "cancelled"}
 # How many entries the attention list carries. Unchanged from when this file
 # observed for itself; what the cap drops is counted out loud by the caller.
 ATTENTION = 12
+PROCESS_STATE = HOME / "state" / "process-inventory"
 
 
 def load_thread(name: str) -> dict:
@@ -66,6 +69,36 @@ def load_thread(name: str) -> dict:
         return config["threads"][name]
     except KeyError:
         raise SystemExit(f"unknown thread: {name}; known: {sorted(config['threads'])}")
+
+
+def process_inventory(name: str, config: dict) -> list[dict]:
+    """Current `/proc` observation plus growth since this entrypoint last ran.
+
+    The history is written by the observer, not by the child being watched. It
+    therefore supplies the second size needed for «растёт ли файл» without
+    turning a daemon's self-registration into evidence about itself.
+    """
+    path = PROCESS_STATE / f"{name}.json"
+    previous = observer.read_json(path)
+    processes = observer.process_growth(
+        observer.long_lived_processes(config), previous)
+    record = {
+        "schema_version": 1,
+        "thread": name,
+        "observed_at": datetime.now(timezone.utc).isoformat(),
+        "processes": processes,
+    }
+    PROCESS_STATE.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        temporary.write_text(json.dumps(record, ensure_ascii=False, indent=2))
+        os.replace(temporary, path)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+    return processes
 
 
 def run_projection(task: dict) -> dict | None:
@@ -132,6 +165,7 @@ def build(name: str) -> dict:
     config = load_thread(name)              # fail loudly on an unknown thread
     snapshot = observer.build(False, only=name)
     thread = snapshot["threads"][0]
+    detached = process_inventory(name, config)
 
     live, attention = [], []
     for task in thread["tasks"]:
@@ -150,6 +184,10 @@ def build(name: str) -> dict:
         "title": thread["title"],
         "products": thread["products"],
         "live_runs": live,
+        # Processes a finished task left behind. The process-map collector owns
+        # attribution and duplicate detection; this adapter only persists the
+        # previous observed sizes so growth can be stated from two measurements.
+        "long_lived_processes": detached,
         "needs_attention": attention[:ATTENTION],
         "repos": [repo_projection(repo) for repo in thread["repos"]],
         "task_count": thread["task_count"],
@@ -225,6 +263,23 @@ def main() -> None:
             p = run["progress"]
             line += f"\n      шаг {p['done']}/{p['total']}, запись {p['written_minutes_ago']} мин назад: {p['activity']}"
         print(line)
+    print(f"долгоживущих процессов завершённых задач: {len(report['long_lived_processes'])}")
+    for process in report["long_lived_processes"]:
+        duplicate = (f" ДУБЛЬ ×{process['duplicate_count']}"
+                     if process["duplicate"] else "")
+        print(f"  задача {process['task']} {process['command']}{duplicate} — "
+              f"pid {process['pid']}, живёт {process['age_seconds'] // 60} мин, "
+              f"репозиторий {process['repo']}")
+        for output in process["outputs"]:
+            growth = (f"растёт: +{output['growth_bytes']} байт"
+                      if output["growing"] is True else
+                      "рост не наблюдался" if output["growing"] is False else
+                      "рост пока не измерен")
+            relation = ("пишет" if output["growing"] is True else
+                        "открыт на запись" if output.get("direct") else
+                        "кандидат рядом с процессом")
+            print(f"      {relation} {output['path']} ({output['size']} байт; {growth}; "
+                  f"{output['growth_src']})")
     print(f"требуют внимания: {len(report['needs_attention'])}")
     for item in report["needs_attention"]:
         mark = " РАБОТА ШЛА ВНЕ УМЕРШЕГО ВЛАДЕЛЬЦА" if (item["run"] or {}).get("work_outside_owner") else ""
@@ -252,6 +307,7 @@ def main() -> None:
     for owner in report["owners_awake"]:
         who = ("фоновое пробуждение треда «{}»".format(owner["thread"])
                if owner["kind"] == "tick" else
+               "почтовое пробуждение продакта" if owner["kind"] == "mail" else
                "продакт, разбуженный тиком" if owner["kind"] == "woken" else
                "продакт в консоли")
         trees = ", ".join(owner["worktrees"]) or "рабочее дерево не названо"

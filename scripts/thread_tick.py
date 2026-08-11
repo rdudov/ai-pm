@@ -109,6 +109,16 @@ def snapshot(report: dict) -> dict:
         # очереди что-то изменилось» without a second file to keep in step.
         "pickup": sorted(item["id"] for item in report["can_pick_up"]),
         "undelivered": sorted(item["id"] for item in report["undelivered"]),
+        # A process can outlive the run record and even its completed task. Its
+        # identity belongs in the tick's state so appearance, cleanup and a new
+        # duplicate are edges rather than facts seen only by a manual CLI call.
+        "long_lived": sorted(({
+            "pid": item["pid"], "since": item["since"], "task": item["task"],
+            "command": item["command"], "repo": item["repo"],
+            "duplicate_count": item["duplicate_count"],
+        } for item in report.get("long_lived_processes", [])),
+                             key=lambda item: (item["task"] or 0, item["command"],
+                                               item["pid"])),
     }
 
 
@@ -120,6 +130,30 @@ def transitions(previous: dict, current: dict) -> list[str]:
         events.append(f"задача {task_id} числится running, но процесс мёртв")
     for task_id in sorted(set(current["blocked"]) - set(previous.get("blocked", []))):
         events.append(f"задача {task_id} перешла в blocked")
+    old_processes = {(item.get("pid"), item.get("since")): item
+                     for item in previous.get("long_lived", [])}
+    new_processes = {(item.get("pid"), item.get("since")): item
+                     for item in current.get("long_lived", [])}
+    for identity in sorted(set(new_processes) - set(old_processes)):
+        item = new_processes[identity]
+        events.append(
+            f"у завершённой задачи {item['task']} живёт процесс {item['command']} "
+            f"(pid {item['pid']})")
+    for identity in sorted(set(old_processes) - set(new_processes)):
+        item = old_processes[identity]
+        events.append(
+            f"долгоживущий процесс задачи {item['task']} {item['command']} "
+            f"(pid {item['pid']}) больше не жив")
+    old_duplicates = {(item["task"], item["repo"], item["command"]):
+                      item.get("duplicate_count", 1)
+                      for item in old_processes.values()}
+    new_duplicates = {(item["task"], item["repo"], item["command"]):
+                      item.get("duplicate_count", 1)
+                      for item in new_processes.values()}
+    for signature, count in sorted(new_duplicates.items()):
+        if count > 1 and count > old_duplicates.get(signature, 1):
+            events.append(
+                f"ДУБЛЬ: процесс задачи {signature[0]} {signature[2]} поднят {count} раза")
     # A condition that has just cleared is the transition the queue was missing.
     # It is reported on the edge, exactly like a finished run: standing in
     # «готово к запуску» is a state, becoming startable is the event.
@@ -660,6 +694,7 @@ def main() -> int:
         """The direction's state file, in the one shape the board reads."""
         return {
             "thread": args.thread, "updated_at": now, "snapshot": current,
+            "long_lived_processes": report["long_lived_processes"],
             "last_events": events, **standing,
             "idle_reminder": idle_reminder,
             "undelivered_reminder": held_reminder,

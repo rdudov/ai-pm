@@ -63,13 +63,15 @@ CHECK_FIELDS = ("at", "outcome", "outcome_src",
 # invented caption the whole board refuses, so `src` is required.
 REASON_FIELDS = ("code", "text", "src")
 
-# The two kinds of product owner instance that can be awake. `tick` is the one
+# The kinds of product owner instance that can be awake. `tick` is the one
 # `product-thread@<тред>.timer` starts and the only one that was ever observed;
 # `session` is the console owner, which is the *other* half of the pair that
 # created 790/792 and 791/793 in one hour and which no observation matched.
-# `woken` is the owner agent a tick started: same CLI in the same directory,
-# non-interactive, and calling it «продакт в консоли» would name the wrong thing.
-OWNER_KINDS = ("tick", "session", "woken")
+# `woken` is retained in the version-1 input contract for snapshots written by
+# the previous collector. The current collector folds that child into its
+# observable tick parent, so one timer wake-up is one instance. `mail` is a
+# detached owner whose `/proc` ancestry leads through the Gmail poller.
+OWNER_KINDS = ("tick", "session", "woken", "mail")
 TASK_FIELDS = ("id", "title", "status", "dir", "run", "gates", "flags", "board", "detail",
                # Whose question it is, kept apart in the document rather than
                # rederived by every reader: the areas, the counter above the

@@ -2251,17 +2251,23 @@ class TheOtherProductOwner(unittest.TestCase):
             ["claude", "--name", "product-owner", "--add-dir", "/opt/projects"],
             state.HOME), "session")
         self.assertEqual(state.session_owner(
-            ["node", "/usr/local/bin/codex", "exec"], state.HOME), "session")
+            ["node", "/usr/local/bin/codex", "-C", str(state.HOME),
+             state.OWNER_PROMPT_MARKER], Path("/root")), "session")
         # The owner agent a tick started runs the same CLI from the same
         # directory. It is a second owner, but calling it «продакт в консоли»
         # would name the wrong thing, and this board is built on not doing that.
         self.assertEqual(state.session_owner(
-            ["/usr/local/bin/claude", "--print", "--add-dir", "/opt/projects"],
-            state.HOME), "woken")
+            ["/usr/local/bin/claude", "--print", "--name", "product-owner-background"],
+            state.HOME, [["python3", "scripts/thread_tick.py", "process"]]), "woken")
+        self.assertEqual(state.session_owner(
+            ["/usr/local/bin/claude", "--print", "--name", "product-owner-background"],
+            state.HOME, [["python3", "mail_product_owner.py", "_worker"]]), "mail")
         # A child run of a task sits in its task's repository. It is a run, is
         # already on the board as one, and is not a second owner.
         self.assertIsNone(state.session_owner(
             ["claude", "--print"], Path("/opt/projects/companion-agent")))
+        self.assertIsNone(state.session_owner(
+            ["node", "/usr/local/bin/codex", "exec", "--json"], state.HOME))
         self.assertIsNone(state.session_owner(["bash", "-lc", "claude"], state.HOME))
 
     def test_a_wrapper_that_merely_carries_the_tick_is_not_the_tick(self):
@@ -2288,6 +2294,79 @@ class TheOtherProductOwner(unittest.TestCase):
         page = a_page(snapshot)
         self.assertIn("продакт в консоли", page)
         self.assertIn("может занять", page)
+
+        snapshot["owners_awake"] = [an_owner(kind="mail", thread=None,
+                                              worktrees=["/opt/projects/product-owner"])]
+        page = a_page(snapshot)
+        self.assertIn("почтовое пробуждение продакта", page)
+
+
+class LongLivedTaskProcesses(unittest.TestCase):
+    """A closed task's daemon is still work the thread must make visible."""
+
+    def test_external_observation_attributes_outputs_and_duplicate_instances(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            companion = root / "companion-agent"
+            task_root = companion / "tasks" / "692-moex"
+            cwd = task_root / "artifacts"
+            cwd.mkdir(parents=True)
+            output = cwd / "snapshots.jsonl"
+            output.write_bytes(b"one\n")
+            os.utime(output, (200, 200))
+            repo = root / "moex-trading-engine"
+            proc = root / "proc"
+            proc.mkdir()
+
+            for pid in (101, 102):
+                entry = proc / str(pid)
+                (entry / "fd").mkdir(parents=True)
+                (entry / "fdinfo").mkdir()
+                (entry / "cmdline").write_bytes(
+                    (str(repo / ".venv/bin/python") + "\0forts_field_probe.py\0").encode())
+                (entry / "cwd").symlink_to(cwd)
+                (entry / "exe").symlink_to("/usr/bin/python3")
+                os.utime(entry, (100, 100))
+
+            catalogue = [{"id": 692, "slug": "692-moex", "title": "probe",
+                          "status": "completed"}]
+            with (mock.patch.object(state, "PROC", proc),
+                  mock.patch.object(state, "REPO", companion),
+                  mock.patch.object(state.time, "time", return_value=300)):
+                processes = state.long_lived_processes(
+                    {"repos": [str(repo)]}, catalogue)
+
+            self.assertEqual([item["pid"] for item in processes], [101, 102])
+            self.assertTrue(all(item["duplicate"] for item in processes))
+            self.assertEqual({item["duplicate_count"] for item in processes}, {2})
+            self.assertEqual(processes[0]["command"], "forts_field_probe.py")
+            self.assertEqual(processes[0]["outputs"][0]["path"], str(output))
+            self.assertIn("mtime", processes[0]["outputs"][0]["observed_by"])
+
+    def test_growth_requires_two_observed_sizes(self):
+        current = [{"pid": 7, "since": "start", "outputs": [{
+            "path": "/tmp/out", "size": 15, "growing": None,
+            "growth_bytes": None, "growth_src": "first", "direct": False}],
+            "write_chars": 25}]
+        previous = {"observed_at": "before", "processes": [{
+            "pid": 7, "since": "start", "write_chars": 20,
+            "outputs": [{"path": "/tmp/out", "size": 10}]}]}
+        observed = state.process_growth(current, previous)
+        self.assertTrue(observed[0]["outputs"][0]["growing"])
+        self.assertEqual(observed[0]["outputs"][0]["growth_bytes"], 5)
+
+    def test_age_uses_the_kernel_start_tick_not_proc_directory_mtime(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            proc = Path(temporary)
+            entry = proc / "101"
+            entry.mkdir()
+            fields = ["S", "1", *(["0"] * 17), "250"]
+            (entry / "stat").write_text("101 (worker name) " + " ".join(fields))
+            (proc / "stat").write_text("cpu 1 2 3\nbtime 1000\n")
+            os.utime(entry, (9000, 9000))
+            with (mock.patch.object(state, "PROC", proc),
+                  mock.patch.object(state.os, "sysconf", return_value=100)):
+                self.assertEqual(state.process_started(entry), 1002.5)
 
 
 class WhenTheOwnerLooksAgain(unittest.TestCase):
@@ -3146,7 +3225,8 @@ class TheWakeUpSeesTheQueueMove(unittest.TestCase):
     """
 
     def report(self, ready=(), decided=(), pickup=(), live=(), undelivered=(),
-               waiting=(), worktrees=("/opt/projects/companion-agent",)):
+               waiting=(), worktrees=("/opt/projects/companion-agent",),
+               processes=()):
         return {
             "title": "Процессный контур",
             "live_runs": [{"id": i, "title": "Задача", "status": "in_progress",
@@ -3166,6 +3246,7 @@ class TheWakeUpSeesTheQueueMove(unittest.TestCase):
             "waiting_user": [{"id": i, "title": "Задача"} for i in waiting],
             "worktrees": list(worktrees),
             "owners_awake": [],
+            "long_lived_processes": list(processes),
         }
 
     def test_a_condition_that_cleared_is_a_transition_like_a_finished_run(self):
@@ -3188,6 +3269,25 @@ class TheWakeUpSeesTheQueueMove(unittest.TestCase):
         self.assertEqual(len(events), 1)
         self.assertIn("835", events[0])
         self.assertIn("не исполнено", events[0])
+
+    def test_a_surviving_process_and_a_duplicate_wake_the_tick(self):
+        process = {"pid": 7, "since": "start", "task": 692,
+                   "command": "forts_field_probe.py", "repo": "/opt/projects/moex",
+                   "duplicate_count": 1}
+        before = tick.snapshot(self.report())
+        one = tick.snapshot(self.report(processes=[process]))
+        self.assertIn("у завершённой задачи 692 живёт процесс forts_field_probe.py",
+                      tick.transitions(before, one)[0])
+
+        duplicate = {**process, "pid": 8, "duplicate_count": 2}
+        first = {**process, "duplicate_count": 2}
+        doubled = tick.snapshot(self.report(processes=[first, duplicate]))
+        events = tick.transitions(one, doubled)
+        self.assertTrue(any("ДУБЛЬ" in event and "2 раза" in event for event in events))
+
+    def test_the_tick_persists_the_full_inventory_even_when_it_does_not_wake(self):
+        source = Path(tick.__file__).read_text()
+        self.assertIn('"long_lived_processes": report["long_lived_processes"]', source)
 
     def test_yielding_to_another_owner_leaves_the_list_on_disk(self):
         """Yielding is right; yielding silently is how the list reaches nobody."""
