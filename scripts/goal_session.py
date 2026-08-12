@@ -42,6 +42,14 @@
 он поднимает её заново из долговечной цели и контрольного снимка, без участия
 пользователя.
 
+Уступает он при этом только наблюдаемо живой сессии. Принятый запрос на запуск
+ею не является: единица может подняться и тут же выйти — например, когда
+маршрутизатор увёл продакта к Codex, которым продолжение разговора не
+выражается. Поэтому маршрут спрашивается до подавления владельца тика, а запуск
+подтверждается перечитанным контрольным снимком; во всех остальных случаях
+направление ведёт обычный фоновый продакт тика, и он же проходит пост-контроль
+стоячей цели. Цель без продакта — это то, чего в этом режиме быть не должно.
+
 Тут же живёт машинный пост-контроль стоячей цели. Пробуждение по цели, которая
 стоит, обязано кончиться одним из двух: живым прогоном по её задаче или
 названным блокером. `SILENT` третьим исходом не является — и это проверяется
@@ -104,6 +112,13 @@ KEEP_TURNS = tunable("PRODUCT_OWNER_GOAL_SESSION_KEEP_TURNS", 40)
 # при живом процессе. Больше таймаута хода: ход имеет право быть долгим.
 HEARTBEAT_STALE_SECONDS = tunable(
     "PRODUCT_OWNER_GOAL_SESSION_HEARTBEAT_STALE_SECONDS", TURN_TIMEOUT + 600)
+# Сколько watchdog ждёт от поднятой сессии подтверждения, что она действительно
+# ведёт направление. Дороже этого ожидания только его отсутствие: тик, уступивший
+# принятому запросу на запуск, оставляет цель без продакта до следующего тика.
+LAUNCH_HANDSHAKE_SECONDS = tunable(
+    "PRODUCT_OWNER_GOAL_SESSION_HANDSHAKE_SECONDS", 90)
+HANDSHAKE_POLL_SECONDS = tunable(
+    "PRODUCT_OWNER_GOAL_SESSION_HANDSHAKE_POLL_SECONDS", 1)
 
 
 def now() -> str:
@@ -225,6 +240,44 @@ def reinforced(thread: str) -> list[dict]:
         return []
     return [goal for goal in goals
             if goal.get("control") == product_goal.REINFORCED or goal.get("unreadable")]
+
+
+def session_route() -> dict:
+    """Выражается ли продолжающийся разговор тем движком, который выбрал маршрут.
+
+    Непрерывность здесь — штатное средство Claude CLI: разговор лежит у него на
+    диске и продолжается по идентификатору. Когда маршрутизатор уводит продакта
+    к Codex, продолжать нечем — ни этого идентификатора, ни этой предыстории у
+    того движка нет, и сессия обязана уступить обычному фоновому продакту.
+
+    Ответ нужен в двух местах, и потому решение ровно одно и живёт здесь: сессии,
+    которая иначе открыла бы разговор, который не сможет вести, и watchdog'у,
+    который иначе подавил бы владельца тика ради сессии, немедленно выходящей.
+    Ревью (F-003) назвало вторую половину: тик уступал успешному запросу
+    `systemd-run`, дочерняя единица видела Codex и выходила, и при активной цели
+    направление оставалось без продакта вообще.
+    """
+    route, _usage, error = claude_product_owner.inspect_live()
+    return {"ok": route.engine == "claude", "engine": route.engine,
+            "model": route.model, "reason": route.reason, "error": error,
+            "src": "маршрут продакта, спрошенный claude_product_owner.inspect_live()"}
+
+
+def stand_down(thread: str, route: dict) -> dict:
+    """Записать, что непрерывной сессии не будет, и почему её ведёт тик.
+
+    Это не тихий обход: запись остаётся в контрольном снимке, поднимается на
+    панель через `stopped` и объясняет наблюдателю, почему направление снова
+    ведёт двадцатиминутный продакт.
+    """
+    return write(thread, {
+        **read(thread), "schema_version": 1, "thread": thread,
+        "stopped": {"at": now(),
+                    "reason": f"маршрут увёл к {route['engine']}: "
+                              "продолжение сессии этим движком не выражается",
+                    "route": route.get("reason"),
+                    "handover": "направление ведёт обычный фоновый продакт тика"},
+        "pid": None, "since": None, "heartbeat": now()})
 
 
 def observation(thread: str) -> dict:
@@ -525,19 +578,18 @@ def loop(thread: str, once: bool = False) -> int:
               "непрерывная сессия не нужна", file=sys.stderr)
         return 0
 
-    route, _usage, route_error = claude_product_owner.inspect_live()
-    if route.engine != "claude":
+    route = session_route()
+    if not route["ok"]:
         # Маршрут увёл к Codex: у того разговора нет продолжения по этому
         # идентификатору. Это записанная вынужденная ротация, а не тихий обход.
-        write(thread, {**read(thread), "schema_version": 1, "thread": thread,
-                       "stopped": {"at": now(),
-                                   "reason": f"маршрут увёл к {route.engine}: "
-                                             "продолжение сессии этим движком не выражается",
-                                   "route": route.reason},
-                       "pid": None, "since": None, "heartbeat": now()})
-        print(f"маршрут выбрал {route.engine}: непрерывная сессия не поднимается, "
+        # Уступать тут есть кому: watchdog спрашивает тот же маршрут до того, как
+        # подавит владельца тика, так что после этого выхода направление ведёт
+        # обычный фоновый продакт, а не никто.
+        stand_down(thread, route)
+        print(f"маршрут выбрал {route['engine']}: непрерывная сессия не поднимается, "
               "направление ведёт двадцатиминутный тик", file=sys.stderr)
         return 0
+    route_error = route.get("error")
 
     previous_record = read(thread)
     # Восстановление после смерти — тоже продолжение, если продолжать есть что.
@@ -562,8 +614,8 @@ def loop(thread: str, once: bool = False) -> int:
         # Ходы и момент открытия принадлежат разговору, а не процессу: после
         # восстановления счётчик, начатый заново, сказал бы «ходов 0» о сессии,
         # которая их уже сделала.
-        "session": {"id": session_id, "engine": route.engine, "model": route.model,
-                    "route": route.reason,
+        "session": {"id": session_id, "engine": route["engine"], "model": route["model"],
+                    "route": route["reason"],
                     "opened_at": ((previous_record.get("session") or {}).get("opened_at")
                                   if resumed else None),
                     "turns": ((previous_record.get("session") or {}).get("turns") or 0)
@@ -769,25 +821,72 @@ def launch(thread: str) -> dict:
             "src": "отделение сеанса без systemd: граница слабее временной единицы"}
 
 
+def await_live(thread: str, before: dict, seconds: float | None = None) -> dict:
+    """Дождаться, пока поднятая сессия действительно начнёт вести направление.
+
+    Принятый запрос на запуск ведущей сессией не является, и разница между ними
+    стоила ревью отдельного замечания (F-003): `systemd-run` возвращает ноль,
+    как только systemd принял единицу, а дочерний процесс после этого может
+    увидеть чужой маршрут, отсутствие целей или собственную ошибку и выйти. Тик,
+    уступивший этому нулю, оставляет цель без продакта до следующего тика.
+
+    Поэтому уступка стоит не на коде возврата запуска, а на наблюдении: в
+    контрольном снимке появился *другой* процесс, и он жив. Отказ поднятой
+    сессии виден там же и сразу — она записывает причину в `stopped` и выходит,
+    и ждать её полный срок незачем.
+    """
+    seconds = LAUNCH_HANDSHAKE_SECONDS if seconds is None else seconds
+    was = (before.get("pid"), before.get("since"))
+    was_stopped = before.get("stopped")
+    started = time.time()
+    while True:
+        record = read(thread)
+        alive = liveness(record)
+        waited = round(time.time() - started, 1)
+        if alive["live"] and (record.get("pid"), record.get("since")) != was:
+            return {"held": True, "waited_seconds": waited, "pid": alive.get("pid"),
+                    "session": (record.get("session") or {}).get("id"),
+                    "reason": alive["reason"],
+                    "src": "контрольный снимок сессии, перечитанный после запуска"}
+        stopped = record.get("stopped")
+        if stopped and stopped != was_stopped:
+            return {"held": False, "waited_seconds": waited,
+                    "reason": "поднятая сессия сразу остановилась: "
+                              f"{stopped.get('reason')}",
+                    "src": "контрольный снимок сессии, перечитанный после запуска"}
+        if time.time() - started >= seconds:
+            return {"held": False, "waited_seconds": waited,
+                    "reason": f"поднятая сессия не начала вести направление за "
+                              f"{int(seconds)} с: {alive['reason']}",
+                    "src": "контрольный снимок сессии, перечитанный после запуска"}
+        time.sleep(HANDSHAKE_POLL_SECONDS)
+
+
 def watchdog(thread: str, moment: datetime, act: bool = True) -> dict:
     """Что делает тик, когда направление ведёт непрерывная сессия.
 
-    Три исхода, и все три записываются в снимок направления: сессия не нужна
-    (усиленных целей нет — обычная работа не получает ничего лишнего); сессия
-    жива, и тогда тик не поднимает второго продакта поверх неё; сессии нет или
-    она умерла, и тогда тик восстанавливает её из долговечной цели и
-    контрольного снимка — без участия пользователя.
+    Исходы записываются в снимок направления все до одного, и каждый отвечает на
+    единственный вопрос тика — уступать ли ему своего продакта (`holds`).
+
+    Сессия не нужна: усиленных целей нет, обычная работа не получает ничего
+    лишнего. Сессия жива: тик не поднимает второго продакта поверх неё. Маршрут
+    ушёл к другому движку: непрерывного разговора в этом обходе не будет, и
+    направление ведёт обычный фоновый продакт тика — эта ветка спрашивается
+    *до* подавления владельца, потому что подавить ради сессии, которая сейчас
+    выйдет, значит оставить цель без продакта вообще. Сессия умерла: тик
+    поднимает её заново из долговечной цели и контрольного снимка и уступает
+    только тогда, когда наблюдал её живой.
     """
     goals = reinforced(thread)
     record = read(thread)
     if not goals:
-        return {"at": moment.isoformat(), "mode": "none", "live": False,
+        return {"at": moment.isoformat(), "mode": "none", "live": False, "holds": False,
                 "detail": "целей под усиленным контролем нет: направление ведёт тик",
                 "session": record.get("session"),
                 "src": "цели направления из продуктового хранилища"}
     alive = liveness(record)
     if alive["live"]:
-        return {"at": moment.isoformat(), "mode": "session", "live": True,
+        return {"at": moment.isoformat(), "mode": "session", "live": True, "holds": True,
                 "pid": alive.get("pid"),
                 "session": record.get("session"),
                 "turns": record.get("session", {}).get("turns"),
@@ -795,18 +894,44 @@ def watchdog(thread: str, moment: datetime, act: bool = True) -> dict:
                 "heartbeat": record.get("heartbeat"),
                 "detail": "непрерывная сессия жива: тик не поднимает второго продакта",
                 "src": alive["src"]}
-    started = launch(thread) if act else {"started": False, "reason": "сухой прогон"}
+    route = session_route()
+    if not route["ok"]:
+        if act:
+            stand_down(thread, route)
+        return {"at": moment.isoformat(), "mode": "session", "live": False,
+                "holds": False, "recovered": False,
+                "recovery_reason": alive["reason"],
+                "previous_session": record.get("session", {}).get("id"),
+                "route": route,
+                "handover": "обычный фоновый продакт тика",
+                "detail": f"маршрут увёл к {route['engine']}: продолжения разговора "
+                          "этим движком нет",
+                "goals": [goal["id"] for goal in goals],
+                "src": route["src"]}
+    started = (launch(thread) if act else
+               {"started": False, "reason": "сухой прогон: сессию не поднимали"})
+    handshake = (await_live(thread, record) if started.get("started")
+                 else {"held": False, "waited_seconds": 0.0,
+                       "reason": str(started.get("error") or started.get("reason")),
+                       "src": "запуск сессии не состоялся: ждать было нечего"})
+    failed = ("сухой прогон: сессию не поднимали, направление вёл бы продакт тика"
+              if not act else "сессию поднять не удалось: " + str(handshake["reason"]))
     return {"at": moment.isoformat(), "mode": "session", "live": False,
-            "recovered": started.get("started", False),
+            # `recovered` означает «направление снова ведёт сессия», а не
+            # «запрос на запуск принят»: между этими двумя утверждениями и
+            # проходила потерянная цель.
+            "recovered": handshake["held"],
+            "holds": handshake["held"],
+            "handshake": handshake,
             "recovery_reason": alive["reason"],
             "previous_session": record.get("session", {}).get("id"),
             "boundary": started.get("boundary"),
             "error": started.get("error"),
+            "handover": None if handshake["held"] else "обычный фоновый продакт тика",
             "detail": ("сессия восстановлена watchdog'ом: " + alive["reason"])
-                      if started.get("started") else
-                      ("сессию поднять не удалось: " + str(started.get("error"))),
+                      if handshake["held"] else failed,
             "goals": [goal["id"] for goal in goals],
-            "src": alive["src"]}
+            "src": handshake["src"]}
 
 
 # ---------------------------------------------------------------------------

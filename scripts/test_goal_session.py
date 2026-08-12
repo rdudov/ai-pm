@@ -170,15 +170,146 @@ class WhenTheModeIsOn(unittest.TestCase):
         session.write("process", {"pid": 999_999_999, "since": 1,
                                   "heartbeat": session.now(),
                                   "session": {"id": "s-1", "turns": 3}})
-        original = session.launch
-        session.launch = lambda thread: {"started": True, "boundary": "systemd_transient_unit"}
+
+        def started_and_leading(thread: str) -> dict:
+            """Единица поднялась и записала себя ведущей — так это и выглядит."""
+            session.write(thread, {"pid": os.getpid(),
+                                   "since": session.start_tick(os.getpid()),
+                                   "heartbeat": session.now(),
+                                   "session": {"id": "s-1", "turns": 3}})
+            return {"started": True, "boundary": "systemd_transient_unit"}
+
+        original, route = session.launch, session.session_route
+        session.launch = started_and_leading
+        session.session_route = lambda: {"ok": True, "engine": "claude", "model": "opus",
+                                         "reason": "opus_remaining=80%", "error": None,
+                                         "src": "проба маршрута"}
         try:
             state = session.watchdog("process", datetime.now(timezone.utc))
         finally:
-            session.launch = original
+            session.launch, session.session_route = original, route
         self.assertTrue(state["recovered"])
+        self.assertTrue(state["holds"])
         self.assertEqual(state["previous_session"], "s-1")
         self.assertIn("не наблюдается", state["recovery_reason"])
+
+
+class TheGoalIsNeverLeftWithoutAnOwner(unittest.TestCase):
+    """F-003: уступка стоит на наблюдённой сессии, а не на принятом запросе запуска.
+
+    Порядок, в котором терялась цель, был ровно такой: watchdog отправлял
+    `systemd-run`, получал ноль, тик по этому нулю не будил своего продакта, а
+    поднятая единица видела маршрут на Codex и выходила. Каждое звено при этом
+    отчитывалось об успехе, и только вместе они оставляли активную цель без
+    продакта до следующего тика — где всё повторялось. Здесь проверяется весь
+    порядок целиком, а не каждое звено по отдельности.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.previous = os.environ.get("PRODUCT_OWNER_GOALS")
+        os.environ["PRODUCT_OWNER_GOALS"] = str(self.root / "goals")
+        self.addCleanup(self.restore_env)
+        self.sessions, session.SESSIONS = session.SESSIONS, self.root / "sessions"
+        self.addCleanup(lambda: setattr(session, "SESSIONS", self.sessions))
+        self.route, self.launch = session.session_route, session.launch
+        self.addCleanup(self.restore_stubs)
+        self.opened = goals.open_goal("process", "результат", ["условие"], 1094)
+        goals.add_signal(self.opened["id"], "manual_bypass", "обход", "trace.md 1094")
+        session.write("process", {"pid": 999_999_999, "since": 1,
+                                  "heartbeat": session.now(),
+                                  "session": {"id": "s-old", "turns": 4}})
+        self.launched: list[str] = []
+
+    def restore_env(self) -> None:
+        if self.previous is None:
+            os.environ.pop("PRODUCT_OWNER_GOALS", None)
+        else:
+            os.environ["PRODUCT_OWNER_GOALS"] = self.previous
+
+    def restore_stubs(self) -> None:
+        session.session_route, session.launch = self.route, self.launch
+
+    def to_codex(self) -> None:
+        session.session_route = lambda: {
+            "ok": False, "engine": "codex", "model": "gpt", "error": None,
+            "reason": "observed_opus_and_fable_limits_exhausted", "src": "проба маршрута"}
+
+    def to_claude(self) -> None:
+        session.session_route = lambda: {
+            "ok": True, "engine": "claude", "model": "opus", "error": None,
+            "reason": "opus_remaining=80%", "src": "проба маршрута"}
+
+    def test_a_route_that_left_claude_is_decided_before_the_owner_is_suppressed(self):
+        self.to_codex()
+        session.launch = lambda thread: self.launched.append(thread)
+        state = session.watchdog("process", datetime.now(timezone.utc))
+        self.assertEqual(self.launched, [], "единицу, которая сразу выйдет, не поднимают")
+        self.assertFalse(state["holds"])
+        self.assertIn("codex", state["detail"])
+        self.assertIn("продакт тика", state["handover"])
+        self.assertIn("маршрут увёл", session.read("process")["stopped"]["reason"])
+
+    def test_the_exact_order_that_used_to_lose_the_goal(self):
+        """watchdog → решение тика → дочерняя единица на маршруте Codex."""
+        self.to_codex()
+        session.launch = lambda thread: {"started": True,
+                                         "boundary": "systemd_transient_unit"}
+        state = session.watchdog("process", datetime.now(timezone.utc))
+        holds, handover = tick.session_leads(state, [goal()])
+        code = session.loop("process", once=True)
+        self.assertFalse(holds, "тик уступил бы сессии, которой нет")
+        self.assertEqual(code, 0)
+        self.assertEqual(len(handover), 1)
+        self.assertIn("0001", handover[0])
+        self.assertIn("ведёт продакт тика", handover[0])
+
+    def test_a_unit_that_started_and_refused_does_not_suppress_the_tick(self):
+        """Отказ дочерней единицы виден в её же снимке — и сразу, а не через срок."""
+        self.to_claude()
+
+        def refuse(thread: str) -> dict:
+            session.write(thread, {**session.read(thread), "pid": None, "since": None,
+                                   "stopped": {"at": session.now(),
+                                               "reason": "маршрут увёл к codex"}})
+            return {"started": True, "boundary": "systemd_transient_unit"}
+
+        session.launch = refuse
+        state = session.watchdog("process", datetime.now(timezone.utc))
+        self.assertFalse(state["holds"])
+        self.assertFalse(state["recovered"])
+        self.assertIn("сразу остановилась", state["handshake"]["reason"])
+        self.assertIn("продакт тика", state["handover"])
+
+    def test_a_launch_that_never_comes_alive_does_not_suppress_the_tick(self):
+        """Принятый запрос — ещё не ведущая сессия; ожидание ограничено сроком."""
+        self.to_claude()
+        session.launch = lambda thread: {"started": True,
+                                         "boundary": "systemd_transient_unit"}
+        window, poll = session.LAUNCH_HANDSHAKE_SECONDS, session.HANDSHAKE_POLL_SECONDS
+        session.LAUNCH_HANDSHAKE_SECONDS, session.HANDSHAKE_POLL_SECONDS = 0.3, 0.05
+        try:
+            state = session.watchdog("process", datetime.now(timezone.utc))
+        finally:
+            session.LAUNCH_HANDSHAKE_SECONDS = window
+            session.HANDSHAKE_POLL_SECONDS = poll
+        self.assertFalse(state["holds"])
+        self.assertIn("не начала вести направление", state["handshake"]["reason"])
+
+    def test_the_tick_leads_a_standing_goal_the_session_cannot(self):
+        dead = {"mode": "session", "holds": False, "detail": "маршрут увёл к codex"}
+        holds, handover = tick.session_leads(dead, [goal()])
+        self.assertFalse(holds)
+        self.assertIn("0001", handover[0])
+        live = {"mode": "session", "holds": True, "detail": "сессия жива"}
+        self.assertEqual(tick.session_leads(live, [goal()]), (True, []))
+
+    def test_normal_work_gets_nothing_extra_from_this(self):
+        """Без усиленной цели тик ведёт направление как раньше и молча."""
+        self.assertEqual(tick.session_leads({"mode": "none", "holds": False}, []),
+                         (False, []))
 
 
 class SignificantChange(unittest.TestCase):
@@ -436,6 +567,8 @@ class TheTickBecomesAWatchdog(unittest.TestCase):
         source = Path(tick.__file__).read_text()
         body = source[source.index("def main("):]
         self.assertIn("session = goal_session.watchdog(", body)
+        self.assertIn("session_holds, handover = session_leads(session, goals[\"objects\"])",
+                      body)
         self.assertIn("woke = (bool(events) or args.force) and not session_holds", body)
 
     def test_the_board_is_told_who_is_driving_even_when_nobody_is(self):

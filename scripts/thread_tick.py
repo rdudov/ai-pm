@@ -378,6 +378,30 @@ def goal_watch(thread: str, report: dict, stored: dict, moment: datetime) -> dic
             "reminder": reminder, "panel": panel, "objects": objects}
 
 
+def session_leads(session: dict, standing_goals: list[dict]) -> tuple[bool, list[str]]:
+    """Уступает ли тик направление сессии — и что записать, когда не уступает.
+
+    Уступка — самое дорогое решение этого пробуждения: пока она стоит, тик
+    сознательно не поднимает своего продакта. Поэтому она берётся из одного поля
+    watchdog'а, который единственный наблюдал сессию, а не собирается здесь из
+    признаков. Раньше собиралась: успешно принятый запрос `systemd-run` считался
+    за ведущую сессию, дочерняя единица видела маршрут на Codex и выходила, и при
+    активной усиленной цели направление оставалось без продакта вовсе.
+
+    Вторая половина того же — обратная. Если вести цель сессии некем, вести её
+    обязан продакт тика, и обязан на этом же пробуждении, а не когда совпадёт
+    частота напоминания: иначе стоячая цель ждала бы двадцать минут ради того же
+    решения, а обязательный пост-контроль судил бы пробуждение, которого не было.
+    """
+    if session.get("mode") != "session" or session.get("holds"):
+        return bool(session.get("holds")), []
+    if not standing_goals:
+        return False, []
+    return False, ["цель " + ", ".join(str(goal["id"]) for goal in standing_goals)
+                   + " осталась без непрерывной сессии: " + str(session.get("detail"))
+                   + " — ведёт продакт тика"]
+
+
 def codex_window() -> dict | None:
     """The weekly Codex window, from the CLI's own session records."""
     try:
@@ -484,6 +508,13 @@ def outcome(before: dict, after: dict | None, woke: bool, report: dict,
             if session.get("recovered"):
                 return ("не будился: watchdog поднял непрерывную сессию заново — "
                         + str(session.get("recovery_reason")))
+            if session.get("handover"):
+                # Сессии нет, и уступать было некому: направление ведёт этот
+                # тик. Будить было не за чем — стоячая цель разбудила бы его
+                # выше, — но «сессия не ведёт» и «новостей нет» на доске должны
+                # читаться по-разному.
+                return ("не будился: новостей нет; непрерывной сессии нет — "
+                        + str(session.get("detail")))
         return "не будился: ни событий, ни простоя при доступной работе"
     started = started_runs(before, after)
     if started:
@@ -883,8 +914,8 @@ def main() -> int:
     # Обычная работа сюда не попадает: без усиленной цели `mode` остаётся `none`
     # и всё ниже идёт ровно как раньше.
     session = goal_session.watchdog(args.thread, moment, act=not args.dry_run)
-    session_holds = session["mode"] == "session" and (
-        session.get("live") or session.get("recovered"))
+    session_holds, handover = session_leads(session, goals["objects"])
+    events += handover
     woke = (bool(events) or args.force) and not session_holds
 
     def record(final: dict | None, done: bool) -> dict:
