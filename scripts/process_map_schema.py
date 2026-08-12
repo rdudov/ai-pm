@@ -72,6 +72,19 @@ REASON_FIELDS = ("code", "text", "src")
 # observable tick parent, so one timer wake-up is one instance. `mail` is a
 # detached owner whose `/proc` ancestry leads through the Gmail poller.
 OWNER_KINDS = ("tick", "session", "woken", "mail")
+
+# What a durable goal has to carry to be shown at all. It is product memory
+# rather than an observation of a process, so what the board prints is the
+# promise («какой пользовательский результат обещан»), where it stands («где
+# ближайший разрыв»), what is being waited on and under which control — and, on
+# the same rule as every caption here, what observed all of it.
+GOAL_FIELDS = ("id", "state", "control", "outcome", "observable", "main_task",
+               "correctives", "gap", "next_transition", "pause", "signals",
+               "waiting_on", "src")
+GOAL_STATES = ("active", "paused", "closed")
+# Two kinds of attention, and the second one is turned on by an observed
+# deviation rather than chosen. Normal work never gets it.
+GOAL_CONTROLS = ("normal", "reinforced")
 TASK_FIELDS = ("id", "title", "status", "dir", "run", "gates", "flags", "board", "detail",
                # Whose question it is, kept apart in the document rather than
                # rederived by every reader: the areas, the counter above the
@@ -340,6 +353,41 @@ def validate_next_check(value, where: str) -> dict:
     return value
 
 
+def validate_goal(goal: dict, where: str) -> dict:
+    """Check one durable goal; return it unchanged or raise ContractError.
+
+    The same rule the plates live under: what is shown as a fact says what
+    observed it. A goal also has to carry the user result and the main task —
+    without them the board would print a mode without a promise, which is the
+    caption this whole area exists to avoid.
+    """
+    if not isinstance(goal, dict):
+        raise ContractError(f"{where}: ожидался объект")
+    _require(goal, GOAL_FIELDS, where)
+    if goal["state"] not in GOAL_STATES:
+        raise ContractError(f"{where}: состояние {goal['state']!r}")
+    if goal["control"] not in GOAL_CONTROLS:
+        raise ContractError(f"{where}: контроль {goal['control']!r}")
+    if not str(goal["outcome"]).strip():
+        raise ContractError(f"{where}: пустой пользовательский результат")
+    if not str(goal["src"] or "").strip():
+        raise ContractError(f"{where}: цель показана, но не сказано, чем наблюдена")
+    for signal in goal["signals"]:
+        _require(signal, ("code", "text", "src"), f"{where}: признак отклонения")
+        if not str(signal["src"] or "").strip():
+            raise ContractError(f"{where}: признак назван, но не сказано, чем наблюдён")
+    for corrective in goal["correctives"]:
+        _require(corrective, ("task", "effect", "return_criterion", "accepted"),
+                 f"{where}: корректирующая задача")
+        # Both halves or neither: «заведём ремонт» without the observable
+        # criterion for coming back is how a chain stops at the closed repair.
+        if not str(corrective["effect"]).strip() or not str(corrective["return_criterion"]).strip():
+            raise ContractError(
+                f"{where}: корректирующая задача без пользовательского эффекта "
+                "или без критерия возврата к основной задаче")
+    return goal
+
+
 def validate_snapshot(snapshot: dict) -> dict:
     """Check a collector snapshot; return it unchanged or raise ContractError."""
     if not isinstance(snapshot, dict):
@@ -356,6 +404,11 @@ def validate_snapshot(snapshot: dict) -> dict:
         where_thread = f"направление {thread.get('key')!r}"
         _require(thread, THREAD_FIELDS, where_thread)
         validate_check(thread["check"], f"{where_thread}: проверка")
+        # Absent means «этот снимок собран до появления целей», which a state
+        # file written by an older tick genuinely is. An empty list means the
+        # store was read and holds none — two different claims, kept apart.
+        for goal in thread.get("goals") or []:
+            validate_goal(goal, f"{where_thread}: цель {goal.get('id')!r}")
         validate_next_check(thread["next_check"], f"{where_thread}: следующая проверка")
         for task in thread["tasks"]:
             where = f"задача {task.get('id')!r}"

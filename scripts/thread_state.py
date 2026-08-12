@@ -176,6 +176,12 @@ def build(name: str) -> dict:
     else:
         detached_observation = {"available": True, "reason": None}
 
+    # This entrypoint is the wake-up's own observation, so it is the one allowed
+    # to record how much processor time each awake owner had burned by now. The
+    # board must not: it is rebuilt every few seconds in live mode, and a
+    # difference measured over seconds would make every owner look idle.
+    observer.write_owner_observations(snapshot["owners_awake"])
+
     live, attention = [], []
     for task in thread["tasks"]:
         state = run_projection(task)

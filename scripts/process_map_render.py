@@ -448,6 +448,10 @@ def build_board(snapshot: dict) -> dict:
             # And when it looks next, as systemd reported it while the snapshot
             # was being collected. Carried through on the same rule.
             "next_check": thread["next_check"],
+            # What is owed to the user on this direction, and where it stands.
+            # Carried through untouched as well: a goal is a record of a promise,
+            # and a renderer that summarised it would be paraphrasing a promise.
+            "goals": thread.get("goals") or [],
         })
     # A strip above the columns, so the two questions a person opens the board
     # for — who is working, where the jam is — are answered without scrolling

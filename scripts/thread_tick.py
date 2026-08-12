@@ -20,13 +20,22 @@ Those two last ones exist because the first four could not answer «что те�
 forty minutes and moved when the user asked. A condition that is a field becomes
 a transition like any other.
 
-And two *states* wake it too, because a transition is not the only kind of news:
+A durable goal is read before any of that and adds two more of each. Turning on
+reinforced control, and a goal changing state, are transitions; a goal standing
+with nothing live doing its work is a state. The goal itself lives in the product
+store on disk precisely because this process does not survive its own wake-up:
+the timer raises a new one every interval and the router may hand it to the other
+family, so «что обещано пользователю и где это стоит» cannot live in a session.
+
+And three *states* wake it too, because a transition is not the only kind of news:
 
   - идёт простой: no live run of this direction while its queue is not empty
   - «сделано, но не доставлено» стоит дольше разумного порога
+  - долговечная цель стоит: ничего живого не занимается ни основной задачей,
+    ни её корректирующими
 
-Both are the same defect seen from two sides, and both were invisible here by
-construction. A direction with ten startable tasks and no live run produces no
+The first two are the same defect seen from two sides, and both were invisible
+here by construction. A direction with ten startable tasks and no live run produces no
 edge at all, so `if not events: return 0` made it mute forever: on 2026-08-07 all
 four timers fired at 16:06:56, sixteen tasks stood startable across the contour,
 nothing was running, and neither a letter nor a line on the board appeared. The
@@ -63,6 +72,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import codex_budget  # noqa: E402
 import outbound  # noqa: E402
+import product_goal  # noqa: E402
 import product_memory  # noqa: E402
 import runner_contract  # noqa: E402
 from process_map_state import RUNNER_SCRIPTS, tunable  # noqa: E402
@@ -79,6 +89,12 @@ MAIL_TO = "rdudov@gmail.com"
 # observation: a queue that has not moved is said once an hour, and a queue that
 # moved is news at the next tick.
 IDLE_REMIND_SECONDS = tunable("PRODUCT_OWNER_IDLE_REMIND_SECONDS", 3600)
+# How often a durable goal standing with nothing live doing its work may be said
+# again. Shorter than the idle reminder on purpose: a goal under reinforced
+# control is problematic work the user asked to be *driven*, so one tick with
+# nothing happening on it is already news. One wake-up interval, so it is said
+# every tick the goal stands and never twice for the same tick.
+GOAL_REMIND_SECONDS = tunable("PRODUCT_OWNER_GOAL_REMIND_SECONDS", 1200)
 # How long a finished task may hold a document nobody was shown before that
 # becomes an event. The user saw one stand over forty minutes, and then several
 # at once; half an hour is inside the span they were already unhappy about.
@@ -240,7 +256,8 @@ def overdue_undelivered(report: dict) -> list[dict]:
             if (item["age_seconds"] or 0) >= UNDELIVERED_SECONDS]
 
 
-def repeatable(previous: dict | None, signature: str, now: datetime) -> bool:
+def repeatable(previous: dict | None, signature: str, now: datetime,
+               interval: int = IDLE_REMIND_SECONDS) -> bool:
     """Whether a standing reminder may be said again.
 
     Two guards, and the second one is why this is a frequency rather than a mute
@@ -255,7 +272,7 @@ def repeatable(previous: dict | None, signature: str, now: datetime) -> bool:
         last = datetime.fromisoformat(previous["at"])
     except (KeyError, TypeError, ValueError):
         return True
-    return (now - last).total_seconds() >= IDLE_REMIND_SECONDS
+    return (now - last).total_seconds() >= interval
 
 
 def standing_events(report: dict, current: dict, stored: dict,
@@ -299,6 +316,58 @@ def standing_events(report: dict, current: dict, stored: dict,
             + ", ".join(str(item["id"]) for item in overdue))
         held_reminder = {"at": now, "signature": held_signature}
     return events, idle_reminder, held_reminder
+
+
+def goal_watch(thread: str, report: dict, stored: dict, moment: datetime) -> dict:
+    """The durable goals of this direction: read, escalated and made loud.
+
+    Read *before* anything is decided, because that is the whole difference
+    between a mode and an intention. A timer raises a new process every twenty
+    minutes and the router may hand it to the other family, so nothing a previous
+    wake-up understood survives except what is on disk.
+
+    Three things happen here and none of them needs a human. The deviations
+    observable in the main task's own artifacts are collected and recorded, so
+    reinforced control switches on by observation rather than by somebody
+    noticing. A goal that turned on control since the last tick is a transition
+    like any other. And a goal with nothing live doing its work is a standing
+    state exactly like идёт простой — rate-limited rather than silenced, because
+    a goal standing still *is* the news.
+
+    A store that cannot be read is said out loud rather than treated as «целей
+    нет»: an unreadable goal is the case where silence costs the most.
+    """
+    previous = {str(goal.get("id")): goal for goal in stored.get("goals") or []}
+    try:
+        for goal in product_goal.active(thread):
+            product_goal.apply_observed(goal["id"])
+        panel = product_goal.panel(thread)
+        waiting = product_goal.standing(
+            thread, [item["id"] for item in report["live_runs"]])
+    except (product_goal.GoalError, OSError, ValueError) as error:
+        return {"transitions": [f"долговечные цели направления не читаются: {error}"],
+                "standing": [], "reminder": stored.get("goal_reminder"), "panel": []}
+
+    transitions_seen = []
+    for goal in panel:
+        was = previous.get(str(goal["id"]))
+        if goal["control"] == "reinforced" and (
+                was is None or was.get("control") != "reinforced"):
+            codes = ", ".join(sorted({item["code"] for item in goal["signals"]}))
+            transitions_seen.append(
+                f"цель {goal['id']} переведена в усиленный контроль: {codes}")
+        if was is not None and was.get("state") != goal["state"]:
+            transitions_seen.append(
+                f"цель {goal['id']} перешла из {was.get('state')} в {goal['state']}")
+
+    reminder = stored.get("goal_reminder")
+    standing_now = []
+    signature = json.dumps(waiting, ensure_ascii=False)
+    if waiting and repeatable(reminder, signature, moment, GOAL_REMIND_SECONDS):
+        standing_now = waiting
+        reminder = {"at": moment.isoformat(), "signature": signature}
+    return {"transitions": transitions_seen, "standing": standing_now,
+            "reminder": reminder, "panel": panel}
 
 
 def codex_window() -> dict | None:
@@ -568,6 +637,7 @@ def yielded(report: dict) -> dict | None:
     """
     mine = set(report["worktrees"])
     others = []
+    handed_off = []
     for owner in report["owners_awake"]:
         if owner["pid"] == os.getpid():
             # Excluding by thread instead would throw away exactly the case that
@@ -578,16 +648,35 @@ def yielded(report: dict) -> dict | None:
         shared = sorted(mine & set(owner.get("worktrees") or []))
         if not shared:
             continue
+        # Awake is not the same as deciding. A terminal session the user left
+        # open holds no working tree in any sense that matters: it starts no
+        # child, writes nothing and burns no processor time. Yielding to it
+        # forever is how «фоновый продакт» would quietly turn back into «следи
+        # за доступностью терминала», which is the thing being repaired here.
+        # The observation is a difference between two sightings one wake-up
+        # apart, and it is written down rather than dropped: work not started
+        # because of somebody else must always be visible on disk.
+        activity = owner.get("activity") or {}
+        if activity.get("active") is False:
+            handed_off.append({**owner, "shared_worktrees": shared})
+            continue
         others.append({**owner, "shared_worktrees": shared})
-    if not others:
+    if not others and not handed_off:
         return None
     return {
         "at": datetime.now(timezone.utc).isoformat(),
         "to": others,
-        "ready_to_start": report["ready_to_start"],
-        "decided_not_done": report["decided_not_done"],
+        # Whom this tick did *not* stand down for, and it is here rather than
+        # dropped for the same reason `to` is: a decision about somebody else's
+        # window has to be checkable on disk.
+        "not_yielded_to": handed_off,
+        # What was not started because of a yield. Empty when nothing was
+        # yielded to: work this tick was free to start was not held by anyone.
+        "ready_to_start": report["ready_to_start"] if others else [],
+        "decided_not_done": report["decided_not_done"] if others else [],
         "src": "командные строки и рабочие каталоги процессов в /proc, сверенные с "
-               "репозиториями направления из threads.json",
+               "репозиториями направления из threads.json; работает ли бодрствующий "
+               "продакт — по разнице его процессорного времени между наблюдениями тика",
     }
 
 
@@ -649,7 +738,7 @@ def plan_block() -> str:
 
 
 def prompt(report: dict, events: list[str], reasons: list[dict],
-           said: list[dict], chat: dict) -> str:
+           said: list[dict], chat: dict, goals: str = "") -> str:
     # Shown only when there is something observed to show. A heading over an
     # empty list reads as «причин нет», which is a different claim.
     seen = ("\nЧто наблюдение говорит о простое (это не приговор, а то, что видно с диска):\n"
@@ -657,6 +746,7 @@ def prompt(report: dict, events: list[str], reasons: list[dict],
             ) if reasons else ""
     return f"""Ты продакт-агент на фоновом пробуждении треда «{report['title']}».
 {plan_block()}
+{goals}
 {heard_block(said, chat)}
 
 Произошло с прошлого пробуждения:
@@ -697,10 +787,13 @@ def prompt(report: dict, events: list[str], reasons: list[dict],
 обычными словами, иначе пользователь снова увидит нули без объяснения.
 
 Уступать дорогу надо только тому продакту, который может занять то же рабочее
-дерево: `yielded_to_awake_owner` в файле состояния треда уже содержит только
-таких и называет общие деревья. Продакт на чужих репозиториях тебе не мешает —
-останавливаться из-за него нельзя. Список того, что ты не стал запускать, уже
-лежит на диске рядом, пересказывать его в тексте не нужно.
+дерево и при этом действительно работает: `yielded_to_awake_owner` в файле
+состояния треда уже содержит только таких и называет общие деревья, а те, чьё
+процессорное время между двумя наблюдениями не двигалось, лежат там же в
+`not_yielded_to` — это открытые терминалы, которым работа уже передана, и
+останавливаться из-за них нельзя. Продакт на чужих репозиториях тебе тоже не
+мешает. Список того, что ты не стал запускать, уже лежит на диске рядом,
+пересказывать его в тексте не нужно.
 
 Запуск ребёнка в режиме записи по нашему коду в нашем репозитории разрешения не
 требует: это обычная доставка, и на пробуждении она делается молча. Разрешение
@@ -742,9 +835,15 @@ def main() -> int:
 
     events = transitions(previous, current) if previous else ["первый запуск треда"]
 
+    # Before the idle test and before the wake-up decision: a goal is the memory
+    # this process does not have, and «что стоит по цели» is a reason to wake up
+    # in its own right, even on a direction whose queue looks busy.
+    goals = goal_watch(args.thread, report, stored, moment)
+    events += goals["transitions"]
+
     standing_now, idle_reminder, held_reminder = standing_events(
         report, current, stored, moment)
-    events += standing_now
+    events += standing_now + goals["standing"]
     idle = bool(not report["live_runs"] and startable(report))
 
     # Written whether or not an agent is woken, and before it is: the list of
@@ -767,6 +866,12 @@ def main() -> int:
             "last_events": events, **standing,
             "idle_reminder": idle_reminder,
             "undelivered_reminder": held_reminder,
+            # The durable goals of this direction, as the store holds them at the
+            # moment of the check. Written whether or not an owner is woken, so
+            # the board can show «что обещано пользователю и где это стоит»
+            # without asking a running agent anything.
+            "goals": goals["panel"],
+            "goal_reminder": goals["reminder"],
             # Written on every tick, healthy or not, so the board can tell «эта
             # проверка была и прошла» from «этой проверки никто не делал». The
             # observation the previous outage never produced.
@@ -813,6 +918,7 @@ def main() -> int:
 
     if args.dry_run:
         print(json.dumps({"events": events, "snapshot": current, **standing,
+                          "goals": goals["panel"],
                           "check": record(None, not woke)["check"]},
                          ensure_ascii=False, indent=2))
         return verdict
@@ -837,7 +943,8 @@ def main() -> int:
     result = subprocess.run(
         [str(CLAUDE_PRODUCT_OWNER), "--print", "--add-dir", "/opt/projects",
          "--dangerously-skip-permissions"],
-        input=prompt(report, events, reasons, said, chat), env=environment,
+        input=prompt(report, events, reasons, said, chat,
+                     product_goal.block(args.thread)), env=environment,
         capture_output=True, text=True, cwd=HOME, timeout=WAKE_TIMEOUT,
     )
     message = (result.stdout or "").strip()

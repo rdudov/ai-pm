@@ -176,6 +176,20 @@
   /* A direction standing still for no observable reason is the user's own
      complaint made visible, so it is not another grey line. */
   .check .why.alarm { color: var(--undelivered); font-weight: 560; }
+  /* What is owed to the user on this direction. It stands in the column head
+     beside the check for the same reason the check does: it is a fact about the
+     direction rather than about one task, and a person opening the board on
+     problematic work wants «что обещано и где это стоит» before the columns.
+     A goal under reinforced control is marked, because that mode is exactly the
+     thing that must never be silent. */
+  .goals { display: flex; flex-direction: column; gap: 6px; margin-top: 7px; }
+  .goal { border-left: 2px solid var(--ours); padding-left: 7px;
+          font-size: 11.5px; line-height: 1.35; }
+  .goal .head { color: var(--ink); font-weight: 600; }
+  .goal .head .mode { color: var(--undelivered); font-weight: 620; }
+  .goal .line { color: var(--dim); }
+  .goal .gap { color: var(--ours); }
+  .goal .done { color: var(--dim); }
   /* Neither the column nor an area scrolls inside itself any more. The two
      previous versions of this file both tried to divide a fixed window height
      between nine areas — first by letting each area scroll, then by adding a
@@ -2191,6 +2205,73 @@ function checkNode(check, nextCheck) {
   return node;
 }
 
+/* The durable goals of one direction: what was promised to the user, where it
+   is not converging, which task is the main one and which repair it is waiting
+   on. Every line is printed as the store holds it — the board paraphrases a
+   promise no more than it paraphrases an observation. */
+function goalsNode(goals) {
+  if (!goals || !goals.length) return null;
+  const wrap = document.createElement("div");
+  wrap.className = "goals";
+  for (const goal of goals) {
+    const node = document.createElement("div");
+    node.className = "goal";
+    node.title = "наблюдено: " + goal.src;
+
+    const head = document.createElement("div");
+    head.className = "head";
+    head.textContent = "цель " + goal.id + " — " + goal.outcome;
+    if (goal.control === "reinforced") {
+      const mode = document.createElement("span");
+      mode.className = "mode";
+      /* Named in the head rather than hidden in a tooltip: the whole point of
+         the mode is that turning it on is visible without asking anybody. */
+      mode.textContent = " · усиленный контроль";
+      mode.title = goal.signals.map(s => s.text + " (" + s.src + ")").join("; ");
+      head.appendChild(mode);
+    }
+    node.appendChild(head);
+
+    const gap = document.createElement("div");
+    gap.className = "gap";
+    gap.textContent = "ближайший разрыв: " + (goal.gap || "не назван");
+    node.appendChild(gap);
+
+    const main = document.createElement("div");
+    main.className = "line";
+    main.textContent = "основная задача " + goal.main_task +
+      (goal.state === "paused" ? " — на паузе" : "");
+    node.appendChild(main);
+
+    if (goal.pause) {
+      const why = document.createElement("div");
+      why.className = "line";
+      why.textContent = "пауза: " + goal.pause.reason;
+      why.title = "наблюдено: " + goal.pause.src;
+      node.appendChild(why);
+    }
+    for (const item of goal.correctives) {
+      const line = document.createElement("div");
+      line.className = item.accepted ? "done" : "line";
+      /* Accepted is shown, not dropped: a closed repair is exactly the point at
+         which the chain used to stop, and the next line says what comes after
+         it. */
+      line.textContent = "корректирующая " + item.task +
+        (item.accepted ? " принята" : " в работе") + ": " + item.effect;
+      line.title = "возврат к основной задаче: " + item.return_criterion;
+      node.appendChild(line);
+    }
+    if (goal.next_transition) {
+      const next = document.createElement("div");
+      next.className = "line";
+      next.textContent = "следующий переход: " + goal.next_transition;
+      node.appendChild(next);
+    }
+    wrap.appendChild(node);
+  }
+  return wrap;
+}
+
 function drawBoard(board, snapshot) {
   drawStrip(board);
   const columns = el("columns");
@@ -2215,6 +2296,8 @@ function drawBoard(board, snapshot) {
                        " · заторов " + stuck + " · не доставлено " + undelivered;
     head.appendChild(h2); head.appendChild(meta);
     head.appendChild(checkNode(panel.check, panel.next_check));
+    const goals = goalsNode(panel.goals);
+    if (goals) head.appendChild(goals);
     col.appendChild(head);
 
     const body = document.createElement("div");

@@ -39,6 +39,7 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 
+import product_goal
 import product_memory
 from process_map_schema import (SCHEMA_VERSION, STATIONS, ContractError, scrub,
                                 validate_check, validate_snapshot)
@@ -58,6 +59,10 @@ MAIL_ROOT = REPO / ".state" / "gmail" / "product-owner"
 MAIL_INBOX = MAIL_ROOT / "inbox"
 MAIL_SENT = MAIL_ROOT / "sent"
 TELEGRAM_SENT = REPO / ".state" / "telegram" / "sent-documents.jsonl"
+# Where the previous sighting of each awake product owner is kept, so «этот
+# продакт решает» can be told from «это открытое окно» by a difference rather
+# than by a guess. Runtime state, rebuilt by the next wake-up.
+OWNER_STATE = HOME / "state" / "process-inventory" / "owners.json"
 
 # Terminal statuses never carry a live figure on the map, however loud the label.
 TERMINAL = {"completed", "cancelled", "superseded"}
@@ -75,6 +80,16 @@ def tunable(name: str, default: int) -> int:
     except ValueError:
         return default
     return value if value > 0 else default
+
+
+# How much processor time a product owner has to burn between two sightings to
+# count as one that is actually deciding something. A session talking to a model
+# burns far more than a second; a window left open burns none.
+OWNER_CPU_TICK_SECONDS = tunable("PRODUCT_OWNER_OWNER_CPU_TICK_SECONDS", 1)
+# And how long a sighting has to span before «не двигалось» is a statement about
+# the world rather than about the length of the measurement. Shorter than the
+# wake-up interval, so one tick apart is already enough to judge.
+OWNER_IDLE_SECONDS = tunable("PRODUCT_OWNER_OWNER_IDLE_SECONDS", 900)
 
 # dev-pipeline event kinds, mapped to the station they say the work is at. The
 # contour declares no role state machine, so this is a reading of observed
@@ -2318,6 +2333,116 @@ def thread_worktrees(config: dict) -> dict[str, list[str]]:
             for key, thread in config.get("threads", {}).items()}
 
 
+def owner_cpu_seconds(entry: Path) -> float | None:
+    """CPU this process has actually burned, from the kernel's own counters.
+
+    Fields 14 and 15 of `stat` are user and system time in clock ticks. They are
+    the one observation that tells a product owner *deciding something* from a
+    terminal window somebody left open: a session talking to a model burns CPU
+    every few seconds, and a sleeping one burns none at all.
+    """
+    try:
+        fields = (entry / "stat").read_text().rsplit(") ", 1)[1].split()
+        return (int(fields[11]) + int(fields[12])) / os.sysconf("SC_CLK_TCK")
+    except (OSError, IndexError, ValueError):
+        return None
+
+
+def owner_activity(owner: dict, previous: dict) -> dict:
+    """Whether this awake owner is deciding, or is a window left open.
+
+    Yielding to another owner is correct while that owner may put a child into
+    the same working tree. It is not correct forever: a terminal the user walked
+    away from would otherwise hold a background goal hostage for as long as the
+    process exists, which is precisely the thing the user asked to stop needing
+    to watch — «мне приходилось следить за доступностью терминала».
+
+    Two observations of the same process, one wake-up apart, and the difference
+    between them. Absent a previous observation the honest answer is «активность
+    ещё не измерена», and that counts as active: the first sighting of a real
+    owner must not be waved through.
+    """
+    cpu = owner_cpu_seconds(PROC / str(owner["pid"]))
+    seen = previous.get(f"{owner['pid']}:{owner['since']}")
+    if cpu is None:
+        return {"cpu_seconds": None, "cpu_delta": None, "measured_over": None,
+                "active": True,
+                "src": "счётчики процессорного времени процесса в /proc недоступны — "
+                       "бодрствующий продакт считается работающим, пока не наблюдено обратное"}
+    if not seen or seen.get("cpu_seconds") is None:
+        return {"cpu_seconds": cpu, "cpu_delta": None, "measured_over": None,
+                "active": True,
+                "src": "процессорное время процесса наблюдено впервые: "
+                       "разницы ещё нет, поэтому продакт считается работающим"}
+    try:
+        span = int((datetime.now(timezone.utc)
+                    - datetime.fromisoformat(seen["observed_at"])).total_seconds())
+    except (KeyError, TypeError, ValueError):
+        span = None
+    delta = round(cpu - float(seen["cpu_seconds"]), 3)
+    active = delta >= OWNER_CPU_TICK_SECONDS or span is None or span < OWNER_IDLE_SECONDS
+    return {
+        "cpu_seconds": cpu, "cpu_delta": delta, "measured_over": span,
+        "active": active,
+        "src": (f"процессорное время процесса в /proc выросло на {delta} с за "
+                f"{span} с наблюдения" if active else
+                f"процессорное время процесса в /proc не двигалось {span} с "
+                f"(рост {delta} с): решение в нём не принимается"),
+    }
+
+
+def owner_observations(path: Path | None = None) -> dict:
+    """The previous sighting of every awake owner, or nothing."""
+    record = read_json(path or OWNER_STATE)
+    seen = record.get("owners")
+    return seen if isinstance(seen, dict) else {}
+
+
+def write_owner_observations(owners: list[dict], path: Path | None = None) -> None:
+    """Persist this sighting, and only from the process that is the wake-up.
+
+    The board is rebuilt every few seconds in live mode, so if it wrote here the
+    difference two observations apart would be seconds of wall clock and every
+    owner would read as idle. The tick is the observer paired with the timer, so
+    the span between two of its records is one wake-up interval — long enough for
+    «этот процесс ничего не делает» to be a statement about the world.
+    """
+    path = path or OWNER_STATE
+    now = datetime.now(timezone.utc)
+    moment = now.isoformat()
+    previous = owner_observations(path)
+    seen = {}
+    for owner in owners:
+        key = f"{owner['pid']}:{owner['since']}"
+        old = previous.get(key)
+        # A baseline younger than the judging window is kept rather than
+        # refreshed. Four directions tick five minutes apart and share this
+        # file, so overwriting on every one of them would leave every span
+        # shorter than the window and «ничего не делает» could never be said at
+        # all. The baseline ages until it can answer, then starts again.
+        if old and old.get("cpu_seconds") is not None:
+            try:
+                age = (now - datetime.fromisoformat(old["observed_at"])).total_seconds()
+            except (KeyError, TypeError, ValueError):
+                age = None
+            if age is not None and age < OWNER_IDLE_SECONDS:
+                seen[key] = old
+                continue
+        seen[key] = {"cpu_seconds": (owner.get("activity") or {}).get("cpu_seconds"),
+                     "observed_at": moment}
+    record = {"schema_version": 1, "observed_at": moment, "owners": seen}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        temporary.write_text(json.dumps(record, ensure_ascii=False, indent=2))
+        os.replace(temporary, path)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
 def owner_wakeups(config: dict | None = None) -> list[dict]:
     """Other instances of the product owner that are awake right now.
 
@@ -2340,6 +2465,7 @@ def owner_wakeups(config: dict | None = None) -> list[dict]:
     itself.
     """
     owned = thread_worktrees(config if config is not None else load_config())
+    previous = owner_observations()
     awake = []
     for entry in PROC.iterdir():
         if not entry.name.isdigit():
@@ -2386,7 +2512,7 @@ def owner_wakeups(config: dict | None = None) -> list[dict]:
             started = process_started(entry)
         except OSError:
             continue
-        awake.append({
+        owner = {
             "pid": int(entry.name),
             "kind": kind,
             "thread": thread,
@@ -2394,7 +2520,11 @@ def owner_wakeups(config: dict | None = None) -> list[dict]:
             "since": datetime.fromtimestamp(started, timezone.utc).isoformat(),
             "age_seconds": max(int(time.time() - started), 0),
             "src": src,
-        })
+        }
+        # Being awake and deciding something are two different states, and only
+        # the second one is a reason for a background goal to stand still.
+        owner["activity"] = owner_activity(owner, previous)
+        awake.append(owner)
     return sorted(awake, key=lambda w: w["since"])
 
 
@@ -2809,6 +2939,20 @@ def thread_check(key: str) -> dict | None:
         }
 
 
+def thread_goals(key: str) -> list[dict]:
+    """Durable goals of one direction, read from the store that outlives sessions.
+
+    Read here rather than copied out of the tick's state file, so the board shows
+    what a person asked for even before the next wake-up runs — and so a goal
+    opened in the console appears at once. The store answers «нет целей» only when
+    there are none; a file it cannot parse comes back as a goal that says so.
+    """
+    try:
+        return product_goal.panel(key)
+    except (OSError, ValueError, product_goal.GoalError):
+        return []
+
+
 def build(anonymize: bool, only: str | None = None) -> dict:
     """The one observation of the contour everything else reads.
 
@@ -2849,6 +2993,10 @@ def build(anonymize: bool, only: str | None = None) -> dict:
             # Read from what the tick wrote at the moment of the check, never
             # from the prose of a woken agent.
             "check": thread_check(key),
+            # What is owed to the user on this direction and where it stands.
+            # A goal is product memory rather than an observation of a process,
+            # so it is read from its own durable store.
+            "goals": thread_goals(key),
             # When it looks next — asked of systemd here and now, because that
             # is the instant the answer is about. `None` with a named reason
             # when systemd is holding nothing armed.
