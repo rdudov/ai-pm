@@ -2278,6 +2278,36 @@ function goalsNode(goals) {
   return wrap;
 }
 
+/* Кто ведёт цели этого направления прямо сейчас. Пока строка говорит «сессия
+   ведёт», двадцатиминутный тик сознательно не поднимает второго продакта, —
+   поэтому она стоит рядом с целями, а не в подсказке, и всегда называет, чем
+   живость наблюдена. */
+function goalSessionNode(session) {
+  if (!session) return null;
+  const node = document.createElement("div");
+  node.className = "goal";
+  node.title = "наблюдено: " + session.src;
+  const head = document.createElement("div");
+  head.className = "head";
+  head.textContent = session.live
+    ? "цели ведёт непрерывная сессия · ходов " + session.turns
+    : "непрерывной сессии нет — ведёт двадцатиминутный тик";
+  node.appendChild(head);
+  const why = document.createElement("div");
+  why.className = session.live ? "line" : "gap";
+  why.textContent = session.reason;
+  node.appendChild(why);
+  if (session.last_turn_at) {
+    const last = document.createElement("div");
+    last.className = "line";
+    last.textContent = "последний ход " + session.last_turn_at.slice(11, 16) +
+      " UTC · реакция " + session.last_turn_reaction_seconds + " с" +
+      (session.recovered ? " · сессия восстановлена watchdog'ом" : "");
+    node.appendChild(last);
+  }
+  return node;
+}
+
 function drawBoard(board, snapshot) {
   drawStrip(board);
   const columns = el("columns");
@@ -2304,6 +2334,8 @@ function drawBoard(board, snapshot) {
     head.appendChild(checkNode(panel.check, panel.next_check));
     const goals = goalsNode(panel.goals);
     if (goals) head.appendChild(goals);
+    const session = goalSessionNode(panel.goal_session);
+    if (session) head.appendChild(session);
     col.appendChild(head);
 
     const body = document.createElement("div");

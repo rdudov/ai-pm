@@ -2964,6 +2964,45 @@ def thread_goals(key: str) -> list[dict]:
         return []
 
 
+def thread_session(key: str) -> dict | None:
+    """Кто ведёт направление: непрерывная сессия под целью — или сам тик.
+
+    Читается здесь и сейчас, а не переносится из записи тика, ровно по той же
+    причине, что и `next_check`: живость сессии — факт о настоящем моменте, и
+    запись двадцатиминутной давности отвечала бы про другой момент. `None`
+    значит «целей под усиленным контролем нет», а это не то же самое, что
+    «сессия умерла»: обычная работа ведётся тиком и ничего лишнего не получает.
+    """
+    # Импорт внутри функции: `goal_session` читает отсюда наблюдение процессов, и
+    # взаимный импорт на уровне модуля оставил бы одному из двух недособранный.
+    import goal_session  # noqa: PLC0415
+
+    try:
+        record = goal_session.read(key)
+        if not goal_session.reinforced(key) and not record:
+            return None
+        alive = goal_session.liveness(record)
+        session = record.get("session") or {}
+        turn = record.get("last_turn") or {}
+        return {
+            "live": bool(alive["live"]),
+            "reason": alive["reason"],
+            "id": session.get("id"),
+            "engine": session.get("engine"),
+            "model": session.get("model"),
+            "turns": session.get("turns") or 0,
+            "opened_at": session.get("opened_at"),
+            "heartbeat": record.get("heartbeat"),
+            "last_turn_at": turn.get("at") or None,
+            "last_turn_reaction_seconds": turn.get("reaction_seconds"),
+            "recovered": bool(record.get("recovered")),
+            "stopped": (record.get("stopped") or {}).get("reason"),
+            "src": alive["src"],
+        }
+    except (OSError, ValueError):
+        return None
+
+
 def build(anonymize: bool, only: str | None = None) -> dict:
     """The one observation of the contour everything else reads.
 
@@ -3008,6 +3047,9 @@ def build(anonymize: bool, only: str | None = None) -> dict:
             # A goal is product memory rather than an observation of a process,
             # so it is read from its own durable store.
             "goals": thread_goals(key),
+            # И кто их сейчас ведёт: одна продолжающаяся сессия под усиленной
+            # целью или двадцатиминутный тик. `None` — усиленных целей нет.
+            "goal_session": thread_session(key),
             # When it looks next — asked of systemd here and now, because that
             # is the instant the answer is about. `None` with a named reason
             # when systemd is holding nothing armed.

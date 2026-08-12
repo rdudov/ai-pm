@@ -71,6 +71,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import codex_budget  # noqa: E402
+import goal_session  # noqa: E402  (обращения только в рантайме: импорт взаимный)
 import outbound  # noqa: E402
 import product_goal  # noqa: E402
 import product_memory  # noqa: E402
@@ -346,7 +347,8 @@ def goal_watch(thread: str, report: dict, stored: dict, moment: datetime) -> dic
             thread, [item["id"] for item in report["live_runs"]])
     except (product_goal.GoalError, OSError, ValueError) as error:
         return {"transitions": [f"долговечные цели направления не читаются: {error}"],
-                "standing": [], "reminder": stored.get("goal_reminder"), "panel": []}
+                "standing": [], "reminder": stored.get("goal_reminder"), "panel": [],
+                "objects": []}
 
     transitions_seen = []
     for goal in panel:
@@ -366,8 +368,14 @@ def goal_watch(thread: str, report: dict, stored: dict, moment: datetime) -> dic
     if waiting and repeatable(reminder, signature, moment, GOAL_REMIND_SECONDS):
         standing_now = waiting
         reminder = {"at": moment.isoformat(), "signature": signature}
+    # Сами стоячие цели, а не только фразы о них. Частота повторения решает, что
+    # сказать пользователю; обязательный исход пробуждения решается по факту
+    # стояния, иначе замолчавший повтор снимал бы и проверку.
+    live_ids = {item["id"] for item in report["live_runs"]}
+    objects = [goal for goal in panel
+               if goal.get("waiting_on") and not set(goal["waiting_on"]) & live_ids]
     return {"transitions": transitions_seen, "standing": standing_now,
-            "reminder": reminder, "panel": panel}
+            "reminder": reminder, "panel": panel, "objects": objects}
 
 
 def codex_window() -> dict | None:
@@ -455,7 +463,8 @@ def started_runs(before: dict, after: dict | None) -> list[int]:
     return sorted(set((after or {}).get("live", [])) - set(before["live"]))
 
 
-def outcome(before: dict, after: dict | None, woke: bool, report: dict) -> str:
+def outcome(before: dict, after: dict | None, woke: bool, report: dict,
+            session: dict | None = None) -> str:
     """What the check came to, in ordinary words, from what was observed.
 
     Never from the text the woken owner returned. The owner's own account of what
@@ -464,6 +473,17 @@ def outcome(before: dict, after: dict | None, woke: bool, report: dict) -> str:
     the live runs after it.
     """
     if not woke:
+        # Не будиться, потому что направление уже ведёт непрерывная сессия, — это
+        # не то же самое, что не будиться, потому что новостей нет. Смешать их
+        # значило бы показать пользователю тишину там, где идёт работа.
+        if session and session.get("mode") == "session":
+            if session.get("live"):
+                return (f"не будился: направление ведёт непрерывная сессия "
+                        f"{(session.get('session') or {}).get('id')} "
+                        f"(ходов {session.get('turns')})")
+            if session.get("recovered"):
+                return ("не будился: watchdog поднял непрерывную сессию заново — "
+                        + str(session.get("recovery_reason")))
         return "не будился: ни событий, ни простоя при доступной работе"
     started = started_runs(before, after)
     if started:
@@ -855,7 +875,17 @@ def main() -> int:
         "yielded_to_awake_owner": yielded(report),
     }
     reasons = idle_reasons(report, standing)
-    woke = bool(events) or args.force
+
+    # Кем ведётся направление прямо сейчас. Пока цель под усиленным контролем не
+    # разрешена, обычный режим — одна продолжающаяся сессия, а тик при ней
+    # watchdog: он не поднимает второго продакта поверх живой сессии и
+    # восстанавливает её, когда она умерла или была вынуждена ротироваться.
+    # Обычная работа сюда не попадает: без усиленной цели `mode` остаётся `none`
+    # и всё ниже идёт ровно как раньше.
+    session = goal_session.watchdog(args.thread, moment, act=not args.dry_run)
+    session_holds = session["mode"] == "session" and (
+        session.get("live") or session.get("recovered"))
+    woke = (bool(events) or args.force) and not session_holds
 
     def record(final: dict | None, done: bool) -> dict:
         """The direction's state file, in the one shape the board reads."""
@@ -872,6 +902,10 @@ def main() -> int:
             # without asking a running agent anything.
             "goals": goals["panel"],
             "goal_reminder": goals["reminder"],
+            # Кто ведёт направление и что тик с этим сделал. Написано и когда
+            # сессии нет: «усиленных целей нет» — тоже ответ на вопрос «почему
+            # тик разбудил продакта сам».
+            "goal_session": session,
             # Written on every tick, healthy or not, so the board can tell «эта
             # проверка была и прошла» from «этой проверки никто не делал». The
             # observation the previous outage never produced.
@@ -889,7 +923,7 @@ def main() -> int:
             # when the board is built, which is the moment the answer is about.
             "check": {
                 "at": now,
-                "outcome": (outcome(current, final, woke, report) if done
+                "outcome": (outcome(current, final, woke, report, session) if done
                             else "проверка идёт: продакт разбужен, решение ещё не принято"),
                 "outcome_src": (
                     "события и очередь треда в момент проверки" if not woke else
@@ -918,7 +952,7 @@ def main() -> int:
 
     if args.dry_run:
         print(json.dumps({"events": events, "snapshot": current, **standing,
-                          "goals": goals["panel"],
+                          "goals": goals["panel"], "goal_session": session,
                           "check": record(None, not woke)["check"]},
                          ensure_ascii=False, indent=2))
         return verdict
@@ -964,6 +998,13 @@ def main() -> int:
         after = None
     state_path.write_text(json.dumps(record(after, True), ensure_ascii=False, indent=2))
 
+    # Обязательный исход пробуждения по стоячей цели, проверенный наблюдением, а
+    # не обещанный промптом: живой прогон по её задаче или названный блокер.
+    # Молчание третьим исходом не является — и до этой проверки оно им было,
+    # когда рядом шёл посторонний живой прогон и обычный `idle` не срабатывал.
+    goal_check = goal_session.post_check(
+        args.thread, goals["objects"], (after or {}).get("live", []), message, moment)
+
     mail = []
     if message and message != "SILENT":
         notify(f"[{report['title']}]\n{message}")
@@ -982,16 +1023,20 @@ def main() -> int:
             args.thread, "idle",
             f"Продакт: «{report['title']}» ничего не запустил при непустой очереди",
             told, report, moment))
-    if mail:
+    if mail or goal_check:
         # Written after the fact and into the same file the board reads, because
         # «письмо не ушло» is an observation about this check like every other
         # one here, and the only place it could otherwise be seen is a journal
         # nobody opens.
         final = record(after, True)
         final["mail"] = mail
+        final["goal_post_check"] = goal_check
         state_path.write_text(json.dumps(final, ensure_ascii=False, indent=2))
     print(message)
-    return verdict
+    # A wake-up that left a standing goal without either outcome is a failure of
+    # this mechanism, not a quiet result: the exit code is the one signal that
+    # survives a check nobody reads.
+    return 1 if goal_check and not goal_check["resolved"] else verdict
 
 
 if __name__ == "__main__":

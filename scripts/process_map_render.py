@@ -452,6 +452,10 @@ def build_board(snapshot: dict) -> dict:
             # Carried through untouched as well: a goal is a record of a promise,
             # and a renderer that summarised it would be paraphrasing a promise.
             "goals": thread.get("goals") or [],
+            # И кем они сейчас ведутся. Тоже переносится как есть: живость
+            # сессии наблюдена в момент сборки снимка, и пересчитать её здесь
+            # значило бы ответить про другой момент.
+            "goal_session": thread.get("goal_session"),
         })
     # A strip above the columns, so the two questions a person opens the board
     # for — who is working, where the jam is — are answered without scrolling

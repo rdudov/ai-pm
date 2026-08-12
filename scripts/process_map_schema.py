@@ -353,6 +353,33 @@ def validate_next_check(value, where: str) -> dict:
     return value
 
 
+GOAL_SESSION_FIELDS = ("live", "reason", "id", "engine", "model", "turns",
+                       "opened_at", "heartbeat", "last_turn_at",
+                       "last_turn_reaction_seconds", "recovered", "stopped", "src")
+
+
+def validate_goal_session(session: dict, where: str) -> dict:
+    """Check the continuous session projection; return it or raise ContractError.
+
+    «Сессия жива» — самая дорогая надпись в этом режиме: пока она стоит, тик
+    сознательно не поднимает второго продакта. Поэтому она обязана назвать, чем
+    наблюдена, и обязана назвать причину, когда сессия не жива, — иначе доска
+    показывала бы «ведёт сессия» там, где не ведёт никто.
+    """
+    if not isinstance(session, dict):
+        raise ContractError(f"{where}: ожидался объект")
+    _require(session, GOAL_SESSION_FIELDS, where)
+    if not isinstance(session["live"], bool):
+        raise ContractError(f"{where}: живость должна быть булевой")
+    if not str(session["src"] or "").strip():
+        raise ContractError(f"{where}: сессия показана, но не сказано, чем наблюдена")
+    if not str(session["reason"] or "").strip():
+        raise ContractError(f"{where}: не сказано, почему сессия жива или не жива")
+    if session["live"] and not str(session["id"] or "").strip():
+        raise ContractError(f"{where}: живая сессия без идентификатора разговора")
+    return session
+
+
 def validate_goal(goal: dict, where: str) -> dict:
     """Check one durable goal; return it unchanged or raise ContractError.
 
@@ -409,6 +436,12 @@ def validate_snapshot(snapshot: dict) -> dict:
         # store was read and holds none — two different claims, kept apart.
         for goal in thread.get("goals") or []:
             validate_goal(goal, f"{where_thread}: цель {goal.get('id')!r}")
+        # Кто ведёт направление. `None` — усиленных целей нет и вести нечего;
+        # объект обязан сказать, чем наблюдена живость, на том же правиле, что и
+        # всё остальное на этой доске.
+        if thread.get("goal_session") is not None:
+            validate_goal_session(thread["goal_session"],
+                                  f"{where_thread}: непрерывная сессия")
         validate_next_check(thread["next_check"], f"{where_thread}: следующая проверка")
         for task in thread["tasks"]:
             where = f"задача {task.get('id')!r}"
