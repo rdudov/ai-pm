@@ -165,7 +165,16 @@ def build(name: str) -> dict:
     config = load_thread(name)              # fail loudly on an unknown thread
     snapshot = observer.build(False, only=name)
     thread = snapshot["threads"][0]
-    detached = process_inventory(name, config)
+    try:
+        detached = process_inventory(name, config)
+    except observer.ProcessInventoryUnavailable as error:
+        # An empty list would mean «observed and found none». If the owning
+        # registry cannot be imported, it is unsafe to make that claim: a
+        # registered live run could otherwise be projected as detached work.
+        detached = []
+        detached_observation = {"available": False, "reason": str(error)}
+    else:
+        detached_observation = {"available": True, "reason": None}
 
     live, attention = [], []
     for task in thread["tasks"]:
@@ -188,6 +197,7 @@ def build(name: str) -> dict:
         # attribution and duplicate detection; this adapter only persists the
         # previous observed sizes so growth can be stated from two measurements.
         "long_lived_processes": detached,
+        "long_lived_processes_observation": detached_observation,
         "needs_attention": attention[:ATTENTION],
         "repos": [repo_projection(repo) for repo in thread["repos"]],
         "task_count": thread["task_count"],
@@ -263,7 +273,11 @@ def main() -> None:
             p = run["progress"]
             line += f"\n      шаг {p['done']}/{p['total']}, запись {p['written_minutes_ago']} мин назад: {p['activity']}"
         print(line)
-    print(f"долгоживущих процессов завершённых задач: {len(report['long_lived_processes'])}")
+    observation = report["long_lived_processes_observation"]
+    if not observation["available"]:
+        print(f"опись долгоживущих процессов недоступна: {observation['reason']}")
+    else:
+        print(f"долгоживущих процессов завершённых задач: {len(report['long_lived_processes'])}")
     for process in report["long_lived_processes"]:
         duplicate = (f" ДУБЛЬ ×{process['duplicate_count']}"
                      if process["duplicate"] else "")

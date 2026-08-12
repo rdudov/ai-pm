@@ -195,6 +195,10 @@ def live_run_owner():
 RUN_REGISTRY = live_run_owner()
 
 
+class ProcessInventoryUnavailable(RuntimeError):
+    """The observer cannot safely separate registered runs from detached work."""
+
+
 def run_alive(runner: dict) -> tuple[bool, str | None]:
     """Whether the process this task recorded is still running, and what said so.
 
@@ -2464,7 +2468,9 @@ def _ancestor_pids(entry: Path) -> list[int]:
 def _registered_live_pids(catalogue: list[dict]) -> set[int]:
     """Identity-checked child and watcher roots owned by the existing runner."""
     if RUN_REGISTRY is None:
-        return set()
+        raise ProcessInventoryUnavailable(
+            "реестр живых прогонов Companion недоступен; "
+            "опись долгоживущих процессов подавлена")
     live = set()
     for task in catalogue:
         directory = task.get("dir") or task.get("slug")

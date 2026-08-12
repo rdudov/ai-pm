@@ -25,6 +25,7 @@ import process_map_render as render
 import process_map_schema as schema
 import process_map_state as state
 import runner_contract
+import thread_state as thread
 import thread_tick as tick
 
 # One fixed instant for every rate-limit test: a reminder is a frequency, and a
@@ -2414,6 +2415,30 @@ class LongLivedTaskProcesses(unittest.TestCase):
 
             self.assertEqual(processes, [])
             registry.live_run_processes.assert_called_once_with(cwd)
+
+    def test_missing_run_registry_suppresses_the_inventory(self):
+        with mock.patch.object(state, "RUN_REGISTRY", None):
+            with self.assertRaisesRegex(
+                    state.ProcessInventoryUnavailable,
+                    "реестр живых прогонов Companion недоступен"):
+                state.long_lived_processes({"repos": []}, [])
+
+    def test_thread_state_names_an_unavailable_inventory_instead_of_claiming_zero(self):
+        observed = {
+            "threads": [{"title": "Process", "products": [], "tasks": [],
+                         "repos": [], "task_count": 0}],
+            "owners_awake": [],
+        }
+        with (mock.patch.object(thread, "load_thread", return_value={"repos": []}),
+              mock.patch.object(thread.observer, "build", return_value=observed),
+              mock.patch.object(
+                  thread, "process_inventory",
+                  side_effect=state.ProcessInventoryUnavailable("registry unavailable"))):
+            report = thread.build("process")
+
+        self.assertEqual(report["long_lived_processes"], [])
+        self.assertEqual(report["long_lived_processes_observation"], {
+            "available": False, "reason": "registry unavailable"})
 
     def test_external_observation_attributes_outputs_and_duplicate_instances(self):
         with tempfile.TemporaryDirectory() as temporary:
