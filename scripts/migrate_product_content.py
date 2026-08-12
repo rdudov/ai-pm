@@ -267,9 +267,20 @@ def migrate(base: Path, source_root: Path, stamp: str) -> dict:
     return manifest
 
 
-def verify(base: Path, source_root: Path) -> list[str]:
-    """Prove that nothing was lost and that the board still sees the same thing."""
+def verify(base: Path, source_root: Path) -> tuple[list[str], list[str]]:
+    """Prove that nothing was lost and that the board still sees the same thing.
+
+    Returns the defects and, separately, what the store has grown by since. The
+    split is not cosmetic. The migration only ever copies source lines into a
+    snapshot, so a snapshot line the source never had was written afterwards by
+    a product owner — which is the store doing its job. Counting that as a
+    transfer defect made the check unusable from the day after it first passed:
+    the first ordinary `В работе` line turned «перенос полон» into «дефектов
+    переноса: 1», and a reader could no longer tell growth from loss. Loss stays
+    a hard failure in both directions of the board's own judgement.
+    """
     problems: list[str] = []
+    growth: list[str] = []
     for source in sorted(source_root.glob("*/product.md")):
         slug = source.parent.name
         text = source.read_text(encoding="utf-8")
@@ -293,11 +304,24 @@ def verify(base: Path, source_root: Path) -> list[str]:
             problems.append(f"{slug}: список открытых вопросов изменился при переносе")
         if before["effect_head"] != after["effect_head"]:
             problems.append(f"{slug}: восемь верхних строк журнала эффекта изменились")
-        missing_work = [item for item in after["unplanned_raw"]
-                        if item not in before["unplanned_raw"]]
-        if missing_work:
-            problems.append(f"{slug}: в снимке появилась строка «В работе», "
-                            f"которой не было в источнике")
+        # The board must not lose a promise it used to print. Old entries are
+        # supposed to leave the snapshot for history, so the strict direction is
+        # the board's own judgement: everything it reports as «надо
+        # запланировать» in the source is still in the snapshot.
+        source_work = [body for title, body in sections(text) if title == "В работе"]
+        dropped = [item
+                   for item in unplanned_items(source_work[0] if source_work else [])
+                   if item not in after["unplanned_raw"]]
+        if dropped:
+            problems.append(
+                f"{slug}: {len(dropped)} строк «В работе», которые панель считала "
+                f"незапланированными, исчезли из снимка; первая — {dropped[0][:80]!r}")
+        appeared = [item for item in after["unplanned_raw"]
+                    if item not in before["unplanned_raw"]]
+        if appeared:
+            growth.append(
+                f"{slug}: в снимке {len(appeared)} строк «В работе», записанных "
+                f"уже в хранилище после переноса; первая — {appeared[0][:80]!r}")
 
         paths_before = memory.section_text(text, "Пользовательские пути")
         paths_after = memory.section_text(snapshot, "Пользовательские пути")
@@ -307,7 +331,7 @@ def verify(base: Path, source_root: Path) -> list[str]:
             problems.append(f"{slug}: раздел «Пользовательские пути» изменился")
 
     problems.extend(memory.check(base))
-    return problems
+    return problems, growth
 
 
 def main() -> int:
@@ -318,9 +342,11 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.verify:
-        problems = verify(args.root, args.source)
+        problems, growth = verify(args.root, args.source)
         for problem in problems:
             print(problem)
+        for line in growth:
+            print(line)
         print("перенос полон" if not problems else f"дефектов переноса: {len(problems)}")
         return 1 if problems else 0
 

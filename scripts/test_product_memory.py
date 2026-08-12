@@ -215,3 +215,46 @@ def test_concurrent_appends_from_separate_processes_keep_both_lines(store: Path)
     assert len(items) == 7
     for index in range(6):
         assert f"строка {index}" in items
+
+
+# --- migration verification -------------------------------------------------
+#
+# `--verify` must stay usable after the day it first passes. A line written into
+# the store afterwards is growth, not a transfer defect; a promise the board
+# printed and the snapshot lost is a defect.
+
+import migrate_product_content as migration  # noqa: E402
+
+
+def _legacy(tmp_path: Path, text: str) -> Path:
+    source = tmp_path / "products" / "demo"
+    source.mkdir(parents=True)
+    (source / "product.md").write_text(text, encoding="utf-8")
+    return tmp_path / "products"
+
+
+def test_a_line_written_after_the_migration_is_growth_and_not_a_defect(
+        tmp_path: Path, store: Path):
+    source_root = _legacy(tmp_path, SNAPSHOT)
+    memory.append_work_line("demo", "строка, записанная уже в хранилище", store)
+
+    problems, growth = migration.verify(store, source_root)
+
+    assert problems == []
+    assert len(growth) == 1
+    assert "после переноса" in growth[0]
+
+
+def test_a_promise_the_board_printed_and_the_snapshot_lost_is_a_defect(
+        tmp_path: Path, store: Path, monkeypatch: pytest.MonkeyPatch):
+    # An unobservable task catalogue means «treat every entry as unplanned»,
+    # which is the conservative direction the migration itself relies on.
+    monkeypatch.setattr(migration, "_CATALOGUE", [])
+    source_root = _legacy(tmp_path, SNAPSHOT)
+    path = memory.snapshot_path("demo", store)
+    path.write_text(path.read_text(encoding="utf-8").replace("- первая строка", "- нет записей"),
+                    encoding="utf-8")
+
+    problems, _ = migration.verify(store, source_root)
+
+    assert any("исчезли из снимка" in problem for problem in problems)
