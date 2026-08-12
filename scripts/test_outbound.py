@@ -22,6 +22,7 @@ from pathlib import Path
 from unittest import mock
 
 import outbound
+import product_memory
 import thread_tick as tick
 
 AT = datetime(2026, 8, 9, 12, 0, 0, tzinfo=timezone.utc)
@@ -50,6 +51,15 @@ def a_report(**over) -> dict:
               "ready_to_start": [], "decided_not_done": []}
     report.update(over)
     return report
+
+
+def a_snapshot(home: str, paths: str, work: str = "- 1") -> Path:
+    """One product snapshot in the durable store, where the gateway now reads."""
+    record = Path(home) / "products" / "task-agent" / product_memory.SNAPSHOT
+    record.parent.mkdir(parents=True, exist_ok=True)
+    record.write_text(f"# t\n## Пользовательские пути\n{paths}\n## В работе\n{work}\n",
+                      encoding="utf-8")
+    return record
 
 
 def an_entry(**over) -> dict:
@@ -166,11 +176,8 @@ class TheThreshold(unittest.TestCase):
 
     def test_a_changed_user_path_is_a_change_of_usefulness(self):
         with tempfile.TemporaryDirectory() as home:
-            record = Path(home) / "products" / "task-agent" / "product.md"
-            record.parent.mkdir(parents=True)
-            record.write_text("# t\n## Пользовательские пути\n| путь | работает |\n",
-                              encoding="utf-8")
-            with mock.patch.object(outbound, "HOME", Path(home)):
+            record = a_snapshot(home, "| путь | работает |")
+            with mock.patch.object(product_memory, "ROOT", Path(home)):
                 report = a_report(products=["task-agent"])
                 before = outbound.marks_of(report)
                 self.assertEqual(outbound.warrant(report, before), [])
@@ -180,13 +187,21 @@ class TheThreshold(unittest.TestCase):
         self.assertEqual(len(reasons), 1)
         self.assertIn("изменилась польза", reasons[0])
 
+    def test_an_unreadable_snapshot_is_not_a_path_that_did_not_move(self):
+        """A failed read may neither fire the threshold nor record «не менялось»."""
+        with tempfile.TemporaryDirectory() as home:
+            record = a_snapshot(home, "| путь | работает |")
+            with mock.patch.object(product_memory, "ROOT", Path(home)):
+                report = a_report(products=["task-agent"])
+                before = outbound.marks_of(report)
+                record.unlink()
+                self.assertEqual(outbound.warrant(report, before), [])
+                self.assertNotIn("task-agent", outbound.marks_of(report)["value"])
+
     def test_a_change_outside_the_user_paths_section_is_not_usefulness(self):
         with tempfile.TemporaryDirectory() as home:
-            record = Path(home) / "products" / "task-agent" / "product.md"
-            record.parent.mkdir(parents=True)
-            record.write_text("# t\n## Пользовательские пути\n| путь |\n## В работе\n- 1\n",
-                              encoding="utf-8")
-            with mock.patch.object(outbound, "HOME", Path(home)):
+            record = a_snapshot(home, "| путь |", work="- 1")
+            with mock.patch.object(product_memory, "ROOT", Path(home)):
                 report = a_report(products=["task-agent"])
                 before = outbound.marks_of(report)
                 record.write_text("# t\n## Пользовательские пути\n| путь |\n## В работе\n- 2\n",
@@ -548,6 +563,40 @@ class AChoiceRequestIsAQuestion(unittest.TestCase):
         text = tick.prompt(a_report(), ["прогон 830 завершился"], [], [],
                            outbound.no_chat())
         self.assertIn("ВОПРОС: да|нет", text)
+
+
+class ThePlanReachesTheBackgroundOwner(unittest.TestCase):
+    """«Решение в CLI управляет фоновым тиком.»
+
+    A direction the user paused in an interactive chat stays paused after that
+    session ends, and a `planned` task is not permission to start it. The tick
+    is woken by a timer with no memory of the conversation, so the only way the
+    decision reaches it is by being read from the current revision on disk.
+    """
+
+    def a_plan(self, home: str) -> None:
+        product_memory.publish_plan(
+            {"headline": "цель пользователя", "now": ["1095 — идёт сейчас"],
+             "paused": ["MOEX Strategy Lab — остановлен по слову пользователя"]},
+            base=Path(home))
+
+    def test_the_prompt_carries_the_current_revision(self):
+        with tempfile.TemporaryDirectory() as home:
+            self.a_plan(home)
+            with mock.patch.object(product_memory, "ROOT", Path(home)):
+                text = tick.prompt(a_report(), ["прогон 830 завершился"], [], [],
+                                   outbound.no_chat())
+        self.assertIn("Редакция: 1", text)
+        self.assertIn("MOEX Strategy Lab — остановлен по слову пользователя", text)
+        self.assertIn("Направление на паузе не запускается", text)
+
+    def test_a_missing_plan_is_not_an_order_inferred_from_task_statuses(self):
+        with tempfile.TemporaryDirectory() as home:
+            with mock.patch.object(product_memory, "ROOT", Path(home)):
+                text = tick.prompt(a_report(), ["прогон 830 завершился"], [], [],
+                                   outbound.no_chat())
+        self.assertIn("Портфельного плана нет", text)
+        self.assertNotIn("Редакция: ", text)
 
 
 class LockingAcrossProcesses(unittest.TestCase):

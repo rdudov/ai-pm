@@ -24,6 +24,7 @@ import process_map_recorder as recorder
 import process_map_render as render
 import process_map_schema as schema
 import process_map_state as state
+import product_memory
 import runner_contract
 import thread_state as thread
 import thread_tick as tick
@@ -2011,6 +2012,44 @@ CATALOGUE = [
 def unplanned(*items) -> list[dict]:
     """`unplanned` against a fixed catalogue, so the fixture is the whole input."""
     return state.unplanned(list(items), CATALOGUE)
+
+
+class ProductContentLivesOutsideGit(unittest.TestCase):
+    """The board reads the durable store, and says so when it cannot.
+
+    Live product content was taken out of git on 2026-08-12 so that saving a
+    discussion stops changing the evidence base of a code review — the failure
+    that refused review of 839. The board followed the content, and the one
+    thing it may not do is answer from a reading that never happened: an
+    unobservable root is not a root without products, exactly as an unavailable
+    live-run registry is not an empty list of runs.
+    """
+
+    def test_the_products_area_is_read_from_the_durable_store(self):
+        with tempfile.TemporaryDirectory() as home:
+            root = Path(home) / "content"
+            record = root / "products" / "task-agent" / "snapshot.md"
+            record.parent.mkdir(parents=True)
+            record.write_text(
+                "# t\n## Открытые вопросы\n- вопрос продукта\n"
+                "## Журнал эффекта\n- 2026-08-12 — эффект\n## В работе\n",
+                encoding="utf-8")
+            with mock.patch.object(product_memory, "ROOT", root), \
+                 mock.patch.object(state, "PRODUCTS", root / "products"):
+                entries = state.products(catalogue=[], mail=state.no_mail()
+                                         if hasattr(state, "no_mail") else None)
+        slugs = [entry["slug"] for entry in entries]
+        self.assertEqual(slugs, ["task-agent"])
+        self.assertEqual(entries[0]["effect"], ["2026-08-12 — эффект"])
+
+    def test_an_unobservable_store_is_refused_not_shown_as_no_products(self):
+        with tempfile.TemporaryDirectory() as home:
+            absent = Path(home) / "never-created"
+            with mock.patch.object(product_memory, "ROOT", absent), \
+                 mock.patch.object(state, "PRODUCTS", absent / "products"):
+                with self.assertRaises(schema.ContractError) as raised:
+                    state.products(catalogue=[])
+        self.assertIn("недоступен", str(raised.exception))
 
 
 class WhatNeedsPlanning(unittest.TestCase):

@@ -1859,7 +1859,7 @@ function questionNode(q, areaKey) {
   node.appendChild(head);
   const row = document.createElement("div");
   row.className = "row";
-  const sources = [["Вопрос", "раздел «Открытые вопросы» в products/" + q.product + "/product.md"]];
+  const sources = [["Вопрос", "раздел «Открытые вопросы» в content/products/" + q.product + "/snapshot.md"]];
   row.appendChild(tag("вопрос продукта " + q.product));
   /* When it went out, through what, and with which message. This is the whole
      of the rule: an area that tells a person they are blocking work has to show
@@ -1905,7 +1905,7 @@ function promiseNode(q) {
      the same line, so the reader can check the verdict instead of trusting it. */
   row.appendChild(tag("связь с задачей не установлена"));
   node.appendChild(row);
-  sourceNote(node, [["Строка", "раздел «В работе» в products/" + q.product + "/product.md"],
+  sourceNote(node, [["Строка", "раздел «В работе» в content/products/" + q.product + "/snapshot.md"],
                     ["Сверка", q.checked]]);
   return node;
 }

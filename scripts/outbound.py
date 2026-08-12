@@ -50,6 +50,7 @@ from pathlib import Path
 from uuid import uuid4
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import product_memory  # noqa: E402
 from process_map_state import tunable  # noqa: E402
 
 HOME = Path(__file__).resolve().parent.parent
@@ -241,21 +242,17 @@ def value_marks(report: dict) -> dict:
     """
     marks = {}
     for product in report.get("products", []):
-        path = HOME / "products" / product / "product.md"
         try:
-            text = path.read_text(encoding="utf-8")
-        except OSError:
+            text = product_memory.read_snapshot(product)
+        except product_memory.ContentError:
+            # A snapshot that cannot be read is not a snapshot whose user paths
+            # did not move. Leaving the product out of the marks keeps the
+            # previous digest in place, so the threshold neither fires on a
+            # failed read nor silently records «польза не менялась».
             continue
-        section = []
-        inside = False
-        for line in text.splitlines():
-            if line.startswith("## "):
-                inside = line.strip() == "## Пользовательские пути"
-                continue
-            if inside:
-                section.append(line.strip())
         marks[product] = hashlib.sha256(
-            "\n".join(section).encode("utf-8")).hexdigest()[:16]
+            product_memory.section_text(text, "Пользовательские пути")
+            .encode("utf-8")).hexdigest()[:16]
     return marks
 
 

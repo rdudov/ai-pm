@@ -2,6 +2,21 @@
 # Rebuilt from observation on every tick; nothing here is a record of decision.
 state/
 
+# Live product content of this installation: snapshots, the portfolio plan,
+# decisions and attachments. Git owns the portable core that reads and writes
+# this — the schema, the migration and the tests — and never the content
+# itself, so product work cannot change the evidence base of a code review.
+# Its only durable copy is the borg archive; `backup_to_155.sh` fails closed
+# when this root is missing, and `product_memory.py --check` reads it back.
+content/
+
+# The retired product monoliths. They stay on disk as the dated archive and the
+# rollback path of the 2026-08-12 migration, byte-identical to the copies under
+# `content/archive/`, and no consumer reads them any more. `product_memory.py
+# --check` refuses when one of them diverges from the migration manifest, so a
+# habitual edit here is observed instead of silently lost.
+products/
+
 # Local machine settings and tool caches.
 .claude/settings.local.json
 __pycache__/

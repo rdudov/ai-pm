@@ -39,13 +39,17 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 
+import product_memory
 from process_map_schema import (SCHEMA_VERSION, STATIONS, ContractError, scrub,
                                 validate_check, validate_snapshot)
 
 HOME = Path(__file__).resolve().parents[1]
 PROC = Path("/proc")
 CONFIG = HOME / "threads.json"
-PRODUCTS = HOME / "products"
+# Live product content moved out of git so that product work stops changing the
+# evidence base of a code review. The board reads the durable store through its
+# owning module, never the archived monoliths under `products/`.
+PRODUCTS = product_memory.products_dir()
 REPO = Path("/opt/projects/companion-agent")
 TASKS_INDEX = REPO / "skills" / "task-creator" / "scripts" / "tasks_index.py"
 RUNNER_SCRIPTS = REPO / "skills" / "task-runner" / "scripts"
@@ -1869,6 +1873,14 @@ def products(catalogue: list[dict] | None = None, mail: dict | None = None) -> l
     were his. `question_entry` owns the split for both places, so a task question
     and a product question are judged by one rule.
     """
+    # An unobservable store is not a store without products. Printing an empty
+    # products area here would tell the person «вопросов нет, обещаний нет» from
+    # a reading that never happened — the same failure the live-run registry was
+    # taught to refuse rather than answer with an empty list.
+    if not product_memory.available():
+        raise ContractError(
+            f"долговечный корень продуктов {product_memory.root()} недоступен: "
+            "продуктовая область не наблюдается и не может быть показана пустой")
     mail = mailbox() if mail is None else mail
     # The pool a promise is matched against is the whole catalogue, not the
     # tasks of one direction: a promise written in a product record may have
@@ -1876,7 +1888,7 @@ def products(catalogue: list[dict] | None = None, mail: dict | None = None) -> l
     # would report «связь не установлена» for a link that exists.
     catalogue = task_catalogue() if catalogue is None else catalogue
     entries = []
-    for path in sorted(PRODUCTS.glob("*/product.md")):
+    for path in sorted(PRODUCTS.glob("*/snapshot.md")):
         try:
             text = path.read_text()
         except OSError:
@@ -2870,7 +2882,7 @@ def plan_links() -> None:
     survived a whole review that way.
     """
     catalogue = task_catalogue()
-    for path in sorted(PRODUCTS.glob("*/product.md")):
+    for path in sorted(PRODUCTS.glob("*/snapshot.md")):
         try:
             text = path.read_text()
         except OSError:
@@ -2906,7 +2918,7 @@ def questions_report() -> None:
     mail = mailbox()
     print(f"почта продакта: тредов известно {len(mail['threads'])}, "
           f"каталог sent {'есть' if mail['sent_known'] else 'отсутствует'}")
-    for path in sorted(PRODUCTS.glob("*/product.md")):
+    for path in sorted(PRODUCTS.glob("*/snapshot.md")):
         try:
             text = path.read_text()
         except OSError:

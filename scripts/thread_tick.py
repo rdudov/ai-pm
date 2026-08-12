@@ -63,6 +63,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import codex_budget  # noqa: E402
 import outbound  # noqa: E402
+import product_memory  # noqa: E402
 import runner_contract  # noqa: E402
 from process_map_state import RUNNER_SCRIPTS, tunable  # noqa: E402
 from process_map_state import THREAD_STATE as STATE_DIR  # noqa: E402
@@ -621,6 +622,32 @@ def heard_block(said: list[dict], chat: dict) -> str:
 """
 
 
+def plan_block() -> str:
+    """The current portfolio revision, read from disk on every wake-up.
+
+    The tick used to infer order from task statuses, and a `planned` task read
+    as permission to start. It is not: the order between products is set by one
+    current revision, and a direction the user paused stays paused even when its
+    queue is full. Reading it here is also what makes a decision taken in the
+    CLI reach the background owner without anyone carrying it by hand.
+    """
+    try:
+        plan = product_memory.current_plan()
+    except product_memory.ContentError as error:
+        return ("\nПортфельный план не читается: " + str(error)
+                + "\nПорядок работ не установлен — не выводи его из статусов задач;\n"
+                  "назови это вслух и не запускай работу, меняющую пользу.\n")
+    return f"""
+Текущая редакция портфельного плана (порядок работ задаёт она, а не статус
+`planned` и не старый план в чьём-то тексте):
+{product_memory.plan_text(plan)}
+
+Направление на паузе не запускается, даже если очередь непуста; наличие
+`planned` разрешением не является. Если решение пользователя меняет порядок,
+сначала сохрани его запись и выпусти новую редакцию, потом отвечай.
+"""
+
+
 def prompt(report: dict, events: list[str], reasons: list[dict],
            said: list[dict], chat: dict) -> str:
     # Shown only when there is something observed to show. A heading over an
@@ -629,6 +656,7 @@ def prompt(report: dict, events: list[str], reasons: list[dict],
             + "\n".join(f"- {item['text']} [{item['src']}]" for item in reasons) + "\n"
             ) if reasons else ""
     return f"""Ты продакт-агент на фоновом пробуждении треда «{report['title']}».
+{plan_block()}
 {heard_block(said, chat)}
 
 Произошло с прошлого пробуждения:
@@ -643,9 +671,12 @@ def prompt(report: dict, events: list[str], reasons: list[dict],
    спросить пользователя. Правило кросс-ревью: работу Codex ревьюит Claude и
    наоборот; на замечания сначала анализ и план, потом правки, потом повторное
    ревью.
-3. Допиши одну строку в раздел «В работе» записи продукта
-   `/opt/projects/product-owner/products/<продукт>/product.md` и обнови состояние пользовательских путей, если оно
-   изменилось по артефакту, а не по прозе исполнителя.
+3. Допиши одну строку в раздел «В работе» снимка продукта командой
+   `python3 /opt/projects/product-owner/scripts/product_memory.py` — через
+   `append_work_line`, а не правкой файла руками: рядом пишет второй продакт.
+   Содержательный разбор, отчёт и вложения клади отдельной записью в
+   `content/products/<продукт>/history/`. Обнови состояние пользовательских
+   путей в снимке, если оно изменилось по артефакту, а не по прозе исполнителя.
 4. Верни короткий текст для пользователя в формате вердикта продакта: что теперь
    может пользователь, цена, что осталось, и строка «Риск/долг», если в
    verification есть GAP. Если сказать нечего — верни ровно слово SILENT.
