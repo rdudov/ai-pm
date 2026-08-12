@@ -2380,14 +2380,25 @@ def owner_activity(owner: dict, previous: dict) -> dict:
     except (KeyError, TypeError, ValueError):
         span = None
     delta = round(cpu - float(seen["cpu_seconds"]), 3)
-    active = delta >= OWNER_CPU_TICK_SECONDS or span is None or span < OWNER_IDLE_SECONDS
+    working = delta >= OWNER_CPU_TICK_SECONDS
+    # A window shorter than the judging threshold says nothing about the world:
+    # «не двигалось за минуту» is a statement about the minute. Such a sighting
+    # keeps the right of way until it can answer.
+    too_short = span is None or span < OWNER_IDLE_SECONDS
+    if working:
+        source = (f"процессорное время процесса в /proc выросло на {delta} с за "
+                  f"{span} с наблюдения")
+    elif too_short:
+        source = (f"процессорное время процесса в /proc выросло на {delta} с, но "
+                  f"наблюдение идёт всего {span} с — короче порога суждения, "
+                  "поэтому продакт считается работающим")
+    else:
+        source = (f"процессорное время процесса в /proc не двигалось {span} с "
+                  f"(рост {delta} с): решение в нём не принимается")
     return {
         "cpu_seconds": cpu, "cpu_delta": delta, "measured_over": span,
-        "active": active,
-        "src": (f"процессорное время процесса в /proc выросло на {delta} с за "
-                f"{span} с наблюдения" if active else
-                f"процессорное время процесса в /proc не двигалось {span} с "
-                f"(рост {delta} с): решение в нём не принимается"),
+        "active": working or too_short,
+        "src": source,
     }
 
 
