@@ -499,6 +499,16 @@ def validate_snapshot(snapshot: dict) -> dict:
             # Same rule as everywhere else: a second instance of the product
             # owner named on the strip has to say what observed it.
             raise ContractError("разбуженный продакт: не сказано, чем наблюдён")
+        # Absent means «эта опись собрана до наблюдения активности». Present
+        # means a claim is being made about whether that owner is deciding
+        # anything, and a claim carries what observed it, like every other one
+        # on this board.
+        activity = owner.get("activity")
+        if activity is not None:
+            _require(activity, ("active", "src"), "активность разбуженного продакта")
+            if not str(activity["src"]).strip():
+                raise ContractError(
+                    "разбуженный продакт: активность названа, но не сказано, чем наблюдена")
         if not isinstance(owner["worktrees"], list):
             # Yielding is about a working tree and nothing else, so an instance
             # that cannot say which trees it could occupy cannot be reasoned

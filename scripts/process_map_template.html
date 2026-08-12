@@ -2123,10 +2123,16 @@ function drawStrip(board) {
       : owner.kind === "mail" ? "почтовое пробуждение продакта"
       : owner.kind === "woken" ? "продакт, разбуженный тиком" : "продакт в консоли";
     const trees = (owner.worktrees || []).map(path => path.split("/").pop()).join(", ");
+    /* Awake and deciding are two different states, and only the second one is a
+       reason to hold back. A window left open used to read here as «сверьтесь с
+       его очередью», which is advice to wait for somebody who is not there. */
+    const idle = owner.activity && owner.activity.active === false;
     s.textContent = who + (age ? " · " + age : "")
       + (trees ? " · может занять " + trees : " · рабочее дерево не названо")
-      + " — сверьтесь с его очередью, прежде чем заводить задачу";
-    s.title = "наблюдено: " + owner.src;
+      + (idle ? " — решение в нём не принимается: работа ему уже передана"
+              : " — сверьтесь с его очередью, прежде чем заводить задачу");
+    s.title = "наблюдено: " + owner.src
+      + (owner.activity ? "; " + owner.activity.src : "");
     mine.appendChild(s);
   }
   strip.appendChild(mine);

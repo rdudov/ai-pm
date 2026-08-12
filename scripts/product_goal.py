@@ -196,10 +196,16 @@ def load_all() -> list[dict]:
 
 
 def active(thread: str | None = None) -> list[dict]:
-    """Goals still owed to the user, optionally of one direction."""
+    """Goals still owed to the user, optionally of one direction.
+
+    A goal whose file does not parse cannot say which direction it belongs to,
+    so it is answered to every direction rather than to none. Being loud on four
+    panels costs a line; being invisible costs the promise.
+    """
     return [goal for goal in load_all()
             if goal.get("state") != CLOSED
-            and (thread is None or goal.get("thread") == thread)]
+            and (thread is None or goal.get("thread") == thread
+                 or goal.get("unreadable"))]
 
 
 def _next_id() -> str:
@@ -535,10 +541,16 @@ def apply_observed(goal_id: str) -> dict:
 
 
 def live_tasks(goal: dict) -> list[int]:
-    """Task numbers this goal is currently waiting on."""
+    """Task numbers this goal is currently waiting on.
+
+    Tolerant of a record that could not be parsed: such a goal has no task
+    number, and the honest answer is an empty list rather than an exception that
+    would take the whole board down over one unreadable file.
+    """
     if goal.get("state") == PAUSED:
-        return [item["task"] for item in goal.get("correctives", []) if not item["accepted"]]
-    return [goal["main_task"]]
+        return [item["task"] for item in goal.get("correctives", [])
+                if not item.get("accepted")]
+    return [goal["main_task"]] if goal.get("main_task") is not None else []
 
 
 def projection(goal: dict) -> dict:
@@ -611,7 +623,7 @@ def block(thread: str) -> str:
             + (f", признаки: {marks}" if marks else "") + "]\n"
             f"  результат для пользователя: {goal['outcome']}\n"
             "  условия достижения: " + "; ".join(goal.get("observable", [])) + "\n"
-            f"  основная задача: {goal['main_task']}\n"
+            f"  основная задача: {goal.get('main_task') or 'не названа'}\n"
             + "".join(
                 f"  корректирующая задача {item['task']} "
                 f"({'принята' if item['accepted'] else 'в работе'}): {item['effect']}; "

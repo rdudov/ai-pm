@@ -240,6 +240,12 @@ class GoalStore(unittest.TestCase):
         listed = goals.load_all()
         self.assertEqual(len(listed), 2)
         self.assertTrue(any(item.get("unreadable") for item in listed))
+        # And it must not take the board, the wake-up block or the standing
+        # check down with it: one unparsable file is a loud goal, not an outage.
+        for projected in goals.panel("process"):
+            schema.validate_goal(projected, "цель")
+        self.assertIn("не названа", goals.block("process"))
+        self.assertTrue(goals.standing("process", []))
 
 
 class TickReadsGoals(unittest.TestCase):
