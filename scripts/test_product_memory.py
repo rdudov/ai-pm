@@ -258,3 +258,21 @@ def test_a_promise_the_board_printed_and_the_snapshot_lost_is_a_defect(
     problems, _ = migration.verify(store, source_root)
 
     assert any("исчезли из снимка" in problem for problem in problems)
+
+
+def test_a_clean_fresh_migration_exits_zero_through_the_real_entrypoint(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys):
+    """The migration itself, not `--verify`, is what a first run actually calls."""
+    source_root = _legacy(tmp_path, SNAPSHOT)
+    # The migration names its sources relative to the checkout it runs in.
+    monkeypatch.setattr(migration, "HOME", tmp_path)
+    monkeypatch.setattr(sys, "argv", [
+        "migrate_product_content.py",
+        "--root", str(tmp_path / "content"),
+        "--source", str(source_root),
+    ])
+
+    status = migration.main()
+
+    assert status == 0
+    assert "перенос полон" in capsys.readouterr().out

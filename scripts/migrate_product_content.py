@@ -334,6 +334,22 @@ def verify(base: Path, source_root: Path) -> tuple[list[str], list[str]]:
     return problems, growth
 
 
+def report(base: Path, source_root: Path) -> int:
+    """Print the verdict of one verification and return the process status.
+
+    Both entrypoints — the fresh migration and `--verify` — end the same way, so
+    they end in the same code. Keeping two copies is what let a fresh migration
+    report failure while printing nothing wrong.
+    """
+    problems, growth = verify(base, source_root)
+    for problem in problems:
+        print(problem)
+    for line in growth:
+        print(line)
+    print("перенос полон" if not problems else f"дефектов переноса: {len(problems)}")
+    return 1 if problems else 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=memory.ROOT)
@@ -342,13 +358,7 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.verify:
-        problems, growth = verify(args.root, args.source)
-        for problem in problems:
-            print(problem)
-        for line in growth:
-            print(line)
-        print("перенос полон" if not problems else f"дефектов переноса: {len(problems)}")
-        return 1 if problems else 0
+        return report(args.root, args.source)
 
     if memory.slugs(args.root):
         print(f"в {args.root} уже есть снимки продуктов; перенос не повторяется")
@@ -361,10 +371,7 @@ def main() -> int:
               f"{len(record['fragments'])}, вложений {len(record['attachments'])}, "
               f"строк «В работе» {record['work_entries_in_snapshot']}"
               f"/{record['work_entries_total']}")
-    problems = verify(args.root, args.source)
-    for problem in problems:
-        print(problem)
-    return 1 if problems else 0
+    return report(args.root, args.source)
 
 
 if __name__ == "__main__":
