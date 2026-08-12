@@ -3362,7 +3362,7 @@ class TheWakeUpSeesTheQueueMove(unittest.TestCase):
 
     def report(self, ready=(), decided=(), pickup=(), live=(), undelivered=(),
                waiting=(), worktrees=("/opt/projects/companion-agent",),
-               processes=()):
+               processes=(), process_observation=None):
         return {
             "title": "Процессный контур",
             "live_runs": [{"id": i, "title": "Задача", "status": "in_progress",
@@ -3383,6 +3383,8 @@ class TheWakeUpSeesTheQueueMove(unittest.TestCase):
             "worktrees": list(worktrees),
             "owners_awake": [],
             "long_lived_processes": list(processes),
+            "long_lived_processes_observation": process_observation or {
+                "available": True, "reason": None},
         }
 
     def test_a_condition_that_cleared_is_a_transition_like_a_finished_run(self):
@@ -3421,9 +3423,32 @@ class TheWakeUpSeesTheQueueMove(unittest.TestCase):
         events = tick.transitions(one, doubled)
         self.assertTrue(any("ДУБЛЬ" in event and "2 раза" in event for event in events))
 
+    def test_unavailable_registry_preserves_inventory_without_a_false_death(self):
+        process = {"pid": 7, "since": "start", "task": 692,
+                   "command": "forts_field_probe.py", "repo": "/opt/projects/moex",
+                   "duplicate_count": 1, "outputs": [{"path": "/tmp/probe.jsonl"}]}
+        observed_report = self.report(processes=[process])
+        before = tick.snapshot(observed_report)
+        unavailable_report = self.report(
+            process_observation={"available": False,
+                                 "reason": "registry unavailable"})
+
+        current = tick.snapshot(unavailable_report, before)
+        events = tick.transitions(before, current)
+
+        self.assertEqual(current["long_lived"], before["long_lived"])
+        self.assertEqual(events, [
+            "опись долгоживущих процессов недоступна: registry unavailable"])
+        self.assertFalse(any("больше не жив" in event for event in events))
+        stored = {"long_lived_processes": [process]}
+        self.assertEqual(
+            tick.persisted_process_inventory(unavailable_report, stored), [process])
+
     def test_the_tick_persists_the_full_inventory_even_when_it_does_not_wake(self):
         source = Path(tick.__file__).read_text()
-        self.assertIn('"long_lived_processes": report["long_lived_processes"]', source)
+        self.assertIn('"long_lived_processes": long_lived_processes', source)
+        self.assertIn('"long_lived_processes_observation": process_observation(report)',
+                      source)
 
     def test_yielding_to_another_owner_leaves_the_list_on_disk(self):
         """Yielding is right; yielding silently is how the list reaches nobody."""

@@ -91,7 +91,33 @@ NOTIFY_TIMEOUT = tunable("PRODUCT_OWNER_NOTIFY_TIMEOUT_SECONDS", 10)
 CODEX_HEAVY_PERCENT = tunable("PRODUCT_OWNER_CODEX_HEAVY_PERCENT", 80)
 
 
-def snapshot(report: dict) -> dict:
+def process_observation(report: dict) -> dict:
+    """Normalized availability of the detached-process observation.
+
+    Reports written before task 839 had no marker and did contain an actual
+    observation, so absence remains the compatible `available` case.
+    """
+    observation = report.get("long_lived_processes_observation") or {}
+    return {
+        "available": observation.get("available", True) is True,
+        "reason": observation.get("reason"),
+    }
+
+
+def snapshot(report: dict, previous: dict | None = None) -> dict:
+    observation = process_observation(report)
+    processes = sorted(({
+        "pid": item["pid"], "since": item["since"], "task": item["task"],
+        "command": item["command"], "repo": item["repo"],
+        "duplicate_count": item["duplicate_count"],
+    } for item in report.get("long_lived_processes", [])),
+                       key=lambda item: (item["task"] or 0, item["command"],
+                                         item["pid"]))
+    if not observation["available"] and previous is not None:
+        # Unobservable is not empty. Retain the last externally observed
+        # identities until the owning registry can distinguish registered runs
+        # from detached work again.
+        processes = list(previous.get("long_lived", []))
     return {
         "live": sorted(item["id"] for item in report["live_runs"]),
         "blocked": sorted(item["id"] for item in report["needs_attention"] if item["status"] == "blocked"),
@@ -112,14 +138,16 @@ def snapshot(report: dict) -> dict:
         # A process can outlive the run record and even its completed task. Its
         # identity belongs in the tick's state so appearance, cleanup and a new
         # duplicate are edges rather than facts seen only by a manual CLI call.
-        "long_lived": sorted(({
-            "pid": item["pid"], "since": item["since"], "task": item["task"],
-            "command": item["command"], "repo": item["repo"],
-            "duplicate_count": item["duplicate_count"],
-        } for item in report.get("long_lived_processes", [])),
-                             key=lambda item: (item["task"] or 0, item["command"],
-                                               item["pid"])),
+        "long_lived": processes,
+        "long_lived_observation": observation,
     }
+
+
+def persisted_process_inventory(report: dict, stored: dict) -> list[dict]:
+    """The full inventory to persist without converting unknown into empty."""
+    if process_observation(report)["available"]:
+        return report.get("long_lived_processes", [])
+    return stored.get("long_lived_processes", [])
 
 
 def transitions(previous: dict, current: dict) -> list[str]:
@@ -130,6 +158,14 @@ def transitions(previous: dict, current: dict) -> list[str]:
         events.append(f"задача {task_id} числится running, но процесс мёртв")
     for task_id in sorted(set(current["blocked"]) - set(previous.get("blocked", []))):
         events.append(f"задача {task_id} перешла в blocked")
+    observation = current.get(
+        "long_lived_observation", {"available": True, "reason": None})
+    previous_observation = previous.get(
+        "long_lived_observation", {"available": True, "reason": None})
+    if not observation["available"] and previous_observation.get("available", True):
+        events.append(
+            "опись долгоживущих процессов недоступна: "
+            f"{observation.get('reason') or 'причина не указана'}")
     old_processes = {(item.get("pid"), item.get("since")): item
                      for item in previous.get("long_lived", [])}
     new_processes = {(item.get("pid"), item.get("since")): item
@@ -669,8 +705,9 @@ def main() -> int:
         args.thread, stored, moment, announce=not args.dry_run)
 
     report = build(args.thread)
-    current = snapshot(report)
     previous = stored.get("snapshot", {})
+    current = snapshot(report, previous)
+    long_lived_processes = persisted_process_inventory(report, stored)
 
     events = transitions(previous, current) if previous else ["первый запуск треда"]
 
@@ -694,7 +731,8 @@ def main() -> int:
         """The direction's state file, in the one shape the board reads."""
         return {
             "thread": args.thread, "updated_at": now, "snapshot": current,
-            "long_lived_processes": report["long_lived_processes"],
+            "long_lived_processes": long_lived_processes,
+            "long_lived_processes_observation": process_observation(report),
             "last_events": events, **standing,
             "idle_reminder": idle_reminder,
             "undelivered_reminder": held_reminder,
@@ -783,7 +821,7 @@ def main() -> int:
     # What the wake-up came to, observed rather than believed: the same
     # projection taken again, and the difference in live runs is the answer.
     try:
-        after = snapshot(build(args.thread))
+        after = snapshot(build(args.thread), current)
     except Exception:
         after = None
     state_path.write_text(json.dumps(record(after, True), ensure_ascii=False, indent=2))
