@@ -25,6 +25,7 @@ class ProductOwnerModelRouterTests(unittest.TestCase):
         self.assertIn("убрать или отключить", STARTUP_PROMPT)
         self.assertIn("настроить или переиспользовать", STARTUP_PROMPT)
         self.assertIn("минимально необходимый код", STARTUP_PROMPT)
+        self.assertIn("Не превращай сводку в технический лог", STARTUP_PROMPT)
 
     def test_switches_only_below_five_percent_remaining(self):
         self.assertEqual(select_model({"seven_day_opus": {"utilization": 95}})[0], "opus")

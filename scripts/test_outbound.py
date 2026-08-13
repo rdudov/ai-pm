@@ -768,6 +768,11 @@ class TheTickUsesTheGate(unittest.TestCase):
             self.assertEqual(tick.require_notification_profile(), "destination")
         resolve.assert_called_once_with()
 
+    def test_missing_notification_profile_has_a_product_error(self):
+        with mock.patch.object(tick, "resolve_bot_target", side_effect=ValueError("missing")):
+            with self.assertRaisesRegex(SystemExit, "server-owned notification profile"):
+                tick.require_notification_profile()
+
     def test_background_owner_receives_no_code_first_order(self):
         text = tick.prompt(a_report(), ["прогон завершился"], [], [], {"sessions": []})
         self.assertIn("ничего не делать", text)

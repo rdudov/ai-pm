@@ -615,7 +615,13 @@ def notify(text: str) -> None:
 
 def require_notification_profile() -> str:
     """Fail before product work when its server-owned push route is absent."""
-    _token, destination = resolve_bot_target()
+    try:
+        _token, destination = resolve_bot_target()
+    except (OSError, SystemExit, ValueError) as exc:
+        raise SystemExit(
+            "product-owner: server-owned notification profile is unavailable: "
+            f"{exc}"
+        ) from None
     return destination
 
 
