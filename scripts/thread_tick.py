@@ -528,7 +528,8 @@ def outcome(before: dict, after: dict | None, woke: bool, report: dict,
     return "запускать нечего: свободной работы в очереди нет"
 
 
-def send_mail(subject: str, body: str) -> bool:
+def send_mail(subject: str, body: str, *,
+              reply_to_message_id: str | None = None) -> str | bool | None:
     """Put one letter in the mailbox the user actually reads.
 
     The telegram path below needs a bot token in the environment, and the
@@ -541,25 +542,39 @@ def send_mail(subject: str, body: str) -> bool:
     Whether a letter *should* go is not decided here — `outbound.decide` owns
     that, and `deliver` below is the only caller. What is decided here is
     whether it went, which the ledger needs: a send that failed must stay held
-    rather than be written down as said.
+    rather than be written down as said. On success the Gmail message id is
+    returned when the sender prints it; `True` preserves the older success
+    contract if that receipt is absent.
     """
     script = COMPANION / "skills" / "gmail-client" / "scripts" / "send_email.py"
     python = COMPANION / ".venv" / "bin" / "python"
     if not script.is_file() or not python.is_file():
         return False
+    command = [str(python), str(script), "--to", MAIL_TO, "--body", body]
+    if reply_to_message_id:
+        command += ["--reply-to-message-id", reply_to_message_id]
+    else:
+        command += ["--subject", subject]
     try:
         result = subprocess.run(
-            [str(python), str(script), "--to", MAIL_TO, "--subject", subject, "--body", body],
+            command,
             cwd=str(COMPANION), capture_output=True, text=True,
             timeout=MAIL_TIMEOUT, check=False,
         )
     except Exception:
-        return False
-    return result.returncode == 0
+        return None
+    if result.returncode != 0:
+        return None
+    receipt = re.search(r"Message ID:\s*([A-Za-z0-9_-]+)", result.stdout or "")
+    # A successful upload must never be retried merely because a future sender
+    # changed its human-readable receipt. The string is evidence when present;
+    # True preserves the older success contract without risking a duplicate.
+    return receipt.group(1) if receipt else True
 
 
 def deliver(thread: str, kind: str, subject: str, body: str,
-            report: dict | None, moment: datetime, chat: dict | None = None) -> dict:
+            report: dict | None, moment: datetime, chat: dict | None = None,
+            *, reply_to_message_id: str | None = None) -> dict:
     """The one door mail leaves this contour through.
 
     The push above is unconditional and stays that way: «прогон стартовал»,
@@ -568,9 +583,13 @@ def deliver(thread: str, kind: str, subject: str, body: str,
     gate is on this side only, and everything it turns away is still on the push
     and on the board.
 
-    A failed send is held, not recorded: the ledger's whole worth is that it
-    says what the user was told, and a letter that never left was not told.
+    A failed proactive send is held, not recorded as sent: the ledger's whole
+    worth is that it says what the user was told. A failed reply stays an
+    explicit failure for its mail-wake owner instead of entering the proactive
+    merge queue.
     """
+    if (kind == "reply") != bool(reply_to_message_id):
+        raise ValueError("kind='reply' and reply_to_message_id must be supplied together")
     if kind != "verdict":
         chat = outbound.no_chat()
     elif chat is None:
@@ -580,20 +599,39 @@ def deliver(thread: str, kind: str, subject: str, body: str,
         decision = outbound.decide(thread, kind, subject, body, report or {},
                                    moment, entry, chat)
         delivered = None
+        message_id = None
         if decision["action"] == "send":
-            delivered = send_mail(subject, decision["body"])
+            send_result = send_mail(
+                subject, decision["body"], reply_to_message_id=reply_to_message_id)
+            delivered = bool(send_result)
+            message_id = send_result if isinstance(send_result, str) else None
             if not delivered:
-                # Held as it was written, not as it was merged: what accumulated
-                # is still in `pending` because nothing was flushed, and holding
-                # the merged text would put every one of those items in twice.
-                decision = {**decision, "action": "hold",
-                            "reason": "отправка не удалась, письмо ждёт следующего",
-                            "body": decision["raw_body"], "flush": []}
-        outbound.apply(entry, decision, subject, moment, report, kind)
+                if kind == "reply":
+                    # A reply may not ride out later as proactive news. Keep the
+                    # failure explicit for the mail-wake owner to handle; putting
+                    # it in generic pending would violate the very reply boundary
+                    # this kind establishes.
+                    decision = {**decision, "action": "fail",
+                                "reason": "отправка ответа не удалась; повтор не выполнен",
+                                "body": decision["raw_body"], "flush": []}
+                else:
+                    # Held as it was written, not as it was merged: what
+                    # accumulated is still in `pending` because nothing was
+                    # flushed, and holding the merged text would put every one
+                    # of those items in twice.
+                    decision = {**decision, "action": "hold",
+                                "reason": "отправка не удалась, письмо ждёт следующего",
+                                "body": decision["raw_body"], "flush": []}
+        # A reply is owed independently of proactive news and therefore must
+        # neither advance nor erase the baseline used by the proactive gate.
+        applied_report = None if kind == "reply" else report
+        outbound.apply(entry, decision, subject, moment, applied_report, kind)
         record = {"at": moment.isoformat(), "thread": thread, "kind": kind,
                   "subject": subject, "action": decision["action"],
                   "reason": decision["reason"],
                   "delivered": None if delivered is None else bool(delivered),
+                  "message_id": message_id,
+                  "reply_to_message_id": reply_to_message_id,
                   "asks_user": outbound.asks_user(decision["raw_body"]),
                   "chat": chat["src"]}
         # Appended rather than written into the direction's state file, which is

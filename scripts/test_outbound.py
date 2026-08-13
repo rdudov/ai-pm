@@ -134,6 +134,34 @@ class QuestionIsNeverLost(unittest.TestCase):
         self.assertIn("Накопилось с прошлого письма", decision["body"])
 
 
+class ReplyIsNeverLost(unittest.TestCase):
+    """The inbound-mail producer, not prose, names an answer with kind=reply."""
+
+    def test_a_reply_bypasses_the_proactive_threshold(self):
+        decision = outbound.decide(
+            "process", "reply", "Re: пользовательское письмо", "Принял, делаю.",
+            a_report(), AT, an_entry(marks=marks()), outbound.no_chat())
+        self.assertEqual(decision["action"], "send")
+        self.assertIn("ответ на входящее письмо", decision["reason"])
+
+    def test_a_reply_is_not_deduplicated_or_merged(self):
+        body = "Принял, делаю задачу 1141."
+        entry = an_entry(
+            marks=marks(),
+            letters=[a_letter(body, AT - timedelta(minutes=5), kind="reply")],
+            pending=[{"at": (AT - timedelta(hours=1)).isoformat(), "subject": "s",
+                      "kind": "verdict", "body": "другая новость", "reason": "повтор"}],
+        )
+        chat = {"sessions": ["s"], "tasks": [1141], "pairs": outbound.pairs(body),
+                "chars": len(body), "src": "test"}
+        decision = outbound.decide(
+            "process", "reply", "Re: пользовательское письмо", body,
+            a_report(), AT, entry, chat)
+        self.assertEqual(decision["action"], "send")
+        self.assertEqual(decision["body"], body)
+        self.assertEqual(decision["flush"], [])
+
+
 class TheThreshold(unittest.TestCase):
     """«Письмо уходит, когда есть что сказать.»
 
@@ -749,6 +777,71 @@ class TheTickUsesTheGate(unittest.TestCase):
         after = source[source.index("def deliver("):]
         self.assertEqual(after.count("send_mail("), 1)
         self.assertIn("outbound.decide", body)
+
+    def test_the_mail_wake_instructions_set_reply_explicitly(self):
+        instructions = (Path(tick.__file__).parent.parent / "AGENTS.md").read_text(
+            encoding="utf-8")
+        self.assertIn('kind="reply"', instructions)
+        self.assertIn("reply_to_message_id", instructions)
+
+    def test_reply_delivery_reuses_the_door_and_records_the_gmail_receipt(self):
+        with tempfile.TemporaryDirectory() as home:
+            path = Path(home) / "outbound.json"
+            baseline = marks(waiting_user=[42])
+            with outbound.Ledger(path) as ledger:
+                ledger.thread("process")["marks"] = baseline
+            with mock.patch.object(outbound, "LEDGER", path), \
+                    mock.patch.object(tick, "send_mail", return_value="gmail-sent-1") as mailed:
+                record = tick.deliver(
+                    "process", "reply", "Re: письмо", "Принял, делаю.", a_report(), AT,
+                    reply_to_message_id="gmail-incoming-1",
+                )
+            mailed.assert_called_once_with(
+                "Re: письмо", "Принял, делаю.",
+                reply_to_message_id="gmail-incoming-1",
+            )
+            with outbound.Ledger(path) as ledger:
+                self.assertEqual(ledger.thread("process")["marks"], baseline)
+            self.assertEqual(record["action"], "send")
+            self.assertEqual(record["kind"], "reply")
+            self.assertEqual(record["message_id"], "gmail-sent-1")
+            self.assertEqual(record["reply_to_message_id"], "gmail-incoming-1")
+
+    def test_reply_sender_uses_gmail_reply_mode_and_returns_its_receipt(self):
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=0,
+            stdout="Email sent. Message ID: gmail-sent-2\n", stderr="")
+        with mock.patch.object(tick.subprocess, "run", return_value=completed) as run:
+            receipt = tick.send_mail(
+                "Re: ignored by Gmail", "Ответ", reply_to_message_id="gmail-incoming-2",
+            )
+        command = run.call_args.args[0]
+        self.assertEqual(receipt, "gmail-sent-2")
+        self.assertIn("--reply-to-message-id", command)
+        self.assertIn("gmail-incoming-2", command)
+        self.assertNotIn("--subject", command)
+
+    def test_a_failed_reply_is_not_put_in_the_merge_queue(self):
+        with tempfile.TemporaryDirectory() as home:
+            path = Path(home) / "outbound.json"
+            with mock.patch.object(outbound, "LEDGER", path), \
+                    mock.patch.object(tick, "send_mail", return_value=None):
+                record = tick.deliver(
+                    "process", "reply", "Re: письмо", "Ответ", {}, AT,
+                    reply_to_message_id="gmail-incoming-3",
+                )
+            with outbound.Ledger(path) as ledger:
+                pending = ledger.thread("process")["pending"]
+        self.assertEqual(record["action"], "fail")
+        self.assertFalse(record["delivered"])
+        self.assertEqual(pending, [])
+
+    def test_reply_kind_and_origin_id_cannot_diverge(self):
+        with self.assertRaisesRegex(ValueError, "must be supplied together"):
+            tick.deliver("process", "reply", "Re: письмо", "Ответ", {}, AT)
+        with self.assertRaisesRegex(ValueError, "must be supplied together"):
+            tick.deliver("process", "verdict", "Продакт", "Новость", {}, AT,
+                         reply_to_message_id="gmail-incoming-1")
 
     def test_the_push_is_not_gated(self):
         # What the gate turns away must still reach the user somewhere.

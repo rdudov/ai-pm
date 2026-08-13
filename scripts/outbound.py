@@ -27,9 +27,10 @@ owner of the four rules that came out of that complaint:
    already covered inside the coalescing window is *held*, not dropped, and the
    held items ride out with the next letter that does go — or on their own once
    the oldest of them passes `HOLD_MAX_SECONDS`.
-4. **Ничего не потерять.** A letter that asks the user something is never held,
-   never deduplicated and never held back by the threshold. It is decided first,
-   before every other rule in this file.
+4. **Ничего не потерять.** A letter that asks the user something, or a reply to
+   the user's incoming letter, is never held, deduplicated or held back by the
+   threshold. The producer identifies a reply explicitly with `kind="reply"`;
+   this module never guesses it from prose.
 
 The mirror of sent mail deliberately keeps no body (`gmail_client.
 record_sent_message`), so «то же самое по содержанию» cannot be answered from
@@ -85,9 +86,11 @@ KEEP_LETTERS = tunable("PRODUCT_OWNER_KEEP_LETTERS", 20)
 # about it is this much rarer.
 IDLE_LETTER_SECONDS = tunable("PRODUCT_OWNER_IDLE_LETTER_SECONDS", 6 * 3600)
 
-# Kinds that are faults rather than news. They carry their own rate limit where
-# they are raised, and a broken contour must never be coalesced into silence.
-ALWAYS = ("alarm", "wake_failure")
+# Kinds that do not describe proactive news. Faults carry their own rate limit
+# where they are raised, and an explicit reply is the answer owed to an incoming
+# user letter. None may be thresholded or coalesced into silence. `reply` is set
+# by the mail-wake producer; no text heuristic in this gateway may infer it.
+ALWAYS = ("alarm", "wake_failure", "reply")
 
 # Prompts written by a machine, not typed by the user. A session that has a user
 # turn matching none of these had a human in it, and only such a session counts
@@ -580,7 +583,9 @@ def decide(thread: str, kind: str, subject: str, body: str, report: dict,
     pending = list(entry["pending"])
 
     if kind in ALWAYS:
-        return {"action": "send", "reason": "сбой контура, не новость", "body": body,
+        reason = ("ответ на входящее письмо пользователя доходит всегда"
+                  if kind == "reply" else "сбой контура, не новость")
+        return {"action": "send", "reason": reason, "body": body,
                 "raw_body": body, "fingerprint": candidate, "flush": []}
     if asks_user(body):
         merged = merged_body(body, pending)
