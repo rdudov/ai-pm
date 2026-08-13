@@ -13,9 +13,17 @@
 cd /opt/projects/companion-agent
 .venv/bin/python skills/task-creator/scripts/tasks_index.py add "Заголовок" "Суть" слаг [--project ...]
 .venv/bin/python skills/task-runner/scripts/task_runner.py start tasks/<id>-<слаг> \
-  --runner <codex|claude> --workflow <standard|dev-pipeline> --workflow-reason "..." \
-  --sandbox-mode <read-only|workspace-write> --repo <репозиторий> [--destination <чат>]
+  --repo <репозиторий>
 ```
+
+Это штатный профиль основного исполнителя: семейство наследуется от продакта,
+обычный workflow и режим записи выбирает runner, а разрешённый Telegram-адрес
+application adapter получает из серверного владельца credentials. Отдельный
+проверяющий запускается одной командой `task_runner.py review-candidate TASK
+--repo REPO`; нужную другую семью и read-only границу выбирает существующий
+контур ревью. Фоновый продакт запускается `systemctl start
+product-thread@<тред>.service`; его Telegram transport читает тот же серверный
+владелец. Сырые секреты и адрес не передаются в argv.
 
 `--project` — не украшение. `scripts/thread_state.py` ищет задачи треда по
 проекту и по `task_search`; задача без проекта в наблюдаемое состояние не
@@ -196,10 +204,10 @@ Telegram по сделкам, ежедневный отчёт в почту и �
   исполнитель физически не сможет опубликовать результат и умрёт с
   «premature completion». Задачи с доставкой во внешний репозиторий ведут с
   `--sandbox-mode danger-full-access`, как 707, 724 и 729.
-- **`--workflow dev-pipeline` требует `--destination`.** Авторизованный адрес —
-  `telegram_user_503043504`; в артефактах он намеренно вырезан и хранится только
-  как `destination_binding` (первые 12 символов sha256). Проверить догадку:
-  `sha256(значение)[:12] == destination_binding`.
+- **Адрес уведомлений не является ручным флагом.** Application adapter берёт
+  его через существующий bot transport из серверного владельца, хранит сырое
+  значение только в mode-0600 runtime binding и пишет в task metadata лишь
+  `destination_binding`. Отсутствующий токен или адрес отказывает до ребёнка.
 - **Задача, где обязательна отдельная проверка политики, ведётся с
   `--sandbox-mode danger-full-access`, даже если сама работа read-only.** Такая
   проверка поднимает собственную сессию исполнителя, а из вложенной песочницы

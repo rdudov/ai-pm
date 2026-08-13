@@ -64,8 +64,6 @@ import os
 import re
 import subprocess
 import sys
-import urllib.parse
-import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -79,6 +77,11 @@ import runner_contract  # noqa: E402
 from process_map_state import RUNNER_SCRIPTS, tunable  # noqa: E402
 from process_map_state import THREAD_STATE as STATE_DIR  # noqa: E402
 from thread_state import HOME, REPO, build  # noqa: E402
+
+TELEGRAM_SCRIPTS = REPO / "skills" / "telegram-client" / "scripts"
+if str(TELEGRAM_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(TELEGRAM_SCRIPTS))
+from bot_transport import resolve_bot_target, send_bot_message  # type: ignore  # noqa: E402
 
 CLAUDE_PRODUCT_OWNER = HOME / "scripts" / "claude_product_owner.py"
 COMPANION = Path("/opt/projects/companion-agent")
@@ -103,7 +106,6 @@ UNDELIVERED_SECONDS = tunable("PRODUCT_OWNER_UNDELIVERED_SECONDS", 1800)
 # How long the woken owner may take, and how long the two side channels may.
 WAKE_TIMEOUT = tunable("PRODUCT_OWNER_WAKE_TIMEOUT_SECONDS", 1800)
 MAIL_TIMEOUT = tunable("PRODUCT_OWNER_MAIL_TIMEOUT_SECONDS", 180)
-NOTIFY_TIMEOUT = tunable("PRODUCT_OWNER_NOTIFY_TIMEOUT_SECONDS", 10)
 # Above this share of the weekly Codex window, heavy work does not start — the
 # same threshold `codex_budget.py` prints its verdict against.
 CODEX_HEAVY_PERCENT = tunable("PRODUCT_OWNER_CODEX_HEAVY_PERCENT", 80)
@@ -605,19 +607,16 @@ def deliver(thread: str, kind: str, subject: str, body: str,
 
 
 def notify(text: str) -> None:
-    token = os.environ.get("COMPANION_BOT_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN")
-    chat_id = os.environ.get("COMPANION_BOT_CHAT_ID") or os.environ.get("TELEGRAM_USER_ID")
-    if not token or not chat_id:
-        return
-    payload = urllib.parse.urlencode({"chat_id": chat_id, "text": text}).encode()
-    request = urllib.request.Request(
-        f"https://api.telegram.org/bot{token}/sendMessage", data=payload, method="POST"
-    )
     try:
-        with urllib.request.urlopen(request, timeout=NOTIFY_TIMEOUT) as response:
-            response.read()
-    except Exception:
+        send_bot_message(text)
+    except (OSError, SystemExit, ValueError):
         return
+
+
+def require_notification_profile() -> str:
+    """Fail before product work when its server-owned push route is absent."""
+    _token, destination = resolve_bot_target()
+    return destination
 
 
 def runner_contract_alarm(thread: str, stored: dict, moment: datetime,
@@ -861,6 +860,8 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true", help="показать события и выйти")
     parser.add_argument("--force", action="store_true", help="разбудить агента даже без событий")
     args = parser.parse_args()
+
+    require_notification_profile()
 
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     state_path = STATE_DIR / f"{args.thread}.json"

@@ -756,6 +756,18 @@ class TheTickUsesTheGate(unittest.TestCase):
         self.assertNotIn("outbound", source[source.index("def notify("):
                                             source.index("def runner_contract_alarm(")])
 
+    def test_the_push_reuses_the_server_owned_bot_transport(self):
+        with mock.patch.object(tick, "send_bot_message") as send:
+            tick.notify("status")
+        send.assert_called_once_with("status")
+
+    def test_notification_profile_preflight_uses_server_owner(self):
+        with mock.patch.object(
+            tick, "resolve_bot_target", return_value=("secret", "destination")
+        ) as resolve:
+            self.assertEqual(tick.require_notification_profile(), "destination")
+        resolve.assert_called_once_with()
+
     def test_a_failed_send_is_held_rather_than_recorded_as_said(self):
         with tempfile.TemporaryDirectory() as home:
             path = Path(home) / "outbound.json"
