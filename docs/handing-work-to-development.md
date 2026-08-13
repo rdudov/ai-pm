@@ -25,6 +25,27 @@ application adapter получает из серверного владельц�
 product-thread@<тред>.service`; его Telegram transport читает тот же серверный
 владелец. Сырые секреты и адрес не передаются в argv.
 
+### Граница сборки и установки
+
+- `product-owner` — развёрнутый application checkout, а не editable
+  Python-зависимость. Systemd читает конкретный `git HEAD`; обновление вступает
+  в силу на следующем oneshot-запуске после коммита и независимого ревью.
+  `thread_state.py` и процессное табло показывают HEAD, tracked-dirty и
+  unpushed, поэтому локальная правка не маскируется под опубликованную версию.
+- `companion-agent` — владелец живого venv. `task-agent-engine` и
+  `dev-pipeline` ставятся туда только по полным Git revision из совпадающих
+  `requirements.txt`/`requirements.lock`; обычные start/stop/reattach/review
+  отказывают до ребёнка при несовпадении декларации и PEP 610 identity.
+- Editable install допустим только в отдельном contributor venv/worktree, где
+  его явно выбрал разработчик. Он не обслуживает systemd и не является
+  доказательством того, что принятая ревизия установлена в Companion.
+
+Цена перехода — один reinstall Companion venv при принятом изменении внутренних
+движков и явный commit/review перед следующим product-owner tick; отдельного
+демона или очереди нет. Откат: вернуть оба dependency-файла на прежние полные
+revision и переустановить venv, а для `product-owner` вернуть checkout на ранее
+принятый commit; следующий запуск oneshot читает откат без daemon reload.
+
 `--project` — не украшение. `scripts/thread_state.py` ищет задачи треда по
 проекту и по `task_search`; задача без проекта в наблюдаемое состояние не
 попадает, и пробуждение покажет пустой тред при работающих детях. Так было
