@@ -4,6 +4,7 @@ import urllib.error
 
 from claude_product_owner import (
     CODEX_MODEL,
+    STARTUP_PROMPT,
     Route,
     claude_command,
     codex_command,
@@ -19,6 +20,12 @@ from claude_product_owner import (
 
 
 class ProductOwnerModelRouterTests(unittest.TestCase):
+    def test_interactive_owner_receives_no_code_first_order(self):
+        self.assertIn("ничего не делать", STARTUP_PROMPT)
+        self.assertIn("убрать или отключить", STARTUP_PROMPT)
+        self.assertIn("настроить или переиспользовать", STARTUP_PROMPT)
+        self.assertIn("минимально необходимый код", STARTUP_PROMPT)
+
     def test_switches_only_below_five_percent_remaining(self):
         self.assertEqual(select_model({"seven_day_opus": {"utilization": 95}})[0], "opus")
         self.assertEqual(select_model({"seven_day_opus": {"utilization": 95.1}})[0], "fable")

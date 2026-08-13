@@ -19,7 +19,7 @@ cd /opt/projects/companion-agent
 Это штатный профиль основного исполнителя: семейство наследуется от продакта,
 обычный workflow и режим записи выбирает runner, а разрешённый Telegram-адрес
 application adapter получает из серверного владельца credentials. Отдельный
-проверяющий запускается одной командой `task_runner.py review-candidate TASK
+проверяющий запускается одной командой `task_runner.py review TASK
 --repo REPO`; нужную другую семью и read-only границу выбирает существующий
 контур ревью. Фоновый продакт запускается `systemctl start
 product-thread@<тред>.service`; его Telegram transport читает тот же серверный

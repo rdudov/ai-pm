@@ -768,6 +768,13 @@ class TheTickUsesTheGate(unittest.TestCase):
             self.assertEqual(tick.require_notification_profile(), "destination")
         resolve.assert_called_once_with()
 
+    def test_background_owner_receives_no_code_first_order(self):
+        text = tick.prompt(a_report(), ["прогон завершился"], [], [], {"sessions": []})
+        self.assertIn("ничего не делать", text)
+        self.assertIn("убрать или отключить", text)
+        self.assertIn("настроить или переиспользовать", text)
+        self.assertIn("минимально необходимый код", text)
+
     def test_a_failed_send_is_held_rather_than_recorded_as_said(self):
         with tempfile.TemporaryDirectory() as home:
             path = Path(home) / "outbound.json"
