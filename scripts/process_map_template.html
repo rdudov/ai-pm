@@ -151,6 +151,62 @@
      mechanism doing the same job badly — and a scrollbar inside a header is
      exactly the «микроскролл» the user asked to be rid of. */
 
+  /* ---------- очередь и бэклог, как их установил план ----------
+     Порядок работ принадлежит портфельному плану, а не наблюдению, и план один
+     на все направления: у него сквозной порядок, а колонки разложены по
+     направлениям. Поэтому очередь стоит одним списком над колонками — там же,
+     где стоит ответ на «кто работает сейчас», — а в колонках те же задачи стоят
+     каждая в своём направлении. Это один и тот же ответ, собранный один раз в
+     сборщике и показанный с двух сторон.
+
+     Раскрыт по умолчанию: пользователь пишет письмо именно за этим ответом, и
+     ответ под складкой — это ещё одно письмо. */
+  #plan { padding: 10px 18px 12px; border-bottom: 1px solid var(--edge);
+          background: var(--bg1); font-size: 13px; }
+  #plan > .grp { margin-top: 8px; }
+  #plan .lbl { color: var(--dim); font-size: 11px; letter-spacing: .07em;
+               text-transform: uppercase; display: block; margin-bottom: 5px; }
+  #plan .owner { color: var(--dim); font-size: 11.5px; }
+  #plan .rows { display: flex; flex-direction: column; gap: 3px; }
+  /* Номер места — своей колонкой, а не первым словом строки: строка переносится,
+     и без колонки вторая задача той же строки читалась как отдельное место в
+     очереди. Порядок — это то, ради чего раздел существует, и он не может
+     зависеть от ширины окна. */
+  #plan .row { display: flex; gap: 8px; align-items: baseline;
+               max-width: 100%; line-height: 1.4; }
+  #plan .items { display: flex; flex-direction: column; gap: 2px; min-width: 0;
+                 white-space: normal; overflow-wrap: anywhere; }
+  #plan .pos { color: var(--dim); font-variant-numeric: tabular-nums; flex: none;
+               min-width: 22px; text-align: right; }
+  /* Строка плана, каждая задача которой по наблюдению уже закрыта. Она остаётся
+     на своём месте — расхождение плана и наблюдения не прячется, — но глаз
+     проходит мимо неё к работе, которая ещё стоит. */
+  #plan .row.closed .name, #plan .row.closed .free { color: var(--dim); }
+  #plan .num { color: var(--dim); font-variant-numeric: tabular-nums; }
+  #plan .name { color: var(--ink); }
+  /* Что наблюдение видит там, где план назвал порядок. Расхождение — это
+     содержание, а не ошибка отрисовки: план ставит задачу третьей, наблюдение
+     видит её живой, и обе стороны стоят рядом в одной строке. */
+  #plan .seen { color: var(--dim); }
+  #plan .seen.live { color: var(--live); }
+  #plan .seen.done { color: var(--done); }
+  #plan .seen.stuck { color: var(--blocked); }
+  /* Строка плана, за которой задачи наблюсти не удалось. Слова те же, что у
+     «Надо запланировать»: сверка не сошлась — это не «задачи нет». */
+  #plan .free { color: var(--ink); }
+  #plan .unlinked { color: var(--plan); }
+  /* Вид бэклога — подзаголовок своей группы. Пользователь назвал два вида, и
+     различает их не статус задачи, а то, что о ней говорит план. */
+  #plan .kindhead { color: var(--ours); font-size: 11.5px; margin: 6px 0 2px; }
+  #plan .none { color: var(--idle); }
+  /* Кнопка источника стоит под строкой, а не растягивается на всю её ширину:
+     колонка задач — это столбец, и кнопка в нём иначе занимает целую строку. */
+  #plan .srcbtn { align-self: flex-start; }
+  /* Метка «связь с задачей не установлена» на телефоне шире окна, а `nowrap`
+     достался ей от плашек: там метки короткие. Здесь она переносится — измерено
+     на 390, где строка иначе уезжала за правый край на 46 пикселей. */
+  #plan .tag { white-space: normal; }
+
   #columns { display: grid; grid-template-columns: repeat(4, 1fr);
              gap: 14px; padding: 14px; align-items: start; }
   .col { display: flex; flex-direction: column; min-width: 0;
@@ -227,6 +283,9 @@
   /* «Можно подхватить» is the first question of a wake-up, so it reads as an
      invitation rather than as another warning. */
   .area.a-pickup > h3 { color: var(--pick); }
+  /* Бэклог — не тревога и не приглашение: это то, что стоит по решению или без
+     решения, и цвет у него нейтральный, как у «Решает продакт». */
+  .area.a-backlog > h3 { color: var(--ours); }
   .area.a-plan > h3 { color: var(--plan); }
   .area.a-product_owner > h3 { color: var(--ours); }
   .area.a-undelivered > h3 { color: var(--undelivered); }
@@ -320,6 +379,10 @@
   .tag.age { font-variant-numeric: tabular-nums; }
   .tag.retry { color: var(--killed); border-color: #c2b0ec; }
   .tag.doc { color: var(--undelivered); border-color: #edb894; white-space: normal; }
+  /* Что о задаче говорит план: место в очереди, пауза его словом или молчание.
+     Своим цветом, потому что это единственная надпись на плашке, у которой
+     владелец не наблюдение. */
+  .tag.plan { color: var(--plan); border-color: #c2b0ec; white-space: normal; }
   .plate .doing { margin-top: 6px; color: var(--dim); font-size: 12.5px; line-height: 1.4; }
   .plate .ask { margin-top: 6px; color: var(--stale); font-size: 12.5px; line-height: 1.4; }
   /* What observed that the question is the user's, or that it is ours. The area
@@ -380,6 +443,9 @@
        first-screen answer — which means a reason may not be cut here. The item
        wraps and the reason takes as many lines as it needs. */
     #strip { padding: 7px 12px; }
+    /* Очередь и бэклог на телефоне читаются тем же списком: строка переносится,
+       а не обрезается, и порядок остаётся порядком. */
+    #plan { padding: 8px 12px 10px; }
     /* The three-line clamp that used to stand here was the phone half of finding
        HIGH-1: reasons #723, #727 and #747 ended in an ellipsis and two of them
        ran past the right edge of a 390 window. What keeps «Ждёт решения
@@ -518,6 +584,7 @@
     </span>
   </div>
   <div id="strip"></div>
+  <div id="plan"></div>
   <div id="columns"></div>
 </div>
 
@@ -1385,6 +1452,19 @@ function plateNode(p, areaKey) {
   }
   /* A live process and a label claiming one are two facts, kept apart on the
      plate: a dead run under a `running` label has to look like the jam it is. */
+  /* Что о задаче говорит план. Владелец очереди — он, и плашка называет его
+     прямо: порядок на доске нельзя принять за вывод наблюдения, а расхождение
+     («план ставит третьей», а рядом «прогон жив») читается как расхождение. */
+  const place = p.plan_place;
+  if (place) {
+    const said = place.role === "queue" ? place.position + "-я в очереди плана"
+      : place.role === "paused" ? "план держит её своим словом"
+      : place.role === "named" ? "план называет её, но в очередь не ставит"
+      : "план о ней не говорит";
+    row.appendChild(tag(said, "plan"));
+    sources.push(["Место в плане", place.src]);
+    if (place.line) sources.push(["Строка плана", place.line]);
+  }
   if (p.alive) row.appendChild(tag("прогон жив", "alive"));
   if (p.stale_label) row.appendChild(tag("ярлык врёт: процесса нет", "lie"));
   if (p.attempt > 1) row.appendChild(tag("попытка " + p.attempt, "retry"));
@@ -1420,6 +1500,26 @@ function plateNode(p, areaKey) {
     if (p.why_src) sources.push([p.blocked_by && p.why === p.blocked_by ? "Стоит за" : "Почему",
                                  p.why_src]);
     node.appendChild(why);
+  }
+  /* Что о задаче сказал план, целиком и своей строкой — рядом с наблюдаемым «за
+     чем стоит», а не вместо него. Место в очереди — это решение владельца
+     порядка, а держатель — наблюдение, и складывать их в одну надпись значило бы
+     назвать держателем работу другого направления, которую тот же план разрешил
+     вести параллельно.
+
+     У паузы строка плана показывается целиком: пользователь просил у бэклога
+     именно это — «чьим словом оно стоит и когда сказано», — и ответ написан в
+     ней самой («по слову пользователя 2026-08-13»). Прятать её за кнопку
+     источника значило бы обещать ответ и оставить его для тех, кто нажмёт. */
+  if (place && (place.role === "queue" || place.role === "paused")) {
+    const said = document.createElement("div");
+    said.className = "why";
+    said.textContent = place.role === "paused"
+      ? "план держит: " + place.line
+      : "план ставит её " + place.position + "-й в очереди" + (place.ahead.length
+          ? "; выше в очереди: " + place.ahead.join(", ")
+          : "; выше незакрытых задач нет");
+    node.appendChild(said);
   }
   /* Every open question of the task, whole, and each one saying whose it is and
      what said so. Two used to be shown and the rest counted, and the count was
@@ -1848,8 +1948,12 @@ function areaNode(panel, area) {
    reader who can see the rule can judge the list. */
 const AREA_RULE = {
   plan: "строки раздела «В работе», для которых не удалось наблюсти задачу: сверка идёт по номеру-ссылке, по названию задачи в строке и по слагу — под каждой строкой написано, с чем её сверили",
-  pickup: "живого прогона нет, гейты не отказали, и ничто на диске эту задачу не держит",
-  queued: "стоит за названным держателем — он в строке каждой плашки",
+  pickup: "живого прогона нет, гейты не отказали, ничто на диске эту задачу не держит, и в очередь план её не ставил",
+  queued: "порядок здесь установлен действующей редакцией портфельного плана — он назван на каждой плашке; ниже плана идут задачи, которые план очередью не называл, но которые стоят за наблюдаемым держателем",
+  /* Область, которой на доске не было вовсе, хотя работа в ней стояла: у
+     пользователя это «что просто в бэклоге и автоматом не запустится». Два вида
+     в ней различает не статус задачи, а прочитанная редакция плана. */
+  backlog: "план не двинет это сам: либо его действующая редакция держит работу своим словом — тогда на плашке стоит эта строка, — либо не называет задачу ни в одном поле, и тогда разбора и решения по ней нет",
   /* The rule of the area whose contents the user counted by hand and found
      thirteen of sixteen wrong. Printing it is what lets the next reader do the
      same check in a minute instead of an evening. */
@@ -2308,8 +2412,206 @@ function goalSessionNode(session) {
   return node;
 }
 
+/* ---------- очередь и бэклог: то, что установил план ----------
+   Наблюдение очереди не знает: `planned` — это статус, а не место в очереди, и
+   план говорит это сам. Пока доска выводила порядок из наблюдения, она называла
+   очередью не то, что установлено, а «Надо запланировать» стояло пустым по
+   построению. Здесь показывается прочитанная редакция: строки в её порядке, за
+   каждой — задачи, которые в ней названы, и рядом то, что наблюдение видит на
+   самом деле. */
+const AREA_SEEN = {
+  running: ["идёт сейчас", "live"], done: ["сделано", "done"],
+  undelivered: ["сделано, но не доставлено", "done"],
+  stuck: ["затор", "stuck"], waiting_human: ["ждёт решения пользователя", "stuck"],
+  queued: ["в очереди", ""], pickup: ["можно подхватить", ""],
+  ready_to_start: ["готово к запуску", ""], backlog: ["в бэклоге", ""],
+  decision_unmet: ["решено, но не исполнено", "stuck"],
+  product_owner: ["решает продакт", ""],
+};
+
+function planTaskNode(task) {
+  const s = document.createElement("span");
+  s.className = "item";
+  const num = document.createElement("span");
+  num.className = "num"; num.textContent = "#" + task.id + " ";
+  const name = document.createElement("span");
+  name.className = "name"; name.textContent = task.title || "";
+  s.appendChild(num); s.appendChild(name);
+  /* Что видит наблюдение там, где план назвал место. Задача, которой доска не
+     наблюдала ни в одном направлении, так и говорит: «в направлениях доски не
+     наблюдалась» — это утверждение о том, что смотрели, а не о том, что её нет. */
+  const seen = document.createElement("span");
+  const known = AREA_SEEN[task.area];
+  seen.className = "seen" + (known && known[1] ? " " + known[1] : "");
+  seen.textContent = " — наблюдение: " + (known ? known[0]
+    : task.area ? task.area : "в направлениях доски не наблюдалась");
+  s.appendChild(seen);
+  return s;
+}
+
+function planRow(entry, position) {
+  const row = document.createElement("div");
+  const closed = entry.tasks.length
+    && entry.tasks.every(t => t.area === "done" || t.area === "undelivered");
+  row.className = "row" + (closed ? " closed" : "");
+  if (position) {
+    const pos = document.createElement("span");
+    pos.className = "pos"; pos.textContent = position + ".";
+    row.appendChild(pos);
+  }
+  const items = document.createElement("div");
+  items.className = "items";
+  for (const task of entry.tasks) items.appendChild(planTaskNode(task));
+  /* Строка, за которой задачи наблюсти не удалось, показывается целиком: её
+     содержание и есть вся запись. «Связь с задачей не установлена» — это
+     сверка, которая не сошлась, а не утверждение, что задачи нет. */
+  if (!entry.tasks.length) {
+    const free = document.createElement("span");
+    free.className = "free"; free.textContent = entry.text;
+    items.appendChild(free);
+    const mark = document.createElement("span");
+    mark.appendChild(tag("связь с задачей не установлена"));
+    items.appendChild(mark);
+  }
+  /* Откуда запись бэклога взята — словами редакции, а не нашим выводом: «На
+     паузе» это поле плана, а «очередью не является» — слова самой строки. Тогда
+     строка, которая лежит в поле пауз и говорит, что пауза снята, читается как
+     устаревшая строка плана, а не как утверждение доски. */
+  if (entry.kind) {
+    const where = document.createElement("span");
+    where.appendChild(tag(entry.field === "paused"
+      ? "стоит в «На паузе» плана"
+      : "строка плана говорит: очередью не является"));
+    items.appendChild(where);
+  }
+  sourceNote(items, [["Строка плана", entry.text],
+                     ["Поле редакции", entry.field], ["Сверка", entry.checked]]);
+  row.appendChild(items);
+  return row;
+}
+
+function planGroup(label, owner, entries, empty, numbered) {
+  const grp = document.createElement("div");
+  grp.className = "grp";
+  const lbl = document.createElement("span");
+  lbl.className = "lbl"; lbl.textContent = label;
+  grp.appendChild(lbl);
+  if (owner) {
+    const who = document.createElement("div");
+    who.className = "owner"; who.textContent = owner;
+    grp.appendChild(who);
+  }
+  const rows = document.createElement("div");
+  rows.className = "rows";
+  if (!entries.length) {
+    const none = document.createElement("div");
+    none.className = "none"; none.textContent = empty;
+    rows.appendChild(none);
+  }
+  entries.forEach((entry, index) => rows.appendChild(planRow(entry, numbered ? index + 1 : 0)));
+  grp.appendChild(rows);
+  return grp;
+}
+
+function drawPlan(plan) {
+  const node = el("plan");
+  node.textContent = "";
+  if (!plan || plan.revision === null) {
+    /* «Плана нет» — честный ответ и единственный доступный: очередь не выводится
+       из статусов, и молчание владельца порядка догадкой не заменяется. */
+    const none = document.createElement("div");
+    none.className = "none";
+    none.textContent = "Портфельного плана нет: порядок работ не установлен, "
+      + "и доска его не выдумывает. Наблюдено: " + ((plan && plan.src) || "—");
+    node.appendChild(none);
+    return;
+  }
+  const owner = "владелец порядка — портфельный план, редакция " + plan.revision
+    + " от " + stamp(plan.accepted_at) + "; доска только читает его";
+  node.appendChild(planGroup("В очереди", owner, plan.queue,
+                             "очередь пуста: редакция не называет следующих работ", true));
+  node.appendChild(backlogGroup(plan));
+}
+
+/* Бэклог двумя видами, как их назвал пользователь: «неразобранное и разобранное,
+   но на паузе». Разница между ними — не статус задачи, а то, что о ней говорит
+   план: одна работа стоит его словом (и в строке написано, чьим словом и когда),
+   о другой прочитанная редакция молчит вовсе. Ни то ни другое само не поедет, и
+   раньше ни того ни другого на доске не было: неразобранное лежало под «можно
+   подхватить», а остановленное словом пользователя — там же. */
+function backlogGroup(plan) {
+  const grp = document.createElement("div");
+  grp.className = "grp";
+  const lbl = document.createElement("span");
+  lbl.className = "lbl"; lbl.textContent = "В бэклоге: сам не запустится";
+  grp.appendChild(lbl);
+
+  const rows = document.createElement("div");
+  rows.className = "rows";
+
+  /* Вид бэклога — подзаголовок группы, а не метка при каждой строке: колонкой
+     фиксированной ширины метка съедала на телефоне почти всё окно, а вид у всей
+     группы один и тот же. */
+  rows.appendChild(backlogKind("неразобрано: задача заведена, "
+                               + "а действующая редакция плана её не называет"));
+  const unsortedRow = document.createElement("div");
+  unsortedRow.className = "row";
+  const unsorted = document.createElement("div");
+  unsorted.className = "items";
+  unsortedRow.appendChild(unsorted);
+  if (!plan.unsorted.length) {
+    const none = document.createElement("span");
+    none.className = "none";
+    none.textContent = "нет: о каждой заведённой задаче план что-то говорит";
+    unsorted.appendChild(none);
+  }
+  for (const task of plan.unsorted) {
+    const s = document.createElement("span");
+    s.className = "item";
+    const num = document.createElement("span");
+    num.className = "num"; num.textContent = "#" + task.id + " ";
+    const name = document.createElement("span");
+    name.className = "name"; name.textContent = task.title;
+    const where = document.createElement("span");
+    where.className = "seen"; where.textContent = " — " + task.thread;
+    s.appendChild(num); s.appendChild(name); s.appendChild(where);
+    sourceNote(s, [["Место в плане", task.src]]);
+    unsorted.appendChild(s);
+  }
+  /* Отсечка называет себя: молчаливая читалась бы как «это весь бэклог». */
+  if (plan.unsorted_hidden > 0) {
+    const more = document.createElement("span");
+    more.className = "seen";
+    more.textContent = "ещё " + plan.unsorted_hidden
+      + " — в области «В бэклоге» в колонках ниже";
+    unsorted.appendChild(more);
+  }
+  rows.appendChild(unsortedRow);
+
+  rows.appendChild(backlogKind("разобрано, но на паузе: план держит эту работу "
+                               + "своей строкой — чьим словом и когда, сказано в ней"));
+  if (!plan.backlog.length) {
+    const none = document.createElement("div");
+    none.className = "row";
+    const text = document.createElement("span");
+    text.className = "none"; text.textContent = "нет: план ничего не держит";
+    none.appendChild(text);
+    rows.appendChild(none);
+  }
+  for (const entry of plan.backlog) rows.appendChild(planRow(entry, 0));
+  grp.appendChild(rows);
+  return grp;
+}
+
+function backlogKind(text) {
+  const node = document.createElement("div");
+  node.className = "kindhead"; node.textContent = text;
+  return node;
+}
+
 function drawBoard(board, snapshot) {
   drawStrip(board);
+  drawPlan(board.plan);
   const columns = el("columns");
   columns.textContent = "";
   for (const panel of board.panels) {

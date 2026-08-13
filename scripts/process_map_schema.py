@@ -30,7 +30,13 @@ SCHEMA_VERSION = 1
 # Snapshot: one document describing every thread at one instant.
 # ---------------------------------------------------------------------------
 
-SNAPSHOT_FIELDS = ("schema_version", "mode", "threads", "products", "owners_awake")
+SNAPSHOT_FIELDS = ("schema_version", "mode", "threads", "products", "owners_awake",
+                   # Порядок работ и паузы, прочитанные у их владельца — текущей
+                   # редакции портфельного плана. Наблюдение не выводит очередь
+                   # само: `planned` очередью не является, и доска, которая
+                   # строила её из статусов, показывала не тот порядок, который
+                   # установлен планом (задача 1156).
+                   "plan")
 THREAD_FIELDS = ("key", "title", "products", "task_count", "tasks", "repos", "channels",
                  # The direction's own last wake-up: when it looked and what came
                  # of it. `None` until a tick has written one.
@@ -123,6 +129,7 @@ BOARD_AREAS = (
     "ready_to_start", # a condition was written down, and it has since been met
     "pickup",         # nothing running, nothing observably holding it: start it
     "queued",         # held by something named, and the name is next to it
+    "backlog",        # the plan pauses it, or the plan never decided about it
     "plan",           # promised in a product record and never made a task
     "done",           # terminal, and the result reached a person
 )
@@ -137,9 +144,19 @@ BOARD_AREA_RU = {
     "ready_to_start": "Готово к запуску",
     "pickup": "Можно подхватить",
     "queued": "В очереди, за чем стоит",
+    "backlog": "В бэклоге: сам не запустится",
     "plan": "Надо запланировать",
     "done": "Сделано и доставлено",
 }
+
+# `backlog` is the fourth question the user asked by name: «что просто в бэклоге
+# и автоматом не запустится (неразобранное и разобранное, но на паузе)». It holds
+# two kinds and they are told apart by what the plan says, not by a status:
+# «на паузе» is a task the current plan revision holds back in its own words, and
+# «неразобрано» is a task that revision does not name at all. Neither is a
+# property of the task on disk — `planned` means both and neither — which is why
+# the owner of the answer is the plan and the board only reads it.
+BACKLOG_KINDS = ("paused", "unsorted")
 
 # `pickup` stands above `queued` on purpose, and both were one area called «в
 # очереди» before. That single area answered neither of the two questions the
@@ -178,6 +195,37 @@ OWED_BY = ("user", "product")
 QUESTION_FIELDS = ("text", "owner", "asked_at", "channel", "ref",
                    "asked_src", "answer_src", "note")
 
+# ---------------------------------------------------------------------------
+# The plan: who owns the order of work, and what stands outside it
+# ---------------------------------------------------------------------------
+#
+# The board used to derive the queue from observation, and observation cannot
+# derive it: `planned` is a status, not a place in a queue, and the plan says so
+# itself in the line it prints last — «не является очередью: все прочие задачи со
+# статусом planned». On 2026-08-13 that showed the user two tasks under «в
+# очереди» while the current revision of the portfolio plan ordered three others,
+# and showed nothing at all for the work standing on his own word.
+#
+# So the order and the pauses are read from their owner, one revision file, and
+# the board stays a reader: it never writes a plan, never renumbers one, and
+# never invents an entry the revision does not carry.
+PLAN_FIELDS = ("revision", "accepted_at", "src", "queue", "backlog")
+
+# What one line of the plan carries onto the board. `text` is the line as the
+# product owner wrote it — never a paraphrase — and `checked` says what it was
+# compared against, on the same rule as a product promise: an entry may report a
+# comparison that failed, never the absence of a task.
+PLAN_ENTRY_FIELDS = ("field", "text", "tasks", "checked")
+
+# Which field of the revision the entry stands in, and — for a backlog entry —
+# which of the two kinds the user named it by.
+PLAN_ENTRY_KINDS = BACKLOG_KINDS
+
+# What the plan says about one task. `unnamed` is a claim about the revision and
+# not about the task: the revision was read and does not name this number.
+PLAN_ROLES = ("queue", "paused", "named", "unnamed")
+PLAN_PLACE_FIELDS = ("role", "position", "line", "field", "ahead", "src")
+
 # One line of that area. `checked` says what the line was compared against, and
 # it is required for the same reason `actor_src` is: the area may report a failed
 # comparison, never the absence of a task, and the difference is only visible if
@@ -201,6 +249,11 @@ BOARD_FIELDS = ("area", "actor", "actor_src", "role", "role_src",
                 # очереди» without this is a label, not an answer: the user
                 # asked for «за чем именно стоит».
                 "blocked_by", "blocked_by_src",
+                # Что о задаче говорит действующая редакция плана: место в
+                # очереди, пауза, упоминание или молчание. `None` — плана нет
+                # вовсе, и тогда доска про очередь не говорит ничего, а не
+                # выводит её из статусов.
+                "plan_place",
                 # The start condition as a field rather than a sentence, and the
                 # decision recorded on the task. Both are `None` when the task
                 # named neither, and `None` never means «условие выполнено»: a
@@ -415,6 +468,76 @@ def validate_goal(goal: dict, where: str) -> dict:
     return goal
 
 
+def validate_plan_entry(entry: dict, where: str, kind: bool = False) -> dict:
+    """Check one line of the plan on its way to the board; return it or raise."""
+    if not isinstance(entry, dict):
+        raise ContractError(f"{where}: ожидался объект со строкой плана")
+    _require(entry, PLAN_ENTRY_FIELDS, where)
+    if not str(entry["text"]).strip():
+        raise ContractError(f"{where}: пустая строка плана")
+    if not str(entry["checked"] or "").strip():
+        # The same rule the «Надо запланировать» area lives under: an entry that
+        # names a task, or reports that it could name none, has to say what it
+        # compared. Without that the queue is believable and not checkable.
+        raise ContractError(f"{where}: не сказано, с чем сверена строка")
+    if kind and entry.get("kind") not in PLAN_ENTRY_KINDS:
+        # Два вида бэклога пользователь назвал сам, и различимы они обязаны быть
+        # в данных, а не в чтении заголовка глазами.
+        raise ContractError(f"{where}: род записи бэклога {entry.get('kind')!r}")
+    for task in entry["tasks"]:
+        _require(task, ("id", "title", "status"), f"{where}: задача строки")
+    return entry
+
+
+def validate_plan(plan: dict, where: str = "план") -> dict:
+    """Check the plan projection; return it unchanged or raise ContractError.
+
+    `revision` may be `None` and then both lists are empty: «плана нет» is a
+    real answer and the honest one. What it may never be is a queue built from
+    somewhere else — the whole point of reading the plan is that nothing else
+    knows the order.
+    """
+    if not isinstance(plan, dict):
+        raise ContractError(f"{where}: ожидался объект")
+    _require(plan, PLAN_FIELDS, where)
+    if not str(plan["src"] or "").strip():
+        raise ContractError(f"{where}: не сказано, чем наблюдён")
+    if plan["revision"] is None and (plan["queue"] or plan["backlog"]):
+        raise ContractError(f"{where}: редакции нет, а очередь или бэклог не пусты")
+    for index, entry in enumerate(plan["queue"]):
+        validate_plan_entry(entry, f"{where}: очередь, строка {index + 1}")
+    for index, entry in enumerate(plan["backlog"]):
+        validate_plan_entry(entry, f"{where}: бэклог, строка {index + 1}", kind=True)
+    return plan
+
+
+def validate_plan_place(place, where: str):
+    """Check what the plan says about one task; return it or raise.
+
+    `None` means no plan revision was published at all. It is not the same claim
+    as «план эту задачу не называет», and the two must not collapse: the first
+    says the owner of the order is silent, the second says it spoke and left this
+    task out — which is exactly what «в бэклоге, неразобрано» means.
+    """
+    if place is None:
+        return None
+    if not isinstance(place, dict):
+        raise ContractError(f"{where}: ожидался объект")
+    _require(place, PLAN_PLACE_FIELDS, where)
+    if place["role"] not in PLAN_ROLES:
+        raise ContractError(f"{where}: роль {place['role']!r}")
+    if not str(place["src"] or "").strip():
+        raise ContractError(f"{where}: место в плане названо, но не сказано, чем наблюдено")
+    if place["role"] in ("queue", "paused", "named") and not str(place["line"] or "").strip():
+        raise ContractError(f"{where}: роль {place['role']!r} без строки плана, "
+                            "которой она наблюдена")
+    if place["role"] == "queue" and not isinstance(place["position"], int):
+        raise ContractError(f"{where}: место в очереди должно быть числом")
+    if not isinstance(place["ahead"], list):
+        raise ContractError(f"{where}: «перед ней» должно быть списком")
+    return place
+
+
 def validate_snapshot(snapshot: dict) -> dict:
     """Check a collector snapshot; return it unchanged or raise ContractError."""
     if not isinstance(snapshot, dict):
@@ -426,6 +549,7 @@ def validate_snapshot(snapshot: dict) -> dict:
         raise ContractError(f"снимок: режим {snapshot['mode']!r}")
     if not isinstance(snapshot["threads"], list):
         raise ContractError("снимок: threads должен быть списком")
+    validate_plan(snapshot["plan"])
 
     for thread in snapshot["threads"]:
         where_thread = f"направление {thread.get('key')!r}"
@@ -451,6 +575,7 @@ def validate_snapshot(snapshot: dict) -> dict:
             _require(task["detail"], DETAIL_FIELDS, f"{where}: detail")
             if task["board"]["area"] not in BOARD_AREAS:
                 raise ContractError(f"{where}: область {task['board']['area']!r}")
+            validate_plan_place(task["board"]["plan_place"], f"{where}: место в плане")
             role = task["board"]["role"]
             if role is not None and role not in STATIONS:
                 raise ContractError(f"{where}: роль {role!r}")

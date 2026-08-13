@@ -154,6 +154,10 @@ def snapshot(report: dict, previous: dict | None = None) -> dict:
         # It is in the snapshot so the reminder can tell «та же очередь» from «в
         # очереди что-то изменилось» without a second file to keep in step.
         "pickup": sorted(item["id"] for item in report["can_pick_up"]),
+        # Очередь плана — тоже стоящее состояние, и она движется чаще прочих:
+        # без неё «та же очередь» осталось бы правдой после того, как владелец
+        # порядка переставил работы местами.
+        "plan_queue": [item["id"] for item in (report.get("queued_by_plan") or [])],
         "undelivered": sorted(item["id"] for item in report["undelivered"]),
         # A process can outlive the run record and even its completed task. Its
         # identity belongs in the tick's state so appearance, cleanup and a new
@@ -246,11 +250,18 @@ def startable(report: dict) -> int:
     """Work this direction could put a child on right now.
 
     «Можно подхватить», «готово к запуску» and «решено, но не исполнено» are the
-    three areas that say nothing observable is holding the task. What stands in
-    «в очереди» is held by something named and is not idleness.
+    three areas that say nothing observable is holding the task.
+
+    Очередь плана считается здесь же, и это не расширение понятия, а его
+    восстановление: раньше эти задачи стояли в «можно подхватить» и считались
+    вот тут — они просто не были названы очередью, потому что очередь выводилась
+    из наблюдения. Работа с назначенным местом в очереди — не простой, но и не
+    затор: живых прогонов нет, а работа есть, и разбудить владельца надо. Что
+    план держит своим словом или не называет вовсе, здесь не считается: это
+    работа, которую пользователь остановил или про которую решения нет.
     """
     return (len(report["can_pick_up"]) + len(report["ready_to_start"])
-            + len(report["decided_not_done"]))
+            + len(report["decided_not_done"]) + len(report.get("queued_by_plan") or []))
 
 
 def overdue_undelivered(report: dict) -> list[dict]:
@@ -299,13 +310,15 @@ def standing_events(report: dict, current: dict, stored: dict,
     now = moment.isoformat()
     events = []
 
-    idle_signature = json.dumps(current["pickup"] + current["ready"] + current["decided"])
+    idle_signature = json.dumps(current["pickup"] + current["ready"] + current["decided"]
+                                + current.get("plan_queue", []))
     idle_reminder = stored.get("idle_reminder")
     if not report["live_runs"] and startable(report) and repeatable(
             idle_reminder, idle_signature, moment):
         events.append(
             f"идёт простой: живых прогонов нет, а к запуску {startable(report)} "
-            f"(можно подхватить {len(report['can_pick_up'])}, "
+            f"(в очереди плана {len(report.get('queued_by_plan') or [])}, "
+            f"можно подхватить {len(report['can_pick_up'])}, "
             f"готово к запуску {len(report['ready_to_start'])}, "
             f"решено и не исполнено {len(report['decided_not_done'])})")
         idle_reminder = {"at": now, "signature": idle_signature}

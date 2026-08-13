@@ -212,6 +212,34 @@ def build(name: str) -> dict:
         # reading the whole list again.
         "can_pick_up": [{"id": task["id"], "title": task["title"]}
                         for task in thread["tasks"] if task["board"]["area"] == "pickup"],
+        # Очередь этого направления, как её установил портфельный план. Своим
+        # полем, а не внутри «можно подхватить»: у этой работы есть назначенное
+        # место, и порядок принадлежит плану. Пока очередь выводилась из
+        # наблюдения, эти задачи стояли в «можно подхватить» вперемешку с теми,
+        # о которых план не говорит вовсе, — и вместе с теми, которые
+        # пользователь остановил своим словом.
+        "queued_by_plan": [
+            {"id": task["id"], "title": task["title"],
+             "position": task["board"]["plan_place"]["position"],
+             "ahead": task["board"]["plan_place"]["ahead"],
+             "src": task["board"]["plan_place"]["src"]}
+            for task in sorted(
+                (t for t in thread["tasks"]
+                 if t["board"]["area"] == "queued"
+                 and (t["board"]["plan_place"] or {}).get("role") == "queue"
+                 # Наблюдаемый держатель остаётся держателем: задача, за которой
+                 # стоит незакрытая предшественница или занятое рабочее дерево,
+                 # к запуску не готова, какое бы место ей ни назначил план.
+                 and not t["board"]["blocked_by"]),
+                key=lambda t: t["board"]["plan_place"]["position"])],
+        # И то, что план не двинет сам: он держит это своим словом либо не
+        # называет задачу вовсе. Пробуждению это не работа на выбор, и раньше
+        # ровно она предлагалась к запуску.
+        "backlog": [{"id": task["id"], "title": task["title"],
+                     "kind": ("paused" if (task["board"]["plan_place"] or {}).get("role")
+                              == "paused" else "unsorted"),
+                     "src": (task["board"]["plan_place"] or {}).get("src")}
+                    for task in thread["tasks"] if task["board"]["area"] == "backlog"],
         # Work whose start condition was written down and has since been met.
         # Kept apart from «можно подхватить» on purpose: both say nothing is
         # holding the task, but only this one says somebody decided in advance

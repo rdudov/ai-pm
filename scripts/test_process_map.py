@@ -82,7 +82,8 @@ def a_task(**over) -> dict:
                       "why": None, "why_src": None, "since": None, "since_src": None,
                       "age_seconds": None, "attempt": 0,
                       "blocked_by": None, "blocked_by_src": None,
-                      "start_condition": None, "decision": None}}
+                      "start_condition": None, "decision": None,
+                      "plan_place": None}}
     task.update(over)
     task["board"].update(board)
     task["detail"].update(detail)
@@ -161,7 +162,51 @@ def an_owner(**over) -> dict:
     return owner
 
 
-def a_snapshot(tasks=None, products=None) -> dict:
+def a_plan_place(**over) -> dict:
+    """Что действующая редакция плана говорит об одной задаче.
+
+    Владелец очереди — план, и место в ней никогда не выводится из статуса: сам
+    план пишет об этом последней своей строкой — «не является очередью: все
+    прочие задачи со статусом planned».
+    """
+    place = {"role": "queue", "position": 1, "line": "1121 — первый живой запуск",
+             "field": "next", "ahead": [],
+             "src": "строка 1 очереди (поле next); действующая редакция 31 "
+                    "портфельного плана, файл content/plan/revisions/000031.json"}
+    place.update(over)
+    return place
+
+
+def a_plan(**over) -> dict:
+    """Проекция плана в том виде, в каком её видит рендер."""
+    plan = {"revision": 31, "accepted_at": "2026-08-13T20:48:53+00:00",
+            "src": "действующая редакция 31 портфельного плана, файл "
+                   "content/plan/revisions/000031.json",
+            "queue": [a_plan_entry()], "backlog": [a_plan_entry(**BACKLOG_ENTRY)]}
+    plan.update(over)
+    return plan
+
+
+def a_plan_entry(**over) -> dict:
+    entry = {"field": "next", "text": "1121 — первый живой запуск MOEX",
+             "tasks": [{"id": 1121, "title": "MOEX: первый живой запуск",
+                        "status": "planned"}],
+             "checked": "сверено с каталогом задач (1050 задач) по числам строки; "
+                        "каталог знает как задачи: 1121"}
+    entry.update(over)
+    return entry
+
+
+BACKLOG_ENTRY = {
+    "field": "paused", "kind": "paused",
+    "text": "Переделка памяти Companion — на паузе с 2026-08-13 по слову пользователя",
+    "tasks": [],
+    "checked": "сверено с каталогом задач (1050 задач) по числам строки; "
+               "ни одно число строки каталог задачей не знает",
+}
+
+
+def a_snapshot(tasks=None, products=None, plan=None) -> dict:
     return {
         "schema_version": schema.SCHEMA_VERSION,
         "mode": "real",
@@ -182,6 +227,9 @@ def a_snapshot(tasks=None, products=None) -> dict:
                                   "effect": ["2026-08-06 — карта показывает ленту"],
                                   "promises": [a_promise()]}],
         "owners_awake": [],
+        # Порядок работ и паузы приходят от их владельца — плана, — а не выводятся
+        # из статусов задач снимка.
+        "plan": a_plan() if plan is None else plan,
     }
 
 
@@ -652,7 +700,7 @@ class BoardLayout(unittest.TestCase):
         order = [area["key"] for area in board["panels"][0]["areas"]]
         self.assertEqual(order, ["waiting_human", "running", "stuck", "decision_unmet",
                                  "undelivered", "product_owner", "ready_to_start",
-                                 "pickup", "queued", "plan", "done"])
+                                 "pickup", "queued", "backlog", "plan", "done"])
 
     def test_what_can_be_picked_up_stands_above_what_is_held(self):
         """The first question of a wake-up outranks the reference list below it.
@@ -664,7 +712,11 @@ class BoardLayout(unittest.TestCase):
         """
         order = list(schema.BOARD_AREAS)
         self.assertLess(order.index("pickup"), order.index("queued"))
-        self.assertLess(order.index("queued"), order.index("plan"))
+        # А ниже очереди — то, что само не поедет: бэклог не работа на выбор, и
+        # предлагать его между «подхватить» и «в очереди» значило бы звать
+        # запускать остановленное.
+        self.assertLess(order.index("queued"), order.index("backlog"))
+        self.assertLess(order.index("backlog"), order.index("plan"))
         self.assertLess(order.index("plan"), order.index("done"))
 
     def test_the_area_waiting_for_a_person_is_present_even_when_empty(self):
@@ -679,9 +731,12 @@ class BoardLayout(unittest.TestCase):
         self.assertFalse(waiting["collapsed"])
 
     def test_done_and_queued_arrive_folded(self):
+        # Бэклог складывается по той же причине: ответ на «что там лежит» стоит
+        # выше, в разделе плана, вместе с порядком, а сам список длинный по
+        # устройству — это всё заведённое, о чём план молчит.
         board = render.build_board(a_snapshot())
         folded = {a["key"] for a in board["panels"][0]["areas"] if a["collapsed"]}
-        self.assertEqual(folded, {"queued", "done"})
+        self.assertEqual(folded, {"queued", "done", "backlog"})
 
     def test_what_the_cap_dropped_is_counted_out_loud(self):
         many = [a_task(id=n, dir=f"{n:03d}-t", board={"area": "done"})
@@ -3837,6 +3892,438 @@ class TaskInItsOwnWords(unittest.TestCase):
     def test_the_description_travels_to_the_plate_the_card_is_built_from(self):
         detail = render.plate(a_task(detail={"summary": "О чём задача"}))["detail"]
         self.assertEqual(detail["summary"], "О чём задача")
+
+
+PLAN_CATALOGUE = [
+    {"id": 1121, "title": "MOEX: первый живой запуск с реальными заявками",
+     "slug": "1121-moex-first-live", "status": "planned"},
+    {"id": 1136, "title": "MOEX: ежедневный отчёт показывает результат за день",
+     "slug": "1136-moex-daily", "status": "planned"},
+    {"id": 1138, "title": "MOEX: новый контракт биржи попадает в сбор сам",
+     "slug": "1138-moex-contract", "status": "planned"},
+    {"id": 1152, "title": "Calypso: Эльфиона участвует в служебной задаче",
+     "slug": "1152-calypso-elfiona", "status": "planned"},
+    {"id": 1153, "title": "MOEX: одна тревога приходит один раз",
+     "slug": "1153-moex-alarm", "status": "planned"},
+    {"id": 1082, "title": "MOEX: подготовить принятую версию",
+     "slug": "1082-moex-prepare", "status": "completed"},
+    {"id": 2, "title": "Старая задача номер два", "slug": "002-old", "status": "completed"},
+]
+
+
+def a_revision(**over) -> dict:
+    plan = {"revision": 31, "accepted_at": "2026-08-13T20:48:53+00:00",
+            "headline": "Робот MOEX доходит до первой настоящей заявки",
+            "now": ["1153 — заведена по наблюдению, в очередь не ставится"],
+            "next": ["1082 engine-круг — первое условие цели 0002",
+                     "1121 — первый живой запуск MOEX с реальными заявками",
+                     "1136 и 1138 — числа по портфелю и новый контракт биржи",
+                     "1152 — на полке по слову пользователя, очередью не является"],
+            "parallel": [], "paused": ["Переделка памяти Companion — на паузе "
+                                       "с 2026-08-13 по слову пользователя"],
+            "grounds": [], "contradictions": []}
+    plan.update(over)
+    return plan
+
+
+class ThePlanOwnsTheQueue(unittest.TestCase):
+    """Порядок работ читается у плана, потому что наблюдение его не знает.
+
+    До правки доска выводила очередь из наблюдения, а вывести её оттуда нельзя:
+    `planned` — это статус, и план говорит об этом сам последней своей строкой.
+    Цена была измерена на живом состоянии 2026-08-13: под «в очереди» у MOEX
+    стояли 853 и 1136, тогда как действующая редакция ставила 1121 → 1136 → 1138,
+    а 1121 и 1138 лежали под «можно подхватить» — то есть доска предлагала
+    подхватить работу, у которой уже было место в очереди.
+    """
+
+    def projection(self, plan=None, catalogue=None):
+        with tempfile.TemporaryDirectory() as home:
+            root = Path(home) / "content"
+            (root / "products").mkdir(parents=True)
+            if plan is not None:
+                product_memory.publish_plan(plan, root)
+            with mock.patch.object(product_memory, "ROOT", root):
+                return state.plan_projection(catalogue or PLAN_CATALOGUE)
+
+    def test_the_queue_keeps_the_order_of_the_revision(self):
+        queue = self.projection(a_revision())["queue"]
+        self.assertEqual([[t["id"] for t in entry["tasks"]] for entry in queue],
+                         [[1082], [1121], [1136, 1138]])
+
+    def test_a_line_that_says_it_is_not_a_queue_stands_in_the_backlog(self):
+        # План пишет это своими словами и в том же поле; признак — слова строки,
+        # и они печатаются рядом, чтобы вывод можно было опровергнуть чтением.
+        backlog = self.projection(a_revision())["backlog"]
+        self.assertEqual([entry["field"] for entry in backlog], ["next", "paused"])
+        self.assertEqual([t["id"] for t in backlog[0]["tasks"]], [1152])
+        self.assertTrue(all(entry["kind"] == "paused" for entry in backlog))
+
+    def test_a_goal_identifier_is_not_read_as_a_task_number(self):
+        # «первое условие цели 0002» дало бы ссылку на задачу 2: номер задачи в
+        # прозе с ведущим нулём не пишут, а идентификатор цели пишут.
+        first = self.projection(a_revision())["queue"][0]
+        self.assertEqual([t["id"] for t in first["tasks"]], [1082])
+
+    def test_what_the_revision_never_names_is_unsorted_backlog(self):
+        projection = self.projection(a_revision())
+        self.assertEqual(state.plan_place_of(projection, 1152)["role"], "paused")
+        self.assertEqual(state.plan_place_of(projection, 1153)["role"], "named")
+        self.assertEqual(state.plan_place_of(projection, 999)["role"], "unnamed")
+        self.assertIn("не называет эту задачу",
+                      state.plan_place_of(projection, 999)["src"])
+
+    def test_a_queued_task_stands_behind_the_living_ones_before_it_and_not_itself(self):
+        projection = self.projection(a_revision())
+        # 1082 закрыта, поэтому никого не держит и в списке «перед ней» её нет.
+        self.assertEqual(state.plan_place_of(projection, 1121)["ahead"], [])
+        self.assertEqual(state.plan_place_of(projection, 1136)["ahead"], [1121])
+        self.assertEqual(state.plan_place_of(projection, 1138)["ahead"], [1121])
+
+    def test_no_revision_means_the_board_says_nothing_about_the_queue(self):
+        # «Плана нет» — честный ответ. Выводить очередь из статусов нельзя, и
+        # молчание владельца порядка не заменяется догадкой.
+        projection = self.projection(None)
+        self.assertIsNone(projection["revision"])
+        self.assertEqual((projection["queue"], projection["backlog"]), ([], []))
+        self.assertIsNone(state.plan_place_of(projection, 1121))
+
+    def test_an_unobservable_store_is_refused_not_shown_as_no_queue(self):
+        with tempfile.TemporaryDirectory() as home:
+            absent = Path(home) / "never-created"
+            with mock.patch.object(product_memory, "ROOT", absent):
+                with self.assertRaises(schema.ContractError):
+                    state.plan_projection(PLAN_CATALOGUE)
+
+    def test_every_entry_carries_what_it_was_compared_against(self):
+        projection = self.projection(a_revision())
+        for entry in projection["queue"] + projection["backlog"]:
+            self.assertIn("сверено с каталогом задач", entry["checked"])
+        schema.validate_plan({key: value for key, value in projection.items()
+                              if key != "places"})
+
+
+class TheAreasThePlanOwns(unittest.TestCase):
+    """Две области, которых наблюдение назначить не может.
+
+    «В очереди» и «В бэклоге» решаются словом плана, а не состоянием диска, — и
+    наблюдение всё равно старше: живой прогон, затор и вопрос пользователю стоят
+    выше, потому что это факты о работе, а не решение о ней.
+    """
+
+    def test_a_task_the_plan_queued_stands_in_the_queue(self):
+        self.assertEqual(state.board_area("planned", ["idle"], False, None,
+                                          plan_role="queue"), "queued")
+
+    def test_paused_and_unnamed_stand_in_the_backlog(self):
+        for role in ("paused", "unnamed"):
+            self.assertEqual(state.board_area("planned", ["idle"], False, None,
+                                              plan_role=role), "backlog")
+
+    def test_a_task_the_plan_merely_names_can_still_be_picked_up(self):
+        # План называет её, но в очередь не ставит и не держит: ничто на диске её
+        # не держит тоже, и «можно подхватить» — это наблюдение, а не решение.
+        self.assertEqual(state.board_area("planned", ["idle"], False, None,
+                                          plan_role="named"), "pickup")
+
+    def test_observation_outranks_the_plan(self):
+        # План может отстать от жизни: он назвал очередь, а прогон уже идёт или
+        # работа встала. Показывается наблюдаемое состояние.
+        self.assertEqual(state.board_area("planned", ["live"], False, None,
+                                          plan_role="queue"), "running")
+        self.assertEqual(state.board_area("planned", ["gap"], False, None,
+                                          plan_role="unnamed"), "stuck")
+        self.assertEqual(state.board_area("completed", [], False, None,
+                                          plan_role="queue"), "done")
+
+    def test_an_observed_holder_outranks_the_place_in_the_queue(self):
+        # «За чем стоит» — вопрос пользователя, и живой прогон в том же дереве
+        # конкретнее, чем место в очереди.
+        self.assertEqual(state.board_area("planned", ["idle"], False,
+                                          "репозиторий занят живым прогоном 1082",
+                                          plan_role="queue"), "queued")
+
+    def test_without_a_plan_the_areas_are_what_they_were(self):
+        self.assertEqual(state.board_area("planned", ["idle"], False, None), "pickup")
+
+
+class ThePlanOnThePlate(unittest.TestCase):
+    """Место в плане доезжает до плашки вместе с тем, чем оно наблюдено."""
+
+    def place(self, entry_id=1121, status="planned", detail=None, plan=None):
+        task = {"id": entry_id, "title": "Задача", "status": status,
+                "status_detail": detail, "dir": "t", "run": {"repo": None},
+                "flags": ["idle"], "asked_user": [], "our_questions": [],
+                "detail": {}, "board": {"area": None, "why": None, "why_src": None}}
+        state.assign_areas([task], [{"id": entry_id, "status_detail": detail}],
+                           {entry_id: status}, plan)
+        return task
+
+    def a_projection(self):
+        return {"revision": 31, "src": "действующая редакция 31 портфельного плана",
+                "queue": [], "backlog": [],
+                "places": {1121: {"role": "queue", "position": 3, "ahead": [1085, 1086],
+                                  "line": "1121 — первый живой запуск",
+                                  "field": "next",
+                                  "src": "строка 3 очереди (поле next); "
+                                         "действующая редакция 31 портфельного плана"}}}
+
+    def test_the_plate_says_the_plan_put_it_there_and_what_stands_before_it(self):
+        board = self.place(plan=self.a_projection())["board"]
+        self.assertEqual(board["area"], "queued")
+        self.assertEqual(board["plan_place"]["position"], 3)
+        self.assertEqual(board["plan_place"]["ahead"], [1085, 1086])
+        self.assertIn("редакция 31", board["plan_place"]["src"])
+
+    def test_the_place_in_the_queue_is_not_written_into_what_holds_the_task(self):
+        """Место в очереди и держатель — разные утверждения, и полей у них два.
+
+        Держатель наблюдается: живой прогон в том же дереве, незакрытая
+        предшественница. Место в очереди — решение владельца порядка, и тот же
+        план разрешает направлениям идти параллельно, так что работа выше по
+        списку никого не держит.
+        """
+        board = self.place(plan=self.a_projection())["board"]
+        self.assertIsNone(board["blocked_by"])
+        self.assertIsNone(board["why"])
+
+    def test_a_closed_task_is_not_called_queued_however_the_plan_reads(self):
+        # Расхождение не прячется — место в плане остаётся на плашке, — но
+        # очередью закрытая работа не называется: наблюдение здесь конкретнее.
+        board = self.place(status="completed", plan=self.a_projection())["board"]
+        self.assertEqual(board["area"], "done")
+        self.assertIsNone(board["blocked_by"])
+        self.assertEqual(board["plan_place"]["role"], "queue")
+
+    def test_an_observed_holder_is_still_the_answer_to_why_it_stands(self):
+        board = self.place(detail="starts_after=1082", plan=self.a_projection())["board"]
+        self.assertEqual(board["area"], "queued")
+        self.assertIn("1082", board["blocked_by"])
+
+    def test_a_task_outside_the_plan_carries_the_reading_that_found_nothing(self):
+        board = self.place(entry_id=999, plan=self.a_projection())["board"]
+        self.assertEqual(board["area"], "backlog")
+        self.assertEqual(board["plan_place"]["role"], "unnamed")
+        self.assertIn("не называет эту задачу", board["plan_place"]["src"])
+
+
+class TheBoardShowsThePlan(unittest.TestCase):
+    """Очередь и бэклог на экране: порядок плана и два вида бэклога.
+
+    Пользователь назвал четыре вопроса — что в работе, что недавно закрыто, что
+    в очереди, что в бэклоге и автоматом не запустится, — и два последних доска
+    не отвечала вовсе.
+    """
+
+    def queued(self, *plates):
+        board = render.build_board(a_snapshot(list(plates)))
+        return next(a for a in board["panels"][0]["areas"] if a["key"] == "queued")
+
+    def test_the_queue_stands_in_the_order_the_plan_set(self):
+        late = a_task(id=1, dir="001-t", board={
+            "area": "queued", "since": "2026-08-01T00:00:00+00:00",
+            "plan_place": a_plan_place(position=7)})
+        early = a_task(id=2, dir="002-t", board={
+            "area": "queued", "since": "2026-08-09T00:00:00+00:00",
+            "plan_place": a_plan_place(position=2)})
+        self.assertEqual([p["id"] for p in self.queued(late, early)["plates"]], [2, 1])
+
+    def test_a_task_the_plan_never_queued_stands_after_the_plan_order(self):
+        # Она стоит за наблюдаемым держателем, и очередью её никто не называл:
+        # смешивать её с установленным порядком значило бы придумать ей место.
+        planned = a_task(id=1, dir="001-t", board={
+            "area": "queued", "since": "2026-08-09T00:00:00+00:00",
+            "plan_place": a_plan_place(position=9)})
+        held = a_task(id=2, dir="002-t", board={
+            "area": "queued", "since": "2026-08-01T00:00:00+00:00",
+            "blocked_by": "задача 851 ещё не закрыта", "plan_place": None})
+        self.assertEqual([p["id"] for p in self.queued(planned, held)["plates"]], [1, 2])
+
+    def test_the_two_kinds_of_backlog_stand_apart(self):
+        paused = a_task(id=1, dir="001-t", board={
+            "area": "backlog", "since": "2026-08-01T00:00:00+00:00",
+            "plan_place": a_plan_place(role="paused", position=None,
+                                       line="1152 — на полке по слову пользователя")})
+        unsorted = a_task(id=2, dir="002-t", board={
+            "area": "backlog", "since": "2026-08-09T00:00:00+00:00",
+            "plan_place": a_plan_place(role="unnamed", position=None, line=None,
+                                       field=None)})
+        board = render.build_board(a_snapshot([paused, unsorted]))
+        area = next(a for a in board["panels"][0]["areas"] if a["key"] == "backlog")
+        self.assertEqual([p["id"] for p in area["plates"]], [2, 1])
+
+    def test_recently_closed_work_is_what_the_done_area_shows(self):
+        """«Что недавно закрыто» — вопрос пользователя, и он был отвечён наоборот.
+
+        Область читалась от старого к свежему, а показывает она двадцать пять
+        плашек из двухсот двенадцати: на живом состоянии это были самые древние
+        завершённые задачи, то есть ровно не то, о чём спрашивали.
+        """
+        old = a_task(id=1, dir="001-t", board={"area": "done",
+                                               "since": "2026-07-21T00:00:00+00:00"})
+        today = a_task(id=2, dir="002-t", board={"area": "done",
+                                                 "since": "2026-08-13T00:00:00+00:00"})
+        board = render.build_board(a_snapshot([old, today]))
+        area = next(a for a in board["panels"][0]["areas"] if a["key"] == "done")
+        self.assertEqual([p["id"] for p in area["plates"]], [2, 1])
+        # И «когда» видно у каждой записи: возраст меряется от наблюдённого
+        # мгновения, а не от сборки, поэтому сегодняшнее закрытие отличимо от
+        # июльского без обращения к карточке.
+        self.assertTrue(all(p["since"] for p in area["plates"]))
+
+    def test_the_section_names_the_plan_as_the_owner_of_the_order(self):
+        board = render.build_board(a_snapshot())
+        self.assertEqual(board["plan"]["revision"], 31)
+        self.assertEqual([t["id"] for t in board["plan"]["queue"][0]["tasks"]], [1121])
+
+    def test_the_section_shows_the_observed_state_beside_the_plan_order(self):
+        # Расхождение не прячется: план назвал очередь, наблюдение видит задачу
+        # живой, и обе стороны стоят рядом.
+        task = a_task(id=1121, dir="1121-t", board={"area": "running"})
+        board = render.build_board(a_snapshot([task]))
+        self.assertEqual(board["plan"]["queue"][0]["tasks"][0]["area"], "running")
+
+    def test_a_task_the_plan_does_not_name_reaches_the_section_as_unsorted(self):
+        task = a_task(id=1135, dir="1135-t", title="Публичный адаптер", board={
+            "area": "backlog", "plan_place": a_plan_place(role="unnamed", position=None,
+                                                          line=None, field=None)})
+        board = render.build_board(a_snapshot([task]))
+        self.assertEqual([t["id"] for t in board["plan"]["unsorted"]], [1135])
+        self.assertEqual(board["plan"]["unsorted_hidden"], 0)
+
+    def test_what_the_section_could_not_fit_is_counted_out_loud(self):
+        many = [a_task(id=n, dir=f"{n:04d}-t", board={
+            "area": "backlog",
+            "plan_place": a_plan_place(role="unnamed", position=None, line=None,
+                                       field=None)})
+            for n in range(1000, 1000 + render.UNSORTED_IN_PLAN + 4)]
+        board = render.build_board(a_snapshot(many))
+        self.assertEqual(len(board["plan"]["unsorted"]), render.UNSORTED_IN_PLAN)
+        self.assertEqual(board["plan"]["unsorted_hidden"], 4)
+
+
+class TheWakeUpSeesTheQueueAndTheBacklog(unittest.TestCase):
+    """Смежный потребитель того же наблюдателя — пробуждение направления.
+
+    Раньше «можно подхватить» было для него всей работой на выбор, и в нём
+    вперемешку стояли задачи из очереди плана и работа, остановленная словом
+    пользователя. Разделение — это не потеря: то, что план ставит в очередь и
+    что ничем не держится, простоем по-прежнему не считается, а остановленное
+    больше не предлагается к запуску.
+    """
+
+    def report(self, *tasks):
+        observed = {"threads": [{"title": "Процессный контур", "products": [],
+                                 "tasks": list(tasks), "repos": [], "task_count": len(tasks)}],
+                    "owners_awake": []}
+        with (mock.patch.object(thread, "load_thread", return_value={"repos": []}),
+              mock.patch.object(thread.observer, "build", return_value=observed),
+              mock.patch.object(thread, "process_inventory", return_value=[]),
+              mock.patch.object(thread.observer, "write_owner_observations")):
+            return thread.build("process")
+
+    def test_the_queue_of_the_plan_is_its_own_list_in_the_order_of_the_plan(self):
+        second = a_task(id=1136, dir="1136-t", board={
+            "area": "queued", "plan_place": a_plan_place(position=10)})
+        first = a_task(id=1121, dir="1121-t", board={
+            "area": "queued", "plan_place": a_plan_place(position=9)})
+        report = self.report(second, first)
+        self.assertEqual([t["id"] for t in report["queued_by_plan"]], [1121, 1136])
+        self.assertEqual(report["can_pick_up"], [])
+
+    def test_an_observed_holder_keeps_a_queued_task_out_of_what_could_start(self):
+        held = a_task(id=746, dir="746-t", board={
+            "area": "queued", "blocked_by": "задача 803 ещё не закрыта",
+            "plan_place": a_plan_place(position=18)})
+        self.assertEqual(self.report(held)["queued_by_plan"], [])
+
+    def test_the_backlog_reaches_the_wake_up_with_the_two_kinds_apart(self):
+        paused = a_task(id=1152, dir="1152-t", board={
+            "area": "backlog", "plan_place": a_plan_place(role="paused", position=None)})
+        unsorted = a_task(id=1135, dir="1135-t", board={
+            "area": "backlog", "plan_place": a_plan_place(role="unnamed", position=None,
+                                                          line=None, field=None)})
+        report = self.report(paused, unsorted)
+        self.assertEqual({(t["id"], t["kind"]) for t in report["backlog"]},
+                         {(1152, "paused"), (1135, "unsorted")})
+        self.assertEqual(report["can_pick_up"], [])
+
+    def test_the_plan_queue_counts_as_work_this_direction_could_start(self):
+        # Иначе направление, чью очередь установил план, читалось бы как «делать
+        # нечего» — то самое молчание, ради которого тик и написан.
+        report = {"can_pick_up": [], "ready_to_start": [], "decided_not_done": [],
+                  "queued_by_plan": [{"id": 1121}]}
+        self.assertEqual(tick.startable(report), 1)
+
+    def test_a_moved_queue_is_news_at_the_next_tick(self):
+        before = tick.snapshot(_a_tick_report())
+        after = tick.snapshot(_a_tick_report(queued_by_plan=[{"id": 1121}]))
+        self.assertNotEqual(before["plan_queue"], after["plan_queue"])
+
+
+def _a_tick_report(**over) -> dict:
+    report = {"live_runs": [], "needs_attention": [], "repos": [],
+              "ready_to_start": [], "decided_not_done": [], "can_pick_up": [],
+              "undelivered": [], "waiting_user": [], "worktrees": [],
+              "owners_awake": [], "long_lived_processes": [],
+              "long_lived_processes_observation": {"available": True, "reason": None},
+              "queued_by_plan": []}
+    report.update(over)
+    return report
+
+
+class ThePlanContract(unittest.TestCase):
+    """Что снимок обязан сказать о плане, чтобы доска имела право это показать."""
+
+    def test_a_well_formed_plan_passes(self):
+        schema.validate_snapshot(a_snapshot())
+
+    def test_an_entry_without_the_comparison_is_refused(self):
+        # То же правило, под которым живёт «Надо запланировать»: запись, которая
+        # называет задачу или сообщает, что не смогла, обязана сказать, с чем
+        # сверялась. Иначе очереди можно только верить.
+        broken = a_snapshot(plan=a_plan(queue=[a_plan_entry(checked="  ")]))
+        with self.assertRaises(schema.ContractError):
+            schema.validate_snapshot(broken)
+
+    def test_a_backlog_entry_without_its_kind_is_refused(self):
+        entry = dict(BACKLOG_ENTRY)
+        del entry["kind"]
+        broken = a_snapshot(plan=a_plan(backlog=[a_plan_entry(**entry)]))
+        with self.assertRaises(schema.ContractError):
+            schema.validate_snapshot(broken)
+
+    def test_a_queue_without_a_revision_is_refused(self):
+        broken = a_snapshot(plan=a_plan(revision=None, accepted_at=None))
+        with self.assertRaises(schema.ContractError):
+            schema.validate_snapshot(broken)
+
+    def test_no_revision_at_all_is_a_valid_answer(self):
+        schema.validate_snapshot(a_snapshot(plan=a_plan(
+            revision=None, accepted_at=None, queue=[], backlog=[],
+            src="редакций плана нет в content/plan/revisions")))
+
+    def test_a_place_without_its_observation_is_refused(self):
+        broken = a_snapshot([a_task(board={"plan_place": a_plan_place(src="  ")})])
+        with self.assertRaises(schema.ContractError):
+            schema.validate_snapshot(broken)
+
+    def test_a_place_in_the_queue_without_a_number_is_refused(self):
+        broken = a_snapshot([a_task(board={"plan_place": a_plan_place(position=None)})])
+        with self.assertRaises(schema.ContractError):
+            schema.validate_snapshot(broken)
+
+    def test_an_unknown_role_is_refused(self):
+        broken = a_snapshot([a_task(board={"plan_place": a_plan_place(role="soon")})])
+        with self.assertRaises(schema.ContractError):
+            schema.validate_snapshot(broken)
+
+    def test_the_plan_is_cleaned_when_the_showing_is_anonymous(self):
+        # Строка плана — обычный текст документа, и путь внутри неё уезжает с
+        # остальными: исключений из очистки нет ни у кого.
+        cleaned = schema.scrub(a_snapshot(plan=a_plan(
+            queue=[a_plan_entry(text="1121 — см. /opt/projects/moex-trading-engine")])))
+        self.assertNotIn("/opt/projects", cleaned["plan"]["queue"][0]["text"])
 
 
 if __name__ == "__main__":

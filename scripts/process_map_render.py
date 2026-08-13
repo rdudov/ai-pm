@@ -300,6 +300,10 @@ def plate(task: dict) -> dict:
         # user asked for «за чем именно стоит», and the answer is observed.
         "blocked_by": board["blocked_by"],
         "blocked_by_src": board["blocked_by_src"],
+        # Что о задаче говорит действующая редакция плана: место в очереди, пауза
+        # или молчание. Владелец очереди — план, и плашка называет его, чтобы
+        # порядок на доске нельзя было принять за вывод наблюдения.
+        "plan_place": board["plan_place"],
         # Everything the card shows when the plate is opened. It travels with
         # the plate rather than being fetched, because the page has no way to
         # reach a disk and must not grow one.
@@ -375,6 +379,103 @@ def product_promises(snapshot: dict, thread: dict) -> list[dict]:
             for promise in product.get("promises") or []]
 
 
+def plan_position(plate: dict) -> int:
+    """Место плашки в очереди плана; хвост списка для всего, что план не ставил.
+
+    Задача, которую держит наблюдаемый держатель, стоит в той же области, но
+    очередью её никто не называл, поэтому она идёт после установленного порядка,
+    а не смешивается с ним.
+    """
+    place = plate.get("plan_place") or {}
+    return place["position"] if place.get("role") == "queue" else 10 ** 6
+
+
+# Порядок двух видов бэклога — тот, в котором их назвал пользователь:
+# «неразобранное и разобранное, но на паузе».
+BACKLOG_ORDER = {"unsorted": 0, "paused": 1}
+
+
+def backlog_kind(plate: dict) -> str:
+    """Каким из двух видов бэклога плашка стоит в области."""
+    place = plate.get("plan_place") or {}
+    return "paused" if place.get("role") == "paused" else "unsorted"
+
+
+def observed_places(snapshot: dict) -> dict:
+    """Где наблюдение видит каждую задачу — по всем направлениям, без отсечки.
+
+    Строится из задач снимка, а не из показанных плашек: область может показать
+    двадцать пять из сорока, и очередь плана, сверенная с показанным, называла бы
+    ненаблюдаемым то, что просто не поместилось.
+    """
+    seen = {}
+    for thread in snapshot["threads"]:
+        for task in thread["tasks"]:
+            seen.setdefault(task["id"], {"area": task["board"]["area"],
+                                         "thread": thread["title"],
+                                         "status": task["status"]})
+    return seen
+
+
+# Сколько неразобранных задач называет раздел плана, прежде чем сказать, сколько
+# осталось. Бэклог по устройству длиннее очереди — это всё, что заведено и о чём
+# план молчит, — а раздел стоит над колонками, и каждая его строка отнимает
+# строку у ответа. Что не поместилось, стоит в области «В бэклоге» в колонках и
+# сосчитано вслух.
+UNSORTED_IN_PLAN = 12
+
+
+def unsorted_backlog(snapshot: dict) -> list[dict]:
+    """Задачи, о которых действующая редакция плана не говорит ничего.
+
+    Берутся из задач снимка, а не из показанных плашек: область показывает
+    двадцать пять, и раздел, собранный из показанного, называл бы неразобранным
+    меньше, чем есть. Старшие первыми — забытая дольше всех и есть та, ради
+    которой этот список существует.
+    """
+    found = []
+    for thread in snapshot["threads"]:
+        for task in thread["tasks"]:
+            place = task["board"]["plan_place"] or {}
+            if task["board"]["area"] == "backlog" and place.get("role") == "unnamed":
+                found.append({"id": task["id"], "title": task["title"] or task["dir"],
+                              "status": task["status"], "thread": thread["title"],
+                              "since": task["board"]["since"], "src": place["src"]})
+    found.sort(key=lambda task: (task["since"] or "9999", -(task["id"] or 0)))
+    return found
+
+
+def plan_section(snapshot: dict) -> dict:
+    """Очередь и бэклог словами плана, с наблюдаемым состоянием рядом.
+
+    Расхождение не прячется и не мирится: план называет порядок, наблюдение
+    называет состояние, и обе стороны стоят рядом в одной строке. Задача, которую
+    план ставит третьей, а наблюдение видит живой, читается как живая — и видно,
+    что план ставил её третьей.
+    """
+    plan = snapshot["plan"]
+    seen = observed_places(snapshot)
+
+    def entries(items: list[dict]) -> list[dict]:
+        return [{**entry,
+                 "tasks": [{**task, **seen.get(task["id"], {})} for task in entry["tasks"]]}
+                for entry in items]
+
+    unsorted = unsorted_backlog(snapshot)
+    return {
+        "revision": plan["revision"],
+        "accepted_at": plan["accepted_at"],
+        "src": plan["src"],
+        "queue": entries(plan["queue"]),
+        # «Разобранное, но на паузе»: строки плана, которые держат работу его
+        # собственными словами — там же сказано, чьим словом и когда.
+        "backlog": entries(plan["backlog"]),
+        # «Неразобранное»: задача заведена, а прочитанная редакция о ней молчит.
+        "unsorted": unsorted[:UNSORTED_IN_PLAN],
+        "unsorted_hidden": max(len(unsorted) - UNSORTED_IN_PLAN, 0),
+    }
+
+
 def build_board(snapshot: dict) -> dict:
     """Four direction panels, each split into areas by urgency.
 
@@ -397,13 +498,26 @@ def build_board(snapshot: dict) -> dict:
             # rounded number of seconds, so two plates a fraction apart would
             # swap places between two collections and look like a change.
             mine.sort(key=lambda p: (p["since"] or "9999", -(p["id"] or 0)),
-                      # «Сделано, но не доставлено» is the one area where time in
-                      # the state is not the problem: an old finished task was
-                      # either handed over some other way or has stopped
-                      # mattering, and the document somebody is waiting for right
-                      # now is the freshest one. So this area alone reads newest
-                      # first, and the strip below sorts it the same way.
-                      reverse=key == "undelivered")
+                      # Две области читаются от свежего к старому. «Сделано, но
+                      # не доставлено»: старая завершённая задача либо давно
+                      # унесена иначе, либо перестала быть нужной, а ждут прямо
+                      # сейчас тот документ, который только что появился. И
+                      # «Сделано и доставлено»: вопрос к ней — «что недавно
+                      # закрыто», а от старого к свежему отсечка в двадцать пять
+                      # плашек показывала из двухсот двенадцати завершённых самые
+                      # древние, то есть отвечала ровно наоборот.
+                      reverse=key in ("undelivered", "done"))
+            if key == "queued":
+                # Порядок очереди принадлежит плану, поимённо: сначала то, что
+                # редакция поставила по местам, потом — то, что стоит за
+                # наблюдаемым держателем и очередью никем не названо.
+                mine.sort(key=lambda p: (plan_position(p), p["since"] or "9999",
+                                         -(p["id"] or 0)))
+            if key == "backlog":
+                # Два вида бэклога стоят двумя группами, а не вперемешку: их
+                # различимость — это то, что пользователь попросил прямо.
+                mine.sort(key=lambda p: (BACKLOG_ORDER[backlog_kind(p)],
+                                         p["since"] or "9999", -(p["id"] or 0)))
             shown = mine[:PER_BOARD_AREA]
             asked = questions if key == "waiting_human" else (
                 ours if key == "product_owner" else [])
@@ -425,7 +539,9 @@ def build_board(snapshot: dict) -> dict:
                 # «Можно подхватить» is the first question of every wake-up, so
                 # it opens with the board rather than folded. `done` and the
                 # queue behind a named holder are reference, not the question.
-                "collapsed": key in ("queued", "done"),
+                # Бэклог тоже сложен: он длинный по устройству, а ответ на «что
+                # там лежит» стоит выше, в разделе плана, вместе с порядком.
+                "collapsed": key in ("queued", "done", "backlog"),
                 "plates": shown,
                 "questions": asked,
                 "promises": owed,
@@ -490,6 +606,11 @@ def build_board(snapshot: dict) -> dict:
     return {
         "panels": panels,
         "areas": [{"key": k, "title": BOARD_AREA_RU[k]} for k in BOARD_AREAS],
+        # Очередь и бэклог одним списком над колонками: план один на все
+        # направления, и порядок в нём сквозной. В колонках те же задачи стоят по
+        # своим направлениям — это один и тот же ответ, собранный один раз в
+        # сборщике и показанный с двух сторон, а не две разные очереди.
+        "plan": plan_section(snapshot),
         # A summary that fills the screen is not one: the strip sits above the
         # columns and every line it takes is a line the board loses. What the cap
         # drops is still in the columns below, under «Затор» and «В работе», and

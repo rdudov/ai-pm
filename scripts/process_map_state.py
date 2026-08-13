@@ -1012,7 +1012,7 @@ def task_files(task_dir: Path) -> list[dict]:
 def board_area(status: str | None, flags: list[str], asked_user: bool,
                blocked_by: str | None = None, ours: bool = False,
                undelivered: bool = False, ready: bool = False,
-               decision_unmet: bool = False) -> str:
+               decision_unmet: bool = False, plan_role: str | None = None) -> str:
     """Which area of the board a task stands in. One rule, one owner.
 
     `asked_user` means a question was put to the user in writing and no answer
@@ -1032,6 +1032,14 @@ def board_area(status: str | None, flags: list[str], asked_user: bool,
     A finished task whose document never reached anyone is not «Сделано». It is
     the case of 783 — a 441 KB report that lay on the server for an hour behind
     two receipts about the life of the run — and it gets its own area.
+
+    `plan_role` is what the current revision of the portfolio plan says about
+    this task, and it owns two areas outright. Observation cannot own them: it
+    has no way to know an order nobody wrote down, and `planned` is a status
+    rather than a place in a queue — the plan says exactly that itself. So a task
+    the plan queued stands «в очереди» whatever the disk is doing, and a task the
+    plan holds back, or never named at all, stands «в бэклоге» instead of being
+    offered as work to pick up.
 
     A decision taken out loud and not carried out is the same hole one step
     earlier. On 2026-08-06 the product owner wrote «из девяти живых документов
@@ -1080,11 +1088,24 @@ def board_area(status: str | None, flags: list[str], asked_user: bool,
     # this task. Nothing holding it means it can be started now.
     if blocked_by:
         return "queued"
+    # Очередь принадлежит плану, а не наблюдению: задача, которую действующая
+    # редакция поставила в `next`, стоит в очереди, даже если на диске её ничто не
+    # держит. Именно этого расхождения и стоила прежняя доска: 13 августа 1121 и
+    # 1138 лежали под «можно подхватить», хотя редакция назначила им места.
+    if plan_role == "queue":
+        return "queued"
     # «Готово к запуску» is narrower than «можно подхватить» and that is the
     # whole of its value. Both say nothing is holding the task; only this one
     # says somebody wrote a condition down and the condition has since been met.
     # 831 belonged here for forty minutes and there was nowhere to put it.
-    return "ready_to_start" if ready else "pickup"
+    if ready:
+        return "ready_to_start"
+    # Бэклог — то, что само не поедет: план держит это своим словом либо не
+    # называет вовсе. Раньше и то и другое стояло под «можно подхватить», то есть
+    # доска предлагала подхватить работу, которую пользователь остановил.
+    if plan_role in ("paused", "unnamed"):
+        return "backlog"
+    return "pickup"
 
 
 def jam_reason(status_detail: str | None, run: dict, verdicts: list[dict],
@@ -1700,6 +1721,10 @@ def task_entry(task: dict, mail: dict,
             "area": None,
             "blocked_by": None,
             "blocked_by_src": None,
+            # Что о задаче говорит действующая редакция плана. Тоже заполняется
+            # в `assign_areas`: место в очереди — утверждение об одной задаче
+            # среди других, и в одиночку его не прочитать.
+            "plan_place": None,
             # The start condition, filled by `assign_areas` for the same reason
             # the area is: whether a condition still holds depends on the other
             # tasks. `None` means the task named no condition, which is not the
@@ -1730,13 +1755,18 @@ def task_entry(task: dict, mail: dict,
 
 
 def assign_areas(entries: list[dict], tasks: list[dict],
-                 statuses: dict | None = None) -> None:
+                 statuses: dict | None = None, plan: dict | None = None) -> None:
     """The second pass: which area each task stands in, once all of them are known.
 
     «Можно подхватить» is not a property of one task read alone — it is the
     absence of anything holding it, and one of the things that can hold it is
     another task's live run in the same repository. So the areas are assigned
     after every task has been observed, never during.
+
+    `plan` is the projection of the current plan revision — the owner of the
+    order and of the pauses. Callers that pass none get the previous behaviour
+    exactly: no plan, no queue and no backlog, because neither can be derived
+    from what is on disk.
 
     `statuses` maps a task number to its status across the whole index, not just
     this direction. A start condition may name a task of another direction — and
@@ -1756,6 +1786,14 @@ def assign_areas(entries: list[dict], tasks: list[dict],
             evaluated = condition_state(condition, known, busy, entry.get("id"))
             entry["board"]["start_condition"] = evaluated
         why, why_src = queue_reason(task, entry["run"], busy, evaluated)
+        # Место задачи в плане стоит своим полем, а не подменяет собой «за чем
+        # стоит». Это разные утверждения: держатель — наблюдение (живой прогон в
+        # том же дереве, незакрытая предшественница), а место в очереди — решение
+        # владельца порядка. Складывать их в одно поле значило бы называть
+        # держателем работу другого направления, которую тот же план разрешил
+        # вести параллельно.
+        place = plan_place_of(plan or {}, entry.get("id"))
+        entry["board"]["plan_place"] = place
         entry["board"]["blocked_by"] = why
         entry["board"]["blocked_by_src"] = why_src
         hand = entry["detail"].get("handoff") or {}
@@ -1783,7 +1821,8 @@ def assign_areas(entries: list[dict], tasks: list[dict],
             # where it always stood.
             ready=bool(evaluated) and evaluated["satisfied"]
             and bool(evaluated["after"] or evaluated["worktrees"]),
-            decision_unmet=bool(decision) and not decision["done"])
+            decision_unmet=bool(decision) and not decision["done"],
+            plan_role=place["role"] if place else None)
         # A queued task's reason for standing is the thing holding it, and the
         # plate has one place for «почему». `jam_reason` already filled it from
         # `status_detail` when there was one; a repository held by a named run
@@ -2170,6 +2209,175 @@ def unplanned(items: list[str], catalogue: list[dict]) -> list[dict]:
             checked += f"; номера-ссылки {', '.join(numbers)} в каталоге не найдены"
         shown.append({"text": item, "link": "unknown", "checked": checked})
     return shown
+
+
+# ---------------------------------------------------------------------------
+# «Что в очереди» и «что в бэклоге»: и то и другое читается у владельца — плана
+# ---------------------------------------------------------------------------
+#
+# Наблюдение не знает очереди и знать не может. `planned` — это статус, а не
+# место в очереди, и план говорит это сам последней своей строкой: «не является
+# очередью: все прочие задачи со статусом planned». Пока доска выводила очередь
+# из наблюдения, она показывала свой порядок вместо установленного: 13 августа у
+# MOEX под «в очереди» стояли 853 и 1136, тогда как действующая редакция 31
+# ставила 1121 → 1136 → 1138, а 1121 и 1138 лежали под «можно подхватить». И
+# целого куска картины — работы, которая заведена, но сама не поедет, — на доске
+# не было вовсе.
+#
+# Поэтому и порядок, и паузы читаются у их владельца: `product_memory`
+# .current_plan(). Второго источника правды не заводится — ни своего файла, ни
+# нового поля задачи, ни новой стадии жизненного цикла; доска остаётся читателем.
+
+# Строка плана, которая сама говорит, что очередью не является. План пишет это
+# своими словами и в тех же полях («1054 и 1067 — на полке по слову пользователя,
+# очередью не являются», «1152 и переделка памяти остаются бэклогом»), поэтому
+# признак — слова строки, и он печатается рядом с ней: читатель видит, чем
+# запись отнесена в бэклог, и может не поверить.
+NOT_A_QUEUE = re.compile(r"очеред\w*\s+не\s+явля\w+|не\s+явля\w+\s+очеред\w+|бэклог\w*",
+                         re.IGNORECASE)
+
+
+def plan_line_tasks(item: str, known: dict) -> list[int]:
+    """Номера строки плана, которые каталог задач знает как задачи.
+
+    Позиционный разбор `task_references` здесь не годится и расширять его нельзя:
+    он нарочно узок, потому что кормится продуктовой прозой, где четырёхзначных
+    количеств, цен и годов больше, чем номеров (задача 816). У строк плана корпус
+    другой — они пишутся как «1121 — первый живой запуск…», «1125 и 1134 —
+    довести…», — и измерение на действующей редакции 31 это подтверждает: во всех
+    двадцати строках `next` и всех четырёх строках `paused` каждое трёх- и
+    четырёхзначное число оказалось номером задачи, посторонних не было ни одного.
+    Поэтому признак здесь — что число знает каталог задач, а страховка от ошибки
+    не в узости шаблона, а в том, что строка целиком стоит рядом с записью: если
+    план однажды напишет «394 теста», запись будет видна и опровергнута чтением.
+    """
+    # Номер задачи в прозе не пишут с ведущим нулём, а идентификатор цели пишут:
+    # «первое условие цели 0002» дало бы ссылку на задачу 2. Проверено на живой
+    # редакции — это единственное постороннее число, которое нашлось.
+    found = dict.fromkeys(int(match.group(1)) for match in numbers(item)
+                          if not match.group(1).startswith("0"))
+    return [number for number in found if number in known]
+
+
+def plan_entry(field: str, text: str, known: dict, kind: str | None = None) -> dict:
+    """Одна строка плана в том виде, в котором её показывает доска."""
+    ids = plan_line_tasks(text, known)
+    checked = (f"сверено с каталогом задач ({len(known)} задач) по числам строки; "
+               + (f"каталог знает как задачи: {', '.join(str(i) for i in ids)}"
+                  if ids else "ни одно число строки каталог задачей не знает"))
+    entry = {
+        "field": field,
+        "text": text,
+        "tasks": [{"id": number, "title": known[number].get("title"),
+                   "status": known[number].get("status")} for number in ids],
+        "checked": checked,
+    }
+    if kind:
+        entry["kind"] = kind
+    return entry
+
+
+def plan_projection(catalogue: list[dict] | None = None) -> dict:
+    """Очередь, бэклог и место каждой задачи — по действующей редакции плана.
+
+    Три поля редакции читаются как три разных утверждения владельца порядка:
+    `next` — очередь, `paused` — то, что стоит и само не поедет, всё остальное —
+    упоминание без места в очереди. Задача, которой действующая редакция не
+    называет вовсе, и есть «неразобранное»: план прочитан, и решения по ней в нём
+    нет. Это утверждение о прочитанной редакции, а не о задаче, и записывается
+    оно вместе с тем, чем наблюдено.
+    """
+    if not product_memory.available():
+        # Недоступное хранилище — не пустой план. Показать пустую очередь значило
+        # бы сказать «порядок не установлен» по чтению, которого не было.
+        raise ContractError(
+            f"долговечный корень продуктов {product_memory.root()} недоступен: "
+            "порядок работ не наблюдается и не может быть показан пустым")
+    catalogue = task_catalogue() if catalogue is None else catalogue
+    known = {task["id"]: task for task in catalogue if task.get("id")}
+    plan = product_memory.current_plan()
+    if plan is None:
+        # «Плана нет» — честный ответ и единственный доступный: очередь не
+        # выводится из статусов, и молчание владельца порядка не заменяется
+        # догадкой. Места задач остаются пустыми, и доска про очередь молчит.
+        return {"revision": None, "accepted_at": None, "queue": [], "backlog": [],
+                "places": {},
+                "src": f"редакций плана нет в {product_memory.revisions_dir()}"}
+    revisions = product_memory.plan_revisions()
+    source = str(revisions[-1]) if revisions else str(product_memory.revisions_dir())
+    revision = plan.get("revision")
+    src = f"действующая редакция {revision} портфельного плана, файл {source}"
+
+    queue: list[dict] = []
+    backlog: list[dict] = []
+    for text in plan.get("next") or []:
+        if NOT_A_QUEUE.search(text):
+            backlog.append(plan_entry("next", text, known, kind="paused"))
+        else:
+            queue.append(plan_entry("next", text, known))
+    for text in plan.get("paused") or []:
+        backlog.append(plan_entry("paused", text, known, kind="paused"))
+
+    # Место каждой задачи, по одному разу и по самому конкретному утверждению
+    # плана о ней: стоять в очереди конкретнее, чем стоять на паузе, а стоять на
+    # паузе конкретнее, чем быть упомянутой в основаниях.
+    places: dict[int, dict] = {}
+
+    def place(number: int, role: str, line: str | None, field: str | None,
+              detail: str, position: int | None = None) -> None:
+        if number in places:
+            return
+        places[number] = {"role": role, "position": position, "line": line,
+                          "field": field, "ahead": [], "src": f"{detail}; {src}"}
+
+    for position, entry in enumerate(queue, start=1):
+        for task in entry["tasks"]:
+            place(task["id"], "queue", entry["text"], entry["field"],
+                  f"строка {position} очереди (поле next)", position)
+    for entry in backlog:
+        for task in entry["tasks"]:
+            place(task["id"], "paused", entry["text"], entry["field"],
+                  f"строка поля {entry['field']}, которая держит работу")
+    for field in ("headline", "now", "parallel", "grounds", "contradictions"):
+        values = plan.get(field) or []
+        for text in ([values] if isinstance(values, str) else values):
+            for number in plan_line_tasks(text, known):
+                place(number, "named", text, field,
+                      f"задача названа в поле {field}, но в очередь не поставлена")
+
+    # За чем стоит задача очереди — это незакрытые задачи, которые план поставил
+    # строго перед ней. Считается по местам, а не по строкам: одна строка
+    # называет несколько номеров, один номер встречается в нескольких строках, и
+    # по строкам задача попадала в собственный список стоящих перед ней. Закрытая
+    # предшественница никого не держит: показывать её значило бы показывать
+    # очередь, которой уже нет.
+    living = sorted((number for number, place in places.items()
+                     if place["role"] == "queue"
+                     and known[number].get("status") not in TERMINAL),
+                    key=lambda number: places[number]["position"])
+    for number in living:
+        places[number]["ahead"] = [other for other in living
+                                   if places[other]["position"] < places[number]["position"]]
+    return {"revision": revision, "accepted_at": plan.get("accepted_at"),
+            "queue": queue, "backlog": backlog, "places": places, "src": src}
+
+
+def plan_place_of(projection: dict, number: int | None) -> dict | None:
+    """Что действующая редакция плана говорит об одной задаче.
+
+    `None` — редакции нет вовсе. Это не то же самое, что «план эту задачу не
+    называет»: первое — молчание владельца порядка, второе — прочитанная
+    редакция, в которой решения по задаче нет, то есть ровно «неразобранное».
+    """
+    if projection.get("revision") is None:
+        return None
+    place = (projection.get("places") or {}).get(number)
+    if place:
+        return place
+    return {"role": "unnamed", "position": None, "line": None, "field": None,
+            "ahead": [],
+            "src": "редакция не называет эту задачу ни в одном поле; "
+                   + projection["src"]}
 
 
 def ticked_thread(cmdline: list[str]) -> str | None:
@@ -3018,6 +3226,10 @@ def build(anonymize: bool, only: str | None = None) -> dict:
     mail = mailbox()
     observed = attachment_observations()
     statuses = {task["id"]: task.get("status") for task in catalogue if task.get("id")}
+    # The order of work and what stands outside it, read once from their owner.
+    # Every direction is judged against the same revision: a queue that differed
+    # between panels would be two queues.
+    plan = plan_projection(catalogue)
     threads = []
     for key, thread in config["threads"].items():
         if only and key != only:
@@ -3027,7 +3239,7 @@ def build(anonymize: bool, only: str | None = None) -> dict:
         # A start condition may name a task of another direction, and the index
         # is the same one the board is already built from, so the answer to «эта
         # задача закрыта?» cannot depend on which thread is being collected.
-        assign_areas(tasks, source, statuses)
+        assign_areas(tasks, source, statuses, plan)
         threads.append({
             "key": key,
             "title": thread.get("title", key),
@@ -3062,6 +3274,10 @@ def build(anonymize: bool, only: str | None = None) -> dict:
         "mode": "demo" if anonymize else "real",
         "threads": threads,
         "products": products(catalogue, mail),
+        # Очередь и бэклог словами их владельца. `places` наружу не едет: это
+        # рабочая опись по всем задачам каталога, а на экране нужна строка плана
+        # рядом с задачей, и она уже стоит на плашке.
+        "plan": {key: value for key, value in plan.items() if key != "places"},
         # Who else is deciding right now. Not a thread and not a task: it is the
         # contour watching itself, and it belongs above the columns.
         "owners_awake": owner_wakeups(config),
