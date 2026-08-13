@@ -858,7 +858,8 @@ def receipt_for(name: str, path: Path, receipts: list[dict]) -> dict | None:
     return None
 
 
-# The names the contour actually writes its delivery note under. `delivery.md` is
+# The names the contour actually writes its delivery disposition under.
+# `delivery.md` is
 # the one the audit of 835 wrote 71 times; `product-owner-delivery.md` is the one
 # the product owner writes by hand when they send a document themselves, and on
 # 2026-08-06 they wrote six of them — including all three documents of the very
@@ -866,12 +867,13 @@ def receipt_for(name: str, path: Path, receipts: list[dict]) -> dict | None:
 # is what makes them one convention rather than two: channel, message identifier,
 # sha256 of what was attached. Knowing only the first name meant the observer
 # called three deliveries of that evening undelivered while the letters were in
-# the user's mailbox.
-DELIVERY_NOTES = ("delivery.md", "product-owner-delivery.md")
+# the user's mailbox. `product-owner-decision.md` records the other terminal
+# disposition: the document deliberately does not go in a separate message.
+DELIVERY_NOTES = ("delivery.md", "product-owner-delivery.md", "product-owner-decision.md")
 
 
 def delivery_note(task_dir: Path) -> Path | None:
-    """The delivery note of this task under any of the names the contour uses."""
+    """The delivery disposition under any of the names the contour uses."""
     for name in DELIVERY_NOTES:
         path = task_dir / name
         if path.is_file():

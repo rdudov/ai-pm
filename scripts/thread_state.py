@@ -187,12 +187,13 @@ def build(name: str) -> dict:
         state = run_projection(task)
         entry = {"id": task["id"], "title": task["title"], "status": task["status"],
                  "path": f"tasks/{task['dir']}", "run": state}
-        if state and (state["process_alive"] or state["stale_running"]):
+        stale_open = bool(state) and state["stale_running"] and task["status"] not in CLOSED_TASK_STATUSES
+        if state and (state["process_alive"] or stale_open):
             live.append(entry)
         abandoned = bool(state) and state["abandoned_run"] and task["status"] not in CLOSED_TASK_STATUSES
         outside = bool(state) and state["work_outside_owner"]
         if (task["status"] in {"blocked", "in_progress"} or abandoned or outside
-                or (state and state["stale_running"])):
+                or stale_open):
             attention.append(entry)
     return {
         "thread": name,

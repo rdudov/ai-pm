@@ -3084,6 +3084,14 @@ class DoneButNeverShown(unittest.TestCase):
         self.assertTrue(hand["delivered"])
         self.assertIn("product-owner-delivery.md", hand["delivered_src"])
 
+    def test_the_product_owner_decision_not_to_deliver_closes_it_too(self):
+        task = self.like_783()
+        (task / "product-owner-decision.md").write_text(
+            "# Решение продакта\nОтдельным письмом не доставляется.\n")
+        hand = state.handoff(task)
+        self.assertTrue(hand["delivered"])
+        self.assertIn("product-owner-decision.md", hand["delivered_src"])
+
     def test_the_absence_says_which_names_were_looked_for(self):
         # «Свидетельства нет» is only checkable if the reader is told what was
         # searched for; a bare «нет» is the claim that hid the six notes above.
@@ -4221,6 +4229,26 @@ class TheWakeUpSeesTheQueueAndTheBacklog(unittest.TestCase):
               mock.patch.object(thread, "process_inventory", return_value=[]),
               mock.patch.object(thread.observer, "write_owner_observations")):
             return thread.build("process")
+
+    def test_a_dead_run_of_a_closed_task_is_not_live_or_attention(self):
+        closed = a_task(id=1098, dir="1098-t", status="completed",
+                        flags=["stale_label"], run={"state": "running"})
+        report = self.report(closed)
+        self.assertEqual(report["live_runs"], [])
+        self.assertEqual(report["needs_attention"], [])
+
+    def test_a_dead_run_of_an_open_task_stays_live_and_attention(self):
+        open_task = a_task(id=1098, dir="1098-t", status="planned",
+                           flags=["stale_label"], run={"state": "running"})
+        report = self.report(open_task)
+        self.assertEqual([task["id"] for task in report["live_runs"]], [1098])
+        self.assertEqual([task["id"] for task in report["needs_attention"]], [1098])
+
+    def test_a_live_process_remains_live_even_after_its_task_closed(self):
+        closing = a_task(id=1098, dir="1098-t", status="completed",
+                         run={"state": "running", "alive": True})
+        self.assertEqual([task["id"] for task in self.report(closing)["live_runs"]],
+                         [1098])
 
     def test_the_queue_of_the_plan_is_its_own_list_in_the_order_of_the_plan(self):
         second = a_task(id=1136, dir="1136-t", board={
