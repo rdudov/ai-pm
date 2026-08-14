@@ -1,0 +1,15 @@
+[Unit]
+# Одно пробуждение продакта по направлению %i.
+#
+# Путь установки здесь один и он ваш: замените /opt/product-owner на каталог,
+# в который вы клонировали этот репозиторий, и положите файл в
+# /etc/systemd/system/, а затем `systemctl daemon-reload`.
+Description=Product owner thread tick (%i)
+After=network.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/product-owner
+ExecStart=/usr/bin/python3 /opt/product-owner/scripts/thread_tick.py %i
+# Тик поднимает продакта и ждёт его решения, а не только читает состояние.
+TimeoutStartSec=1900

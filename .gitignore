@@ -1,0 +1,46 @@
+# Runtime state: snapshots of threads, mail drafts, scratch letters.
+# Rebuilt from observation on every tick; nothing here is a record of decision.
+state/
+
+# Live product content of this installation: snapshots, the portfolio plan,
+# decisions and attachments. Git owns the portable core that reads and writes
+# this — the schema, the migration and the tests — and never the content
+# itself, so product work cannot change the evidence base of a code review.
+# Its only durable copy is the nightly backup, which fails closed when this
+# root is missing; `product_memory.py --check` reads it back.
+content/
+
+# The retired product monoliths. They stay on disk as the dated archive and the
+# rollback path of the 2026-08-12 migration, byte-identical to the copies under
+# `content/archive/`, and no consumer reads them any more. `product_memory.py
+# --check` refuses when one of them diverges from the migration manifest, so a
+# habitual edit here is observed instead of silently lost.
+products/
+
+# This installation's own file: where its task system stands, which address its
+# letters go to, which directions it watches and which repositories each owns.
+# `threads.example.json` is the shape; the answers are one installation's.
+threads.json
+
+# The wake-up offsets of this installation's own directions. The template unit,
+# its timer and one example drop-in stay in git; a direction that exists only
+# here does not.
+systemd/product-thread@*.timer.d/
+!systemd/product-thread@example.timer.d/
+
+# The lessons this installation has learned, with the observation, the cost and
+# the owner of each. `lesson.py` owns the mechanism and is in git; what one
+# product owner has observed about one user is not.
+lessons/inbox.json
+lessons/applied.md
+
+# Work that happens to be done in this checkout rather than in the task system.
+tasks/
+logs/
+
+# Local machine settings and tool caches.
+.claude/settings.local.json
+.mcp.json
+.pytest_cache/
+__pycache__/
+*.pyc

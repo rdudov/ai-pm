@@ -1,0 +1,2923 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- Не «процессной работы»: направлений четыре, и процессный контур — одно из них. -->
+<title>Доска работ</title>
+<style>
+  /* ---------- light, and nothing else ----------
+     The board is a working screen someone reads in daylight, and the user asked
+     for it plainly: «Давай доску сделаем в светлой теме». So light is not a
+     theme switch with a default — it is the page. The dark palette that used to
+     live here belonged to the isometric map, the second screen this board could
+     be switched to; the switch and the screen are both gone (task 1067), and the
+     recording they played back stays as the feed of observed changes above the
+     columns. */
+  :root {
+    --ink: #16202e; --dim: #55647a; --edge: #d3dae4;
+    --bg0: #f2f5f9; --bg1: #ffffff; --panel: rgba(255,255,255,.94);
+    --live: #16794a; --blocked: #b3261e; --killed: #6234c9;
+    --stale: #8a5300; --gap: #a2470a; --done: #0a6ba6; --idle: #6b7a8d;
+    /* «Можно подхватить» and «надо запланировать» are invitations, not alarms,
+       so they get their own two hues instead of borrowing a warning colour. */
+    --pick: #0a7285; --plan: #6b31b8;
+    /* Our own decisions, and finished work nobody was shown. Neither is the
+       user's problem, so neither borrows the colour of a question to them:
+       «Решает продакт» is deliberately neutral, «Сделано, но не доставлено» is
+       warm because a document lying on a server is a thing to go and fix. */
+    --ours: #46556b; --undelivered: #b04a05;
+    --plate: #ffffff; --plate-hover: #f6f9fd; --surface: #fbfcfe;
+  }
+  * { box-sizing: border-box; }
+  html { margin: 0; }
+  /* The page scrolls. Nothing is squeezed to fit one screen: the user asked for
+     exactly this — «не надо стараться всё упихнуть в экран, мне подойдёт, если
+     будет скролл. А то так ничего не понятно: микроплашки с микроскроллом». So
+     there is one scrollbar on the document and none inside a plate, an area or
+     a column, and a long text makes its plate taller instead of hiding its tail. */
+  body {
+    margin: 0; min-height: 100%;
+    background: var(--bg0);
+    color: var(--ink); font: 14.5px/1.5 "Inter", "Segoe UI", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  button { background: var(--plate); color: var(--ink); border: 1px solid var(--edge);
+           border-radius: 9px; padding: 7px 13px; font: inherit; cursor: pointer; }
+  button:hover { background: var(--plate-hover); }
+  button.primary { background: #e4f3ea; border-color: #9ed3b6; color: var(--live); }
+  #boardmode { font-size: 11px; letter-spacing: .08em; text-transform: uppercase;
+          border: 1px solid var(--edge); border-radius: 999px; padding: 2px 9px; color: var(--dim); }
+  /* Nothing to say means nothing on the screen: the badge used to be a bare
+     `span`, and giving it a border made an empty one a small empty pill. */
+  #boardmode:empty { display: none; }
+
+  /* ---------- board: the default screen ----------
+     In the normal flow of the document, not pinned to the viewport. The board
+     used to be `position: fixed; inset: 0` with `overflow: hidden`, and every
+     nested scrollbar on the page followed from that one decision: seven areas
+     sharing a fixed column height, each crushed to its minimum, each with its
+     own scrollbar — «микроплашки с микроскроллом». Now the page is as tall as
+     what it has to say. */
+  #board, #tasklist { display: flex; flex-direction: column; }
+  /* The heading and the strip stay in view while the columns scroll past them:
+     «кто работает, где затор, что ждёт человека» are the first-screen answers,
+     and keeping them is what the room freed by scrolling is for. */
+  #boardhead, #taskhead { position: sticky; top: 0; z-index: 6; background: var(--bg1);
+               padding: 12px 18px 8px; display: flex; gap: 14px; align-items: baseline; flex-wrap: wrap;
+               border-bottom: 1px solid var(--edge); }
+  #boardhead h1, #taskhead h1 { margin: 0; font-size: 17px; font-weight: 650; }
+  #boardhead .sub, #taskhead .sub { color: var(--dim); font-size: 12.5px; }
+  /* The topmost state line: the instant of the collection, «в работе», and
+     «ждёт решения пользователя» when it is not zero. Three things, because the
+     board below is the place where a number stands next to what it counts. */
+  #boardstate { display: flex; gap: 14px; align-items: baseline; flex-wrap: wrap;
+                font-size: 12.5px; }
+  #boardstate .at { color: var(--dim); font-variant-numeric: tabular-nums; }
+  #boardstate .count { font-weight: 600; font-variant-numeric: tabular-nums; }
+  #boardstate .count.live { color: var(--live); }
+  /* Nothing running is the state to notice, so zero is amber rather than grey:
+     «жёлтое при нуле и зелёное при любом ненулевом значении». */
+  #boardstate .count.none { color: var(--stale); }
+  #boardstate .count.waiting { color: var(--blocked); }
+  /* The feed of observed changes, freshest first, straight under the heading.
+     What stood here before was the same seven counts the columns already show. */
+  #feed { padding: 9px 18px; border-bottom: 1px solid var(--edge);
+          background: var(--bg1); font-size: 12.5px; }
+  #feed .lbl { color: var(--dim); font-size: 11px; letter-spacing: .07em;
+               text-transform: uppercase; display: block; margin-bottom: 4px; }
+  #feed .none { color: var(--idle); }
+  #feed .row { display: flex; gap: 9px; align-items: baseline; flex-wrap: wrap;
+               padding: 2px 0; }
+  #feed .when { color: var(--dim); font-variant-numeric: tabular-nums; flex: none; }
+  #feed .kind { color: var(--dim); font-size: 11px; letter-spacing: .05em;
+                text-transform: uppercase; border: 1px solid var(--edge);
+                border-radius: 5px; padding: 0 6px; flex: none; }
+  #feed .what { overflow-wrap: anywhere; }
+  #feed .task { color: var(--dim); }
+  #feed .srcbtn { margin: 0; padding: 0 4px; }
+  #feed .srcbtn .w { display: none; }
+  #feed .srcbox { flex: 1 1 100%; }
+  /* The strip above the columns: who is working and where the jam is, by name.
+     Both answers have to be readable without scrolling anything. */
+  #strip { display: flex; gap: 4px 22px; padding: 9px 18px; border-bottom: 1px solid var(--edge);
+           background: var(--bg1);
+           flex-wrap: wrap; font-size: 13px; align-items: baseline; }
+  #strip .grp { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; max-width: 100%; }
+  #strip .lbl { color: var(--dim); font-size: 11px; letter-spacing: .07em; text-transform: uppercase; }
+  #strip .who { color: var(--live); }
+  #strip .jam { color: var(--blocked); }
+  #strip .ask { color: var(--stale); }
+  #strip .pick { color: var(--pick); }
+  #strip .none { color: var(--idle); }
+  /* Every item shows its whole text. Cutting the line into an ellipsis was how
+     the strip named four jams and let a person read the reason of one (finding
+     HIGH-1 of review 789): three reasons ran to `x=2536.9` inside a 1440 window
+     and were elided. The strip is kept short by showing fewer jams — the count
+     the renderer fits into `STRIP_GROUP_CHARS`, with the rest counted out loud —
+     not by hiding the end of a reason it has already promised to answer.
+     `overflow-wrap: anywhere` is required, not cosmetic: an observed reason is
+     often one unbroken token (`queued_behind_active_worktree_writers_669_689`)
+     and would otherwise push the box past the window on a phone. */
+  #strip .item { border: 1px solid var(--edge); border-radius: 6px; padding: 2px 8px;
+                 max-width: 100%; white-space: normal; overflow-wrap: anywhere;
+                 line-height: 1.35; }
+  /* The reason, right next to the jam it belongs to. Dimmer than the name so the
+     eye reads «what» first and «why» second, but on the same line and never
+     hidden behind a hover. */
+  #strip .why { color: var(--dim); }
+  /* A live child's activity line: the same fact as `.doing` on the plate, and
+     not the observed reason of a jam. */
+  #strip .doing { color: var(--dim); }
+  /* What the strip did not take. A silent cap reads as «показано всё». */
+  #strip .more { color: var(--dim); }
+  #strip .grp { flex: 1 1 100%; }
+  #strip .ours { color: var(--ours); }
+  #strip .undelivered { color: var(--undelivered); }
+  /* Единственная строка доски, обращённая к человеку. Набиралась тем же серым и
+     тем же весом, что и всё остальное. */
+  #strip .lbl.you { color: var(--stale); font-weight: 700; }
+  #strip .ask.you { color: var(--stale); font-weight: 600; }
+  /* The strip has no height cap and no scrollbar of its own any more. What keeps
+     it short is the character budget in the renderer, which shows fewer names
+     rather than cutting the ones it shows; a cap here would have been a second
+     mechanism doing the same job badly — and a scrollbar inside a header is
+     exactly the «микроскролл» the user asked to be rid of. */
+
+  /* ---------- аппарат происхождения: один переключатель на всю страницу ----------
+     «Источник», «Сверка», «также названы», «наблюдено по mtime», строка хода
+     работы, которую ребёнок пишет себе, — доказательство, что картинка не врёт.
+     Нужно проверяющему, а не читателю: одна и та же строка сверки стояла на
+     экране двадцать три раза подряд. Ничего не удалено — всё включается одной
+     кнопкой в шапке. */
+  body:not(.prov) .srcbtn,
+  body:not(.prov) .srcbox,
+  body:not(.prov) .doing,
+  /* Полоса задаёт своим группам `display: flex` селектором с идентификатором, и
+     он перебивает правило по классу: у выключателя должен быть тот же вес. */
+  body:not(.prov) #strip .prov,
+  body:not(.prov) .prov { display: none; }
+  #tosources.on { background: #e2edf7; border-color: #9dbcd8; color: var(--done); }
+
+  /* Длинный текст: три строки, целиком — кнопкой рядом. Одна механика на все
+     длинные блоки страницы; текст не режется, а складывается. */
+  .fold { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3;
+          overflow: hidden; }
+  .fold.open { display: block; -webkit-line-clamp: none; overflow: visible; }
+  /* Слева зазор, потому что в полосе кнопка стоит сразу за текстом строки. */
+  .foldbtn { font: inherit; font-size: 11.5px; background: none; border: 0; padding: 1px 0;
+             margin: 0 10px 0 6px; color: var(--dim); cursor: pointer; text-align: left;
+             text-decoration: underline dotted; }
+  .foldbtn:hover { color: var(--ink); background: none; }
+
+  /* ---------- очередь и бэклог, как их установил план ----------
+     Порядок работ принадлежит портфельному плану, а не наблюдению, и план один
+     на все направления: у него сквозной порядок, а колонки разложены по
+     направлениям. Поэтому очередь стоит одним списком над колонками — там же,
+     где стоит ответ на «кто работает сейчас», — а в колонках те же задачи стоят
+     каждая в своём направлении. Это один и тот же ответ, собранный один раз в
+     сборщике и показанный с двух сторон.
+
+     Раскрыт по умолчанию: пользователь пишет письмо именно за этим ответом, и
+     ответ под складкой — это ещё одно письмо. */
+  #plan { padding: 10px 18px 12px; border-bottom: 1px solid var(--edge);
+          background: var(--bg1); font-size: 13px; }
+  #plan > .grp { margin-top: 8px; }
+  #plan .lbl { color: var(--dim); font-size: 11px; letter-spacing: .07em;
+               text-transform: uppercase; display: block; margin-bottom: 5px; }
+  #plan .owner { color: var(--dim); font-size: 11.5px; }
+  #plan .rows { display: flex; flex-direction: column; gap: 3px; }
+  /* Номер места — своей колонкой, а не первым словом строки: строка переносится,
+     и без колонки вторая задача той же строки читалась как отдельное место в
+     очереди. Порядок — это то, ради чего раздел существует, и он не может
+     зависеть от ширины окна. */
+  #plan .row { display: flex; gap: 8px; align-items: baseline;
+               max-width: 100%; line-height: 1.4; }
+  #plan .items { display: flex; flex-direction: column; gap: 2px; min-width: 0;
+                 white-space: normal; overflow-wrap: anywhere; }
+  #plan .pos { color: var(--dim); font-variant-numeric: tabular-nums; flex: none;
+               min-width: 22px; text-align: right; }
+  /* Строка плана, каждая задача которой по наблюдению уже закрыта. Она остаётся
+     на своём месте — расхождение плана и наблюдения не прячется, — но глаз
+     проходит мимо неё к работе, которая ещё стоит. */
+  #plan .row.closed .name, #plan .row.closed .free { color: var(--dim); }
+  #plan .num { color: var(--dim); font-variant-numeric: tabular-nums; }
+  #plan .name { color: var(--ink); }
+  /* Что наблюдение видит там, где план назвал порядок. Расхождение — это
+     содержание, а не ошибка отрисовки: план ставит задачу третьей, наблюдение
+     видит её живой, и обе стороны стоят рядом в одной строке. */
+  #plan .seen { color: var(--dim); }
+  #plan .seen.live { color: var(--live); }
+  #plan .seen.done { color: var(--done); }
+  #plan .seen.stuck { color: var(--blocked); }
+  /* Строка плана, за которой задачи наблюсти не удалось. Слова те же, что у
+     «Надо запланировать»: сверка не сошлась — это не «задачи нет». */
+  #plan .free { color: var(--ink); }
+  #plan .unlinked { color: var(--plan); }
+  #plan .none { color: var(--idle); }
+  /* Хвост списка и кнопка, которая его раскрывает. Складка — существующая
+     механика областей (`asFolder`, `.shut`, `sessionStorage`), а не своя.
+     Выглядит кнопкой, а не сноской: «ещё строк редакции: 19» серым мелким
+     шрифтом никто не считал органом управления и не нажимал. */
+  #plan .rows.shut { display: none; }
+  #plan .more { margin-top: 6px; font-size: 12px; padding: 4px 10px; }
+  /* Кнопка источника стоит под строкой, а не растягивается на всю её ширину:
+     колонка задач — это столбец, и кнопка в нём иначе занимает целую строку. */
+  #plan .srcbtn { align-self: flex-start; }
+  /* Метка «связь с задачей не установлена» на телефоне шире окна, а `nowrap`
+     достался ей от плашек: там метки короткие. Здесь она переносится — измерено
+     на 390, где строка иначе уезжала за правый край на 46 пикселей. */
+  #plan .tag { white-space: normal; }
+
+  #columns { display: grid; grid-template-columns: repeat(4, 1fr);
+             gap: 14px; padding: 14px; align-items: start; }
+  .col { display: flex; flex-direction: column; min-width: 0;
+         border: 1px solid var(--edge); border-radius: 12px; background: var(--surface);
+         box-shadow: 0 1px 2px rgba(22,32,46,.05); }
+  .colhead { padding: 10px 12px 8px; border-bottom: 1px solid var(--edge); }
+  .colhead h2 { margin: 0; font-size: 13.5px; font-weight: 620; }
+  .colhead .meta { color: var(--dim); font-size: 11.5px; margin-top: 3px; }
+  /* Состояние направления одной строкой — вопрос пользователя дословно: «как
+     быстро я могу понять статус по направлениям, глядя на панель». Здесь стояли
+     шесть равновесных чисел, из которых большинство нули. */
+  .state { margin-top: 4px; font-size: 12.5px; line-height: 1.4; }
+  .state .mark { font-weight: 640; }
+  .state .mark.live { color: var(--live); }
+  .state .mark.stuck { color: var(--blocked); }
+  .state .mark.ask { color: var(--stale); }
+  .state .mark.hold { color: var(--ours); }
+  .state .mark.idle { color: var(--undelivered); }
+  .state .mark.free { color: var(--pick); }
+  .state .what { color: var(--ink); }
+  /* Без `display`: причину складывает `.fold`, и он задаёт свой. */
+  .state .why { color: var(--dim); }
+  .state .why.alarm { color: var(--undelivered); font-weight: 560; }
+  .state .next { color: var(--dim); display: block; margin-top: 2px; }
+  .state .next b { color: var(--ink); font-weight: 600; }
+  /* Сколько областей колонки пусты — одной строкой вместо тридцати пяти
+     заголовков со словом «пусто». */
+  .voids { color: var(--idle); font-size: 11.5px; line-height: 1.35; }
+  /* «Когда проверит в следующий раз, когда проверял в прошлый и чем то кончилось».
+     It sits in the column head rather than in an area because it is a fact about
+     the direction's owner and not about any one task, and a person who opens the
+     board on a column of zeros reads it before they read the zeros. */
+  .check { display: flex; flex-direction: column; gap: 2px;
+           margin-top: 5px; font-size: 11.5px; line-height: 1.35; }
+  .check .next { color: var(--ink); font-weight: 560; }
+  /* Why the next check is unknown, as ordinary readable text. It used to live
+     only in a `title` attribute, which a phone or a tablet never shows at all
+     (finding MEDIUM-1 of review 900): the line promised an explanation and then
+     kept it for pointer users. */
+  .check .nextwhy { color: var(--dim); }
+  .check .last, .check.none { color: var(--dim); }
+  .check .why { color: var(--ours); }
+  /* A direction standing still for no observable reason is the user's own
+     complaint made visible, so it is not another grey line. */
+  .check .why.alarm { color: var(--undelivered); font-weight: 560; }
+  /* «Продолжить сейчас» stands under the same check it is about: the line above
+     says when the owner looked and what came of it, and this is how to make it
+     look again without waiting for the timer. */
+  .continue { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap;
+              margin-top: 6px; font-size: 11.5px; }
+  .continue button { padding: 4px 10px; font-size: 12px; }
+  .continue button:disabled { opacity: .55; cursor: default; }
+  .continue .said { color: var(--dim); }
+  /* What is owed to the user on this direction. It stands in the column head
+     beside the check for the same reason the check does: it is a fact about the
+     direction rather than about one task, and a person opening the board on
+     problematic work wants «что обещано и где это стоит» before the columns.
+     A goal under reinforced control is marked, because that mode is exactly the
+     thing that must never be silent. */
+  .goals { display: flex; flex-direction: column; gap: 6px; margin-top: 7px; }
+  .goal { border-left: 2px solid var(--ours); padding-left: 7px;
+          font-size: 11.5px; line-height: 1.35; }
+  .goal .head { color: var(--ink); font-weight: 600; }
+  .goal .head .mode { color: var(--undelivered); font-weight: 620; }
+  .goal .line { color: var(--dim); }
+  .goal .gap { color: var(--ours); }
+  .goal .done { color: var(--dim); }
+  /* Обещанное остаётся в шапке колонки, а его разбор складывается: полторы
+     тысячи знаков прозы стояли между «что дальше» и самими задачами. */
+  .goal .rest.shut { display: none; }
+  /* Neither the column nor an area scrolls inside itself any more. The two
+     previous versions of this file both tried to divide a fixed window height
+     between nine areas — first by letting each area scroll, then by adding a
+     scrollbar to the column as a safety valve — and both produced the screen the
+     user described: plates too small to read, each with its own tiny scrollbar.
+     The room comes from the page instead, so an area is exactly as tall as what
+     it holds and nothing inside it is ever out of view. */
+  .colbody { display: flex; flex-direction: column;
+             gap: 14px; padding: 10px 11px 14px; }
+
+  .area { display: flex; flex-direction: column; }
+  .area .plates { display: flex; flex-direction: column; }
+  .area > h3 { margin: 0 0 6px; font-size: 11.5px; letter-spacing: .07em; text-transform: uppercase;
+               color: var(--dim); display: flex; gap: 7px; align-items: baseline;
+               flex-wrap: wrap; }
+  /* The heading folds the area, so the thing that folds it is a button and says
+     whether the area is open. It was an `h3` with a hand cursor: thirty-six of
+     them, none reachable by Tab, none telling a screen reader what pressing
+     would do. The button keeps the heading's own look — it is still a heading,
+     not a widget dropped into one. */
+  .area > h3 > .areahead { font: inherit; color: inherit; letter-spacing: inherit;
+               text-transform: inherit; background: none; border: 0; padding: 0;
+               margin: 0; border-radius: 4px; cursor: pointer; text-align: left; width: 100%;
+               display: flex; gap: 7px; align-items: baseline; flex-wrap: wrap; }
+  .area > h3 > .areahead:hover { background: none; color: var(--ink); }
+  .area > h3 .n { color: var(--ink); font-size: 12.5px; font-weight: 650; }
+  .area > h3 .old { margin-left: auto; font-weight: 400; text-transform: none; letter-spacing: 0; }
+  .area.a-waiting_human > h3 { color: var(--stale); }
+  .area.a-running > h3 { color: var(--live); }
+  .area.a-stuck > h3 { color: var(--blocked); }
+  /* «Можно подхватить» is the first question of a wake-up, so it reads as an
+     invitation rather than as another warning. */
+  .area.a-pickup > h3 { color: var(--pick); }
+  /* Бэклог — не тревога и не приглашение: это то, что стоит по решению или без
+     решения, и цвет у него нейтральный, как у «Решает продакт». */
+  .area.a-backlog > h3 { color: var(--ours); }
+  .area.a-plan > h3 { color: var(--plan); }
+  .area.a-product_owner > h3 { color: var(--ours); }
+  .area.a-undelivered > h3 { color: var(--undelivered); }
+  /* «Готово к запуску» is «можно подхватить» with a condition behind it that
+     has since been met, so it reads in the same colour and stands above it. */
+  .area.a-ready_to_start > h3 { color: var(--pick); }
+  /* A decision taken and not carried out is our own jam, not the work's. */
+  .area.a-decision_unmet > h3 { color: var(--undelivered); }
+  .area.shut .plates { display: none; }
+  /* The rule that selected the contents of an area, printed with the area. It
+     matters for «надо запланировать», whose whole content is text picked by a
+     narrow test — a reader who cannot see the test would read the heading as a
+     verdict about the work rather than as a statement about the line. */
+  .area .rule { color: var(--idle); font-size: 11px; line-height: 1.35;
+                margin: -2px 0 6px; flex: none; }
+  .area.shut .rule { display: none; }
+
+  /* Nothing on a plate is cut, clamped or elided. Every line clamp
+     that used to stand in this block existed to protect a fixed screen height
+     that no longer exists: a long reason now makes its plate taller and the page
+     taller with it, which is what the user asked for in as many words — «плашка
+     обязана быть читаемой: текст не режется». `overflow-wrap: anywhere` stays,
+     because an observed reason is often one unbroken token
+     (`queued_behind_active_worktree_writers_669_689`) that would otherwise push
+     the column past the window on a phone. */
+  .plate { border: 1px solid var(--edge); border-left: 3px solid var(--idle); border-radius: 9px;
+           background: var(--plate); padding: 9px 11px; margin-bottom: 8px;
+           overflow-wrap: anywhere; }
+  .plate:last-child { margin-bottom: 0; }
+  .plate.p-waiting_human { border-left-color: var(--stale); }
+  .plate.p-running { border-left-color: var(--live); }
+  .plate.p-stuck { border-left-color: var(--blocked); }
+  .plate.p-done { border-left-color: var(--done); }
+  .plate.p-pickup { border-left-color: var(--pick); }
+  .plate.p-plan { border-left-color: var(--plan); }
+  .plate.p-product_owner { border-left-color: var(--ours); }
+  .plate.p-undelivered { border-left-color: var(--undelivered); }
+  .plate.p-ready_to_start { border-left-color: var(--pick); }
+  .plate.p-decision_unmet { border-left-color: var(--undelivered); }
+  /* A plate opens its card. It is a control, so it says so before it is clicked
+     rather than after — a board nobody knows is clickable has no drill-down.
+     The cursor is only half of saying so: it was the *whole* signal, so on a
+     phone there was none, and forty presses of Tab over the whole board reached
+     two buttons and no plate at all. What makes it a control is the role, the
+     focus and the name; the cursor stays as the pointing device's share of it. */
+  .plate[role="button"] { cursor: pointer; }
+  .plate[role="button"]:hover { border-color: #9fb0c6; background: var(--plate-hover); }
+  /* A plate that opens nothing looks like nothing. Thirty-three product
+     questions and promises carried the hand cursor and the hover of a control
+     and did nothing when pressed, which is the board teaching a reader that
+     pressing means nothing. */
+  .plate.q { cursor: default; }
+  :focus-visible { outline: 2px solid #1e6fd9; outline-offset: 2px; }
+
+  /* Where an observation is named, and how it is opened. It used to live in the
+     browser's own `title`: 223 elements carried one, 53 of them longer than 80
+     characters and the longest 178, and on a phone that channel does not exist
+     at all. So the plate carries one real button instead — reachable by mouse,
+     by Tab and by touch alike — and it opens a block that shows every source of
+     that plate whole, next to the claim it stands behind. */
+  .srcbtn { font: inherit; font-size: 11.5px; line-height: 1.3; margin-top: 6px;
+            padding: 1px 7px; border: 1px dashed var(--edge); border-radius: 5px;
+            background: transparent; color: var(--dim); cursor: pointer; }
+  .srcbtn::before { content: "ⓘ "; }
+  .srcbtn:hover { border-style: solid; color: var(--ink); }
+  .srcbtn[aria-expanded="true"] { border-style: solid; color: var(--ink); }
+  .srcbox { display: none; margin-top: 5px; padding: 6px 8px; border-radius: 6px;
+            background: var(--surface); border: 1px solid var(--edge);
+            font-size: 11.5px; line-height: 1.4; color: var(--dim);
+            overflow-wrap: anywhere; }
+  .srcbox.open { display: block; }
+  .srcbox div { margin-bottom: 3px; }
+  .srcbox div:last-child { margin-bottom: 0; }
+  .srcbox b { color: var(--ink); font-weight: 600; }
+  /* In the strip the marker is the glyph alone, and the source block it opens
+     takes the whole width of the item rather than sitting on its line. */
+  #strip .srcbtn { margin: 0 0 0 6px; padding: 0 4px; }
+  #strip .srcbtn .w { display: none; }
+  #strip .srcbox { flex: 1 1 100%; margin-top: 4px; }
+  .plate .head { display: flex; gap: 7px; align-items: baseline; flex-wrap: wrap; }
+  .plate .num { color: var(--dim); font-variant-numeric: tabular-nums; font-size: 12.5px; flex: none; }
+  .plate .name { font-size: 13.5px; font-weight: 600; line-height: 1.35; }
+  .plate .row { margin-top: 6px; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  .tag { font-size: 11.5px; border: 1px solid var(--edge); border-radius: 5px; padding: 1px 6px;
+         color: var(--dim); white-space: nowrap; background: #fff; }
+  .tag.who { color: var(--ink); }
+  .tag.alive { color: var(--live); border-color: #9ed3b6; }
+  .tag.lie { color: var(--blocked); border-color: #e6a9a4; }
+  .tag.age { font-variant-numeric: tabular-nums; }
+  .tag.retry { color: var(--killed); border-color: #c2b0ec; }
+  .tag.doc { color: var(--undelivered); border-color: #edb894; white-space: normal; }
+  /* Что о задаче говорит план: место в очереди, пауза его словом или молчание.
+     Своим цветом, потому что это единственная надпись на плашке, у которой
+     владелец не наблюдение. */
+  .tag.plan { color: var(--plan); border-color: #c2b0ec; white-space: normal; }
+  .plate .doing { margin-top: 6px; color: var(--dim); font-size: 12.5px; line-height: 1.4; }
+  .plate .ask { margin-top: 6px; color: var(--stale); font-size: 12.5px; line-height: 1.4; }
+  /* What observed that the question is the user's, or that it is ours. The area
+     may not simply assert whose question it is: the mark that put it in front of
+     the person — date, channel, message — is printed under the question itself. */
+  .plate .asked { margin-top: 3px; color: var(--dim); font-size: 11.5px; line-height: 1.4; }
+  /* The observed reason a task stands where it stands. Answering «почему» is an
+     acceptance question, so it is not dimmed away into a footnote. */
+  .plate .why { margin-top: 6px; font-size: 12.5px; line-height: 1.4; color: var(--stale); }
+  .plate.p-stuck .why { color: var(--blocked); }
+  /* A product's open question: the same area, so it reads as one list. */
+  .plate.q .name { font-weight: 500; }
+  .plate.q .num { color: var(--stale); font-weight: 700; }
+  .plate.p-product_owner.q .num { color: var(--ours); }
+  .plate.p-plan.q .num { color: var(--plan); }
+  .plate .more { margin-top: 4px; color: var(--idle); font-size: 12px; }
+  .plate .dash { color: var(--idle); }
+
+  /* Repositories and channels are reference, and reference does not outrank the
+     answers above it: a direction owning three repositories was taking 181 of
+     900 pixels off the areas. */
+  /* Repositories and channels are reference, and reference does not outrank the
+     answers above it: one direction owning three repositories took 181 of 900
+     pixels off the areas that answer the questions. Folded by default, one line
+     that says what is inside, and the warnings — uncommitted, unpushed — stay
+     on that line so nothing is hidden by folding it. */
+  .chan { border-top: 1px solid var(--edge); padding: 9px 12px 11px; font-size: 12px;
+          color: var(--dim); }
+  .chan.shut .body { display: none; }
+  /* Folds the block, so it is a button and says whether the block is open —
+     the same rule as the area headings above it. */
+  .chan .sum { cursor: pointer; font: inherit; color: inherit; background: none;
+               border: 0; padding: 0; text-align: left; width: 100%; border-radius: 4px; }
+  .chan .sum:hover { background: none; color: var(--ink); }
+  .chan .sum::before { content: "▸ "; color: var(--idle); }
+  .chan:not(.shut) .sum::before { content: "▾ "; }
+  .chan div { margin-top: 3px; }
+  .chan b { color: var(--ink); font-weight: 600; }
+  .chan .warn { color: var(--stale); }
+
+  /* ---------- подвал: на чём это работает ----------
+     Ревизия стоит внизу, а не в шапке: это ответ проверяющему, а не один из
+     четырёх вопросов первого экрана. Красной она становится ровно тогда, когда
+     установленное и закоммиченное разошлись. */
+  #foot { padding: 10px 18px 22px; color: var(--dim); font-size: 11.5px; }
+  #foot .warn { color: var(--undelivered); }
+
+  #switch, #taskswitch { margin-left: auto; display: flex; gap: 6px; }
+  #switch button, #taskswitch button { padding: 5px 11px; font-size: 12.5px; }
+  #switch button.on, #taskswitch button.on {
+    background: #e2edf7; border-color: #9dbcd8; color: var(--done);
+  }
+
+  /* ---------- task index: lookup, not another task store ---------- */
+  #tasklist { display: none; min-height: 100vh; }
+  #tasktools { padding: 18px; border-bottom: 1px solid var(--edge); background: var(--bg1); }
+  #tasksearch { width: min(720px, 100%); box-sizing: border-box; border: 1px solid var(--edge);
+                border-radius: 10px; background: var(--surface); color: var(--ink);
+                padding: 10px 12px; font: inherit; }
+  #tasksearch:focus { outline: 2px solid #9dbcd8; outline-offset: 1px; }
+  #taskcount { margin-left: 10px; color: var(--dim); font-size: 12.5px; }
+  #taskrows { width: min(1040px, calc(100% - 36px)); margin: 14px auto 28px;
+              border: 1px solid var(--edge); border-radius: 12px; overflow: hidden;
+              background: var(--surface); }
+  .taskrow { display: grid; grid-template-columns: 76px minmax(0, 1fr) 130px;
+             gap: 12px; align-items: baseline; padding: 10px 12px;
+             border-bottom: 1px solid var(--edge); cursor: pointer; }
+  .taskrow:last-child { border-bottom: 0; }
+  .taskrow:hover, .taskrow:focus { background: var(--plate-hover); outline: none; }
+  .taskrow:focus-visible { box-shadow: inset 0 0 0 2px #9dbcd8; }
+  .taskrow .num { color: var(--dim); font-variant-numeric: tabular-nums; }
+  .taskrow .name { overflow-wrap: anywhere; }
+  .taskrow .status { color: var(--dim); text-align: right; }
+  #taskempty { color: var(--dim); text-align: center; padding: 28px 12px; }
+
+  /* Two columns before one: at a tablet width four columns give every plate a
+     line of two words, and one column makes the page four times as long as it
+     needs to be. */
+  @media (max-width: 1180px) { #columns { grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 900px) {
+    #columns { grid-template-columns: 1fr; padding: 10px; }
+    /* A phone gives the header a third of the screen if left alone, and every
+       line it takes comes off the answers below it. The strip stops being
+       sticky here: on a 390-wide screen it is several lines tall, and pinning it
+       would leave the columns a slot instead of a screen. */
+    #boardhead, #taskhead { position: static; padding: 8px 12px 6px; }
+    #boardhead h1, #taskhead h1 { font-size: 15px; }
+    /* One column cannot fit four directions, so on a phone the strip *is* the
+       first-screen answer — which means a reason may not be cut here. The item
+       wraps and the reason takes as many lines as it needs. */
+    #strip { padding: 7px 12px; }
+    /* Очередь и бэклог на телефоне читаются тем же списком: строка переносится,
+       а не обрезается, и порядок остаётся порядком. */
+    #plan { padding: 8px 12px 10px; }
+    /* The three-line clamp that used to stand here was the phone half of finding
+       HIGH-1: reasons #723, #727 and #747 ended in an ellipsis and two of them
+       ran past the right edge of a 390 window. What keeps «Ждёт решения
+       человека» on the first screen is the character budget in the renderer,
+       which shows fewer jams, not a clamp that cuts the ones it shows. */
+    #strip .why { color: var(--dim); }
+    #tasktools { padding: 12px; }
+    #taskcount { display: block; margin: 7px 0 0; }
+    #taskrows { width: calc(100% - 24px); margin-top: 12px; }
+    .taskrow { grid-template-columns: 62px minmax(0, 1fr); gap: 5px 9px; padding: 10px; }
+    .taskrow .status { grid-column: 2; text-align: left; font-size: 12px; }
+  }
+
+  /* ---------- the card: detail without leaving the page ----------
+     The user asked to open a plate and see the review verdict and its findings,
+     the gates, the last progress line and when it was written, the live process
+     and its age, the repository the run was pointed at, what was delivered and
+     the files of the task directory — «не уходя со страницы». So it is a layer
+     over the board, the board stays where it was, and closing it puts the eye
+     back on the plate it was opened from. Board plates and indexed rows carry
+     every field in the one document the renderer receives. */
+  /* The card is a page, not a drawer with its own scrollbar. It used to be a
+     fixed overlay whose body scrolled inside a 900-tall window, which is the
+     same «микроскролл» the board itself had: a card about a task with twenty
+     files gave the reader a six-line window onto them. Now the board steps
+     aside, the card takes the page, and the page scrolls. Nothing is navigated
+     to — closing it puts the eye back where it was, at the same scroll offset. */
+  #card { display: none; }
+  #card.open { display: block; }
+  #cardbox { max-width: 940px; margin: 0 auto; background: var(--bg1);
+             border: 1px solid var(--edge); border-radius: 12px; }
+  #cardhead { position: sticky; top: 0; z-index: 3; background: var(--bg1);
+              padding: 14px 16px 11px; border-bottom: 1px solid var(--edge);
+              border-radius: 12px 12px 0 0; }
+  #cardhead .head { display: flex; gap: 9px; align-items: baseline; flex-wrap: wrap; }
+  #cardhead .num { color: var(--dim); font-variant-numeric: tabular-nums; }
+  #cardhead .name { font-size: 16px; font-weight: 620; line-height: 1.35; }
+  #cardclose { margin-left: auto; flex: none; }
+  #cardbody { padding: 14px 16px 24px; }
+  #cardbody section { margin-bottom: 14px; }
+  #cardbody h4 { margin: 0 0 6px; font-size: 11px; letter-spacing: .07em;
+                 text-transform: uppercase; color: var(--dim); font-weight: 600; }
+  #cardbody .kv { display: grid; grid-template-columns: minmax(96px, auto) 1fr;
+                  gap: 3px 12px; font-size: 12.5px; }
+  #cardbody .kv dt { color: var(--dim); }
+  #cardbody .kv dd { margin: 0; word-break: break-word; }
+  #cardbody .none { color: var(--idle); font-size: 12.5px; }
+  #cardbody .gate { display: flex; gap: 8px; font-size: 12.5px; padding: 2px 0; }
+  #cardbody .gate .r { flex: none; font-weight: 650; font-variant-numeric: tabular-nums; }
+  #cardbody .gate .r.ok { color: var(--live); }
+  #cardbody .gate .r.bad { color: var(--blocked); }
+  #cardbody .files { font-size: 12px; }
+  #cardbody .files div { display: flex; gap: 10px; padding: 1.5px 0; }
+  #cardbody .files .n { flex: 1; word-break: break-all; }
+  #cardbody .files .m { color: var(--dim); flex: none; font-variant-numeric: tabular-nums; }
+  #cardbody .src { color: var(--idle); font-size: 11.5px; margin-top: 4px; }
+  /* Карточка живёт по тому же правилу, что и доска: «наблюдено: …» — это
+     аппарат происхождения, и он за общим переключателем. Предупреждение
+     («документ лежит, а доставки нет») им не является и остаётся всегда. */
+  body:not(.prov) #cardbody .src:not(.warn) { display: none; }
+  #cardbody .warn { color: var(--stale); }
+  /* The user's own words about the task, which the card never showed. It reads
+     as prose, not as a field: it is the one thing on the card written by a
+     person rather than observed from a file. */
+  #cardbody .summary { font-size: 13.5px; line-height: 1.5; white-space: pre-wrap;
+                       overflow-wrap: anywhere; }
+  #cardbody .tech { margin-top: 18px; border-top: 1px solid var(--edge); padding-top: 10px; }
+  #cardbody .tech > summary { cursor: pointer; font-size: 11px; letter-spacing: .07em;
+                              text-transform: uppercase; color: var(--dim); font-weight: 600; }
+  #cardbody .tech .kv { margin-top: 8px; }
+  #cardbody .tech .files { margin-top: 8px; }
+  @media (max-width: 760px) { #cardbox { border-left: none; border-right: none; border-radius: 0; } }
+
+  @media (max-width: 760px) {
+    button { padding: 6px 9px; font-size: 12.5px; }
+    #boardmode { display: none; }
+    /* One feed row wraps into three lines on a phone, so the space between them
+       is what decides whether the board below the feed is reachable at all. */
+    #feed { padding: 7px 12px; }
+    #feed .row { gap: 3px 8px; padding: 1px 0; line-height: 1.35; }
+    #feed .when { font-size: 11.5px; }
+  }
+</style>
+</head>
+<body>
+<div id="board">
+  <div id="boardhead">
+    <h1>Доска работ</h1>
+    <span id="boardstate"></span>
+    <span id="boardmode"></span>
+    <span id="switch">
+      <button id="tosources">Показать источники</button>
+      <button id="toboard" class="on">Доска</button>
+      <button id="totasks">Задачи</button>
+    </span>
+  </div>
+  <!-- Порядок сверху вниз и есть предмет задачи 1163: полоса говорит, что идёт,
+       что стоит и что требуется лично от вас, колонки под ней — что с каждым
+       направлением и что дальше. Очередь плана и лента наблюдений ниже: это
+       подробности и история, а не ответы. Ничего не удалено, переставлено. -->
+  <div id="strip"></div>
+  <div id="columns"></div>
+  <div id="plan"></div>
+  <div id="feed"></div>
+  <div id="foot"></div>
+</div>
+
+<div id="tasklist">
+  <div id="taskhead">
+    <h1>Все задачи</h1>
+    <span class="sub">индекс для поиска; подробности читаются из каталога задачи</span>
+    <span id="taskswitch">
+      <button id="toboard2">Доска</button>
+      <button id="totasks2" class="on">Задачи</button>
+    </span>
+  </div>
+  <div id="tasktools">
+    <label for="tasksearch">Поиск по номеру или названию</label><br>
+    <input id="tasksearch" type="search" inputmode="search"
+           placeholder="Например, 1054 или списка задач" autocomplete="off">
+    <span id="taskcount"></span>
+  </div>
+  <div id="taskrows"></div>
+</div>
+
+<div id="card">
+  <div id="cardbox">
+    <div id="cardhead">
+      <div class="head">
+        <span class="num" id="cardnum"></span>
+        <span class="name" id="cardname"></span>
+        <button id="cardclose">Закрыть</button>
+      </div>
+    </div>
+    <div id="cardbody"></div>
+  </div>
+</div>
+
+<script id="payload" type="application/json">__DATA__</script>
+<script>
+"use strict";
+const DATA = JSON.parse(document.getElementById("payload").textContent);
+const SNAP = DATA.snapshot;
+
+const el = id => document.getElementById(id);
+
+/* ---------- the board ----------
+   Four direction panels, areas by urgency inside each, one plate per task. The
+   first screen answers the three acceptance questions — who is working, where
+   the jam is and why, what waits for a person — so nothing here is decorative.
+   Every caption comes from a field of the snapshot; where the snapshot says
+   nothing, the plate shows a dash rather than a plausible guess. */
+const BOARD = DATA.board;
+
+/* One wording for one measurement. The caption was written out twice — once when
+   a plate is built and once by the ticker that refreshes it every half minute —
+   so changing it in one place left the other saying something else thirty
+   seconds later. What it says is deliberately «без изменений»: the number is the
+   age of the freshest file the area is built from, which bounds the transition
+   without claiming to be it (finding MEDIUM-1 of review 786). */
+function ageCaption(age) { return "без изменений " + age; }
+
+/* An age counted from the instant the state was last observed to change, so it
+   stays true while the page sits open rather than freezing at collection time. */
+function ageOf(p) {
+  if (!p.since) return p.age_seconds;
+  const t = Date.parse(p.since);
+  return isNaN(t) ? p.age_seconds : Math.max(Math.round((Date.now() - t) / 1000), 0);
+}
+
+function ago(seconds) {
+  if (seconds === null || seconds === undefined) return null;
+  const m = Math.floor(seconds / 60), h = Math.floor(m / 60), d = Math.floor(h / 24);
+  if (d >= 1) return d + (d === 1 ? " день" : (d < 5 ? " дня" : " дней"));
+  if (h >= 1) return h + (h === 1 ? " час" : (h < 5 ? " часа" : " часов"));
+  if (m >= 1) return m + " мин";
+  return "только что";
+}
+
+const ROLE_RU = { analysis: "анализ", development: "разработка", tests: "тесты",
+                  review: "ревью", commit: "коммит", report: "отчёт" };
+
+/* ---------- Russian for what a person actually reads ----------
+   The board is read by one person, in Russian, and it was showing them
+   `in_progress`, `danger-full-access`, `decision=deliver` and whole English
+   sentences written by a runner. Those are field values of our own contour, so
+   they are translated where they are shown rather than left for the reader to
+   decode.
+
+   Two kinds, kept apart on purpose. An enumeration has a closed set of values
+   and every one of them is named here. Free text does not: a child writes its
+   own progress line, and translating it by guesswork would be inventing a fact.
+   So free text is passed through a table of the machine tokens and the fixed
+   runner phrases this contour writes itself, and anything else reaches the
+   screen as it was written — which is honest, and points at the writer of the
+   line rather than hiding it. */
+const STATUS_RU = { planned: "запланирована", in_progress: "в работе",
+                    blocked: "заблокирована", completed: "завершена",
+                    cancelled: "отменена", done: "завершена" };
+/* Статусы, которые говорят «работа кончилась». Живой прогон их перевешивает —
+   сборщик решает это сам, — а плашка называет расхождение вслух. */
+const TERMINAL_RU = { completed: true, cancelled: true, superseded: true };
+const RUN_STATE_RU = { running: "идёт", completed: "завершён", blocked: "остановлен на блокировке",
+                       failed: "провалился", stopped: "остановлен", killed: "убит надзором" };
+const WORKFLOW_RU = { standard: "обычный прогон одним ребёнком",
+                      "dev-pipeline": "конвейер разработки с ревью" };
+const SANDBOX_RU = { "danger-full-access": "полный доступ к диску",
+                     "workspace-write": "запись в рабочем каталоге",
+                     "read-only": "только чтение" };
+const VERDICT_RU = { approved: "принято", rework: "на доработку", changes: "нужны правки" };
+const REFUSAL_RU = { premature_completion: "преждевременное завершение" };
+
+/* Fixed phrases this contour writes into `current_step`, longest first so a
+   prefix never eats a longer match. */
+const PHRASE_RU = [
+  ["Standard child completed and durable gates passed",
+   "обычный ребёнок завершился, долговечные гейты пройдены"],
+  ["Dev-pipeline owner attempt completed", "попытка владельца конвейера завершена"],
+  ["Rejected premature completion:", "отказано в преждевременном завершении:"],
+  ["Starting child agent via", "запускается ребёнок через"],
+  ["Review complete with rework", "ревью закончено с вердиктом «на доработку»"],
+  ["Cross-review complete", "кросс-ревью закончено"],
+  ["Review complete", "ревью закончено"],
+];
+
+/* Machine tokens the contour writes into otherwise human text. */
+const TOKEN_RU = [
+  [/\bdecision=deliver\b/g, "решение продакта: доставить"],
+  [/\bdecision=([a-z_]+)/g, "решение продакта: $1"],
+  [/\bstarts_after=(\d+)/g, "начинать после задачи $1"],
+  [/\bworktree=(\S+)/g, "занимает рабочее дерево $1"],
+  /* The review protocol writes exactly one line, `Verdict: approved|rework`, and
+     children quote it inside otherwise free prose. It is a keyword of ours, not
+     someone's wording, so it is translated wherever it stands. */
+  [/\bVerdict:?\s*rework\b/gi, "вердикт: на доработку"],
+  [/\bVerdict:?\s*approved\b/gi, "вердикт: принято"],
+  /* Вердикты, которые проверяющие пишут капслоком внутри русской фразы нашего же
+     контура: ключевые слова протокола, а не чьи-то слова. */
+  [/\bCHANGES REQUESTED\b/g, "«нужны правки»"],
+  [/\bREWORK\b/g, "«на доработку»"],
+  [/\bAPPROVED\b/g, "«принято»"],
+  [/\bpremature_completion\b/g, "преждевременное завершение"],
+  [/\bin_progress\b/g, "в работе"],
+];
+
+/* One value of a closed set, in Russian; the raw value when the set has grown
+   and nobody taught this table about it — a name we do not know is still a name,
+   and hiding it would be worse than showing it in English. */
+function ru(table, value) {
+  if (value === null || value === undefined || value === "") return value;
+  return table[value] || String(value);
+}
+
+/* Free text on its way to a person. Markdown markers go here too: the board
+   prints text nodes, never HTML, so `**жирный**`, `~~зачёркнутый~~` and
+   backticks reached the screen as the characters they are. */
+function human(text) {
+  if (!text) return text;
+  let out = String(text);
+  for (const [from, to] of PHRASE_RU) out = out.split(from).join(to);
+  for (const [pattern, to] of TOKEN_RU) out = out.replace(pattern, to);
+  return out.replace(/\*\*|~~|`/g, "").replace(/(^|\n)#{1,6}\s+/g, "$1");
+}
+
+/* ---------- английская строка, написанная не для читателя ----------
+   Часть текста на доске пишут не для этого экрана: строку хода работы — ребёнок
+   -исполнитель, находку — проверяющий, и обе бывают целиком английскими
+   («six-row reproduction gate accepts arbitrary non-empty divergence»). Перевести
+   их доска не может — это было бы выдумыванием факта, — но и ставить их ответом
+   на вопрос «что происходит» нельзя.
+
+   Поэтому такая строка заменяется одной русской фразой, а сама уезжает за общий
+   переключатель источников: ничего не потеряно, и видно, кто её написал. Порог —
+   три латинских слова подряд длиной от трёх букв: `journalctl`,
+   `progress.json`, `task-agent` и `#1163` остаются на месте, потому что это
+   имена, а не английская проза.
+
+   Перевеса латиницы над кириллицей порог больше не спрашивает, и это ровно то,
+   чего не хватало на первом экране (приёмка продакта 2026-08-14, замечание 2):
+   «Какая точная версия сейчас deployed в закрытом рабочем сервисе? … получить
+   из офисного контура commit engine, commit API, собранный image и один живой
+   trace» — русская вводная с чужой английской прозой внутри, и подсчёт букв
+   решал в пользу русского начала. Цена названа целиком в отчёте: удержанных
+   строк 75 → 87 на состоянии дня, и решение принимает постановщик. */
+const ENGLISH = /[A-Za-z]{3,}[^\wА-Яа-яЁё]+[A-Za-z]{3,}[^\wА-Яа-яЁё]+[A-Za-z]{3,}/;
+
+/* Второй вид того же: имя, написанное машине, — два куска латиницы через
+   подчёркивание. Так пишут гейты, поля и файлы контура (`f_003_closure_records`,
+   `probe_model_provenance`, `pass36_repaired_git_systemd_and_claude_review_pending`),
+   и человеку так не пишут никогда: подчёркивание для порога выше — буква,
+   поэтому список гейтов он считает одним словом и не видит в нём английского
+   (ревью круга 3, HIGH-1).
+
+   Своё доска до этого порога не доводит: собранную ею причину «не пройдено
+   гейтов: 3» имена не глотают — они стоят в её источнике, у `jam_reason`. Порог
+   остаётся для чужого: `status_detail` задачи, вердикта проверяющего, подписи
+   записи в ленте. */
+const MACHINE = /[A-Za-z0-9]+_[A-Za-z0-9_]*[A-Za-z]/;
+
+/* Единица решения — предложение, а не строка целиком, и это здесь главное
+   (приёмка продакта 2026-08-14, круг 5). Круг 4 спрашивал перевес латиницы по
+   всей строке, и русская вводная прятала английскую прозу в её хвосте; круг 5
+   перевес убрал — и тогда одно машинное имя в середине уносило за источник
+   целый читаемый русский абзац, а на экране вместо ответа стояло «написано не
+   для этого экрана». Обе беды — от единицы: вводная не может голосовать за
+   чужое предложение, а чужое предложение не уносит с собой русские.
+
+   Предложение написано читателю, если в нём есть кириллица и нет английской
+   прозы, а имя для машины в нём — если фраза вокруг имени всё-таки русская.
+   Это уточняет правило круга 4, а не отменяет его: имя не становится читаемым
+   от русского начала, но «Нужно ли закрыть verification_gap задачи 495?» — это
+   вопрос о предмете, а «Кандидат: pass36_repaired_git_systemd_and_claude_...» —
+   имя с русской наклейкой, и перевес латиницы отличает одно от другого внутри
+   одного предложения, где спрятать в хвосте уже нечего. */
+function toReader(one) {
+  if (!/[А-Яа-яЁё]/.test(one) || ENGLISH.test(one)) return false;
+  if (!MACHINE.test(one)) return true;
+  return (one.match(/[А-Яа-яЁё]/g) || []).length >= (one.match(/[A-Za-z]/g) || []).length;
+}
+
+/* Ведущие предложения, написанные читателю, — на экран; всё, начиная с первого
+   чужого, — за общий переключатель источников, и о том, что там есть ещё,
+   говорит многоточие. Обрыв на первом чужом, а не выборка читаемых по всему
+   тексту: показать второе предложение вместо первого значило бы переставить
+   чужие слова местами. */
+function said(text, instead) {
+  const out = human(text);
+  if (!out) return { shown: out, full: null };
+  const kept = [];
+  let whole = true;
+  for (const piece of String(out).split(/(?<=[.!?…])\s+|\n+/)) {
+    const one = piece.trim();
+    if (!one) continue;
+    if (!toReader(one)) { whole = false; break; }
+    kept.push(one);
+  }
+  if (whole) return { shown: out, full: null };
+  return { shown: kept.length ? kept.join(" ") + " …" : instead, full: out };
+}
+
+/* Чем доска отвечает, когда записанного объяснения показать нельзя. Заглушка
+   «причина написана не для этого экрана» — это то же «пусто», только вежливое:
+   пользователь спрашивает «где затор и почему», а получает сообщение о том, что
+   ответ есть где-то ещё (приёмка продакта 2026-08-14, круг 5).
+
+   Поэтому вместо неё стоит то, что уже наблюдено и уже написано по-русски, и
+   ничего для этого не собирается заново: вердикт проверяющего и гейты приезжают
+   на той же плашке, а словами их называет тот же `VERDICT_RU`, что и карточка.
+   Возраста и автора здесь нет намеренно — они стоят на той же строке своими
+   надписями, и повторить их значило бы вернуть замечание 3 круга 4. Порядок
+   ветвей — от частного к общему, как у `jam_reason` в сборщике, и «не пройдено
+   гейтов» называется той же фразой и по тому же счёту: одно наблюдение не
+   должно называться на доске двумя способами. Отсылка к словам автора остаётся,
+   но только хвостом после настоящей фразы. */
+function insteadOfWords(p, where) {
+  const detail = p.detail || {};
+  const review = detail.review || {};
+  const failed = (detail.gates || []).filter(g => g.result !== "OK").length;
+  let what = "";
+  if (review.verdict && review.verdict !== "approved") {
+    what = "вердикт проверяющего: " + ru(VERDICT_RU, review.verdict)
+      + (review.findings ? ", находок " + review.findings : "");
+  } else if (failed) what = "не пройдено гейтов: " + failed;
+  else if (p.stale_label) what = "ярлык говорит «в работе», а процесса нет";
+  else if (p.status) what = "записанное состояние: " + ru(STATUS_RU, p.status);
+  return (what ? what + "; " : "") + "как записано — " + where;
+}
+
+/* Три строки без действия пользователя, целиком — кнопкой рядом. Одна механика
+   на все длинные блоки: текст ставится как записан и складывается, а не режется
+   многоточием. Кнопка остаётся только там, где текст не уместился, и это видно
+   лишь после отрисовки — «три строки» зависят от ширины колонки. */
+let folded = [];
+
+function foldable(parent, cls, text, tag) {
+  const node = document.createElement(tag || "div");
+  node.className = cls + " fold";
+  node.textContent = text;
+  const more = document.createElement("button");
+  more.className = "foldbtn";
+  more.textContent = "показать целиком";
+  /* Плашка вокруг — тоже орган управления, и нажатие не должно до неё дойти. */
+  more.addEventListener("click", event => event.stopPropagation());
+  more.addEventListener("keydown", event => event.stopPropagation());
+  asFolder(more, true, () => {
+    const open = node.classList.toggle("open");
+    more.textContent = open ? "свернуть" : "показать целиком";
+    return !open;
+  });
+  parent.appendChild(node); parent.appendChild(more);
+  folded.push([node, more]);
+  return node;
+}
+
+/* Скрытый блок высоты не имеет: складка у него остаётся, раскроют вместе с ней. */
+function settleFolds() {
+  for (const [node, more] of folded) {
+    if (node.clientHeight && node.scrollHeight - node.clientHeight < 2) {
+      node.classList.remove("fold");
+      more.remove();
+    }
+  }
+  folded = [];
+}
+
+function tag(text, cls) {
+  const s = document.createElement("span");
+  s.className = "tag" + (cls ? " " + cls : "");
+  s.textContent = text;                      // never innerHTML: the data is real
+  return s;
+}
+
+/* ---------- where a claim came from ----------
+   Every «наблюдено: …» on the board used to be a browser `title`, and a `title`
+   is three different things depending on the device: a tooltip after a pause on
+   a desktop, nothing at all on a phone, and nothing at all for a keyboard. 223
+   of them were on the live board, 53 longer than 80 characters.
+
+   One button per plate, not one per label: a plate has four or five sources and
+   five buttons in a row would be five tab stops saying the same word. The button
+   opens a block that names each claim next to the observation behind it, in
+   full — it is the same text, shown rather than hovered. */
+let srcSeq = 0;
+
+function sourceNote(node, pairs) {
+  const items = pairs.filter(pair => pair[1]);
+  if (!items.length) return;
+  const id = "src" + (++srcSeq);
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "srcbtn";
+  /* The word is what makes the marker readable, and the strip is the one place
+     that cannot afford it: the same button with its word took the strip from
+     315 px to 419 px of a 900-tall window — measured — and the strip's whole
+     budget exists to leave the columns on the first screen. So the word is
+     hidden there by CSS and the button keeps its name for anything that is not
+     looking at the pixels. */
+  const word = document.createElement("span");
+  word.className = "w";
+  word.textContent = "источник";
+  btn.appendChild(word);
+  btn.setAttribute("aria-label", "Показать, чем это наблюдено");
+  btn.setAttribute("aria-expanded", "false");
+  btn.setAttribute("aria-controls", id);
+  const box = document.createElement("div");
+  box.className = "srcbox";
+  box.id = id;
+  for (const [label, text] of items) {
+    const line = document.createElement("div");
+    const key = document.createElement("b");
+    key.textContent = label + ": ";
+    line.appendChild(key);
+    line.appendChild(document.createTextNode(text));
+    box.appendChild(line);
+  }
+  /* The plate around it is a control too, so the press must not reach it: the
+     source of a task and the details of a task are two different answers. */
+  const stop = event => event.stopPropagation();
+  btn.addEventListener("click", event => {
+    stop(event);
+    const open = box.classList.toggle("open");
+    btn.setAttribute("aria-expanded", open ? "true" : "false");
+  });
+  btn.addEventListener("keydown", stop);
+  node.appendChild(btn);
+  node.appendChild(box);
+}
+
+/* A plate that opens its card, said in the three ways a control is said: what it
+   is, that it can be reached, and what pressing it will do. */
+function asButton(node, label, act) {
+  node.setAttribute("role", "button");
+  node.tabIndex = 0;
+  node.setAttribute("aria-label", label);
+  node.addEventListener("click", act);
+  node.addEventListener("keydown", event => {
+    if (event.key === "Enter" || event.key === " " || event.key === "Spacebar") {
+      event.preventDefault();
+      act();
+    }
+  });
+}
+
+/* A folding heading: a real button that says whether what it folds is open. */
+function asFolder(btn, shut, act) {
+  btn.type = "button";
+  btn.setAttribute("aria-expanded", shut ? "false" : "true");
+  btn.addEventListener("click", () => {
+    const nowShut = act();
+    btn.setAttribute("aria-expanded", nowShut ? "false" : "true");
+  });
+}
+
+function plateNode(p, areaKey) {
+  const node = document.createElement("div");
+  node.className = "plate p-" + areaKey;
+  /* The drill-down the user asked for: the card opens over the board and the
+     board stays where it was, so nothing reloads and nothing is navigated to.
+     It is announced as what it is — a control with a name — because the hand
+     cursor that used to be the whole announcement says nothing to a phone and
+     nothing to a keyboard. */
+  asButton(node, "Открыть детали задачи " + (p.id === null ? "" : "#" + p.id + ": ") + p.title,
+           () => openCard(p));
+  /* Every «наблюдено» of this plate, gathered as it is built and shown by one
+     button at the bottom instead of by five invisible tooltips. */
+  const sources = [];
+
+  const head = document.createElement("div");
+  head.className = "head";
+  const num = document.createElement("span");
+  num.className = "num"; num.textContent = p.id === null ? "—" : "#" + p.id;
+  const name = document.createElement("span");
+  /* Название длиннее трёх строк в узкой колонке — тот же блок текста, что и
+     любой другой: складывается тем же `.fold`, а целиком открывается карточкой,
+     которую эта плашка и открывает. */
+  name.className = "name fold"; name.textContent = human(p.title);
+  head.appendChild(num); head.appendChild(name);
+  node.appendChild(head);
+
+  const row = document.createElement("div");
+  row.className = "row";
+  row.appendChild(tag(ru(STATUS_RU, p.status) || "без статуса"));
+  /* Who and in what role — only when a file actually said so. An empty cell is
+     the honest answer and beats a confident untruth in a caption. */
+  const who = p.actor ? tag(p.actor, "who") : tag("исполнитель неизвестен");
+  if (p.actor_src) sources.push(["Исполнитель", p.actor_src]);
+  row.appendChild(who);
+  if (p.role) {
+    const role = tag(ROLE_RU[p.role] || p.role);
+    if (p.role_src) sources.push(["Станция", p.role_src]);
+    row.appendChild(role);
+  }
+  /* A live process and a label claiming one are two facts, kept apart on the
+     plate: a dead run under a `running` label has to look like the jam it is. */
+  /* Что о задаче говорит план. Владелец очереди — он, и плашка называет его
+     прямо: порядок на доске нельзя принять за вывод наблюдения, а расхождение
+     («план ставит третьей», а рядом «прогон жив») читается как расхождение. */
+  const place = p.plan_place;
+  if (place) {
+    const said = place.role === "queue" ? place.position + "-я в очереди плана"
+      : place.role === "paused" ? "план держит её своим словом"
+      : place.role === "named" ? "план называет её, но в очередь не ставит"
+      : place.role === "mentioned" ? "план называет её в строке, но не её предметом"
+      : "план о ней не говорит";
+    row.appendChild(tag(said, "plan"));
+    sources.push(["Место в плане", place.src]);
+    if (place.line) sources.push(["Строка плана", place.line]);
+    /* План, сказавший об одной работе двояко, показывает обе строки. Место
+       выбрано более конкретным утверждением — очередью, — а не тем, что доска
+       молча предпочла: молчаливый выбор однажды показал 1054 и 1067 как бэклог
+       через сутки после того, как пользователь снял их с полки. */
+    const twice = place.conflict || [];
+    if (twice.length) {
+      row.appendChild(tag("план и ставит её в очередь, и держит её другой своей "
+                          + "строкой; место оставлено за очередью", "plan"));
+      twice.forEach((other, index) => sources.push(
+        ["Вторая строка плана" + (twice.length > 1 ? " " + (index + 1) : ""), other.line]));
+    }
+  }
+  if (p.alive) row.appendChild(tag("прогон жив", "alive"));
+  /* Расхождение статуса и наблюдения — своей надписью, а не двумя фактами
+     рядом, из которых вывод складывает читатель. */
+  if (p.alive && TERMINAL_RU[p.status]) {
+    row.appendChild(tag("статус говорит «" + ru(STATUS_RU, p.status)
+                        + "», а прогон идёт: запись устарела", "lie"));
+  }
+  if (p.stale_label) row.appendChild(tag("ярлык врёт: процесса нет", "lie"));
+  if (p.attempt > 1) row.appendChild(tag("попытка " + p.attempt, "retry"));
+  /* «Без изменений», not «в этом состоянии»: what is measured is the mtime of
+     the freshest file the area is built from, which is an upper bound on the
+     transition and not the transition itself. The tooltip names the file. */
+  const age = ago(ageOf(p));
+  if (age) {
+    const a = tag(ageCaption(age), "age");
+    a.dataset.since = p.since || "";
+    if (p.since_src) sources.push(["Без изменений", p.since_src]);
+    row.appendChild(a);
+  }
+  node.appendChild(row);
+
+  /* Строку хода работы ребёнок-исполнитель пишет себе, и пишет как придётся —
+     «Adjudicated all 33 machine-flagged cases…». На вопрос «что происходит» она
+     не отвечает, поэтому стоит вместе с остальным аппаратом за переключателем
+     источников (`.doing`), а не вместо ответа. */
+  if (p.happening) foldable(node, "doing", human(p.happening));
+  /* Why it stands here. `happening` comes from a live child's progress line and
+     is therefore empty for exactly the tasks that are stuck, which is the one
+     case a reader needs it — so the observed reason is its own line, shown
+     whenever the disk carries one and absent when it does not. */
+  if (p.why) {
+    /* A queue and a jam are two different sentences. «За чем стоит» is what the
+       user asked the queue column for by name, and calling it «почему» would
+       read as something being wrong when nothing is. */
+    const holds = p.blocked_by && p.why === p.blocked_by;
+    /* Причина часто цитирует вердикт проверяющего целиком или перечисляет
+       непройденные гейты по именам: русская фраза на экране, написанное не
+       читателю — за источником. Там, где показать нельзя ничего из записанного,
+       на месте причины стоит наблюдённое, а не сообщение о том, что причина
+       где-то есть. */
+    const reason = said(p.why, insteadOfWords(p, "в источнике"));
+    foldable(node, "why", (holds ? "стоит за: " : "почему: ") + reason.shown);
+    if (p.why_src) sources.push([holds ? "Стоит за" : "Почему", p.why_src]);
+    if (reason.full) sources.push([holds ? "Стоит за, как записано"
+                                         : "Почему, как записано", reason.full]);
+  }
+  /* Что о задаче сказал план, целиком и своей строкой — рядом с наблюдаемым «за
+     чем стоит», а не вместо него. Место в очереди — это решение владельца
+     порядка, а держатель — наблюдение, и складывать их в одну надпись значило бы
+     назвать держателем работу другого направления, которую тот же план разрешил
+     вести параллельно.
+
+     У паузы строка плана показывается целиком: пользователь просил у бэклога
+     именно это — «чьим словом оно стоит и когда сказано», — и ответ написан в
+     ней самой («по слову пользователя 2026-08-13»). Прятать её за кнопку
+     источника значило бы обещать ответ и оставить его для тех, кто нажмёт. */
+  if (place && (place.role === "queue" || place.role === "paused")) {
+    foldable(node, "why", place.role === "paused"
+      ? "план держит: " + human(place.line)
+      : "план ставит её " + place.position + "-й в очереди" + (place.ahead.length
+          ? "; выше в очереди: " + place.ahead.join(", ")
+          : "; выше незакрытых задач нет"));
+  }
+  /* Every open question of the task, whole, and each one saying whose it is and
+     what said so. Two used to be shown and the rest counted, and the count was
+     the least of it: all of them stood under «ждёт решения человека» whoever
+     they belonged to. A question of ours now says it is ours, and a question of
+     the user's carries the date, the channel and the message it went out with —
+     which is what makes the area checkable instead of believable. */
+  for (const question of p.questions) node.appendChild(askedNode(question));
+
+  /* A finished task whose document nobody was shown. The line names the file and
+     what was read to decide it, because «не доставлено» is a claim about the
+     world and the board may not make one silently. */
+  const hand = (p.detail || {}).handoff;
+  if (hand && !hand.delivered) {
+    const row2 = document.createElement("div");
+    row2.className = "row";
+    const doc = tag("документ человеку: " + hand.name +
+      (hand.bytes ? " · " + bytes(hand.bytes) : "") +
+      (hand.count > 1 ? " (и ещё " + (hand.count - 1) + ")" : ""), "doc");
+    sources.push(["Документ человеку", hand.src + "; " + hand.delivered_src]);
+    row2.appendChild(doc);
+    node.appendChild(row2);
+  }
+  sourceNote(node, sources);
+  return node;
+}
+
+/* One open question as it stands on a plate: the question, then the observation
+   that decided whose it is. Shared by the task plates and by the plates a
+   product's own question makes, so «чей это вопрос» reads the same in both. */
+function askedNode(q) {
+  const box = document.createElement("div");
+  foldable(box, "ask", (q.owner === "user" ? "? " : "· ") + human(q.text));
+  const bits = [];
+  if (q.asked_src) bits.push(q.asked_src);
+  if (q.answer_src) bits.push("ответ: " + q.answer_src);
+  if (q.note) bits.push(q.note);
+  if (bits.length) {
+    /* Чем наблюдено, что вопрос задан и не отвечен, — аппарат проверяющего: за
+       общим переключателем источников вместе со всем остальным. */
+    const src = document.createElement("div");
+    src.className = "asked prov"; src.textContent = bits.join(" · ");
+    box.appendChild(src);
+  }
+  return box;
+}
+
+/* ---------- the card ----------
+   Everything it shows arrived with the plate. The page cannot reach a disk, so
+   a drill-down that fetched its own detail would be a second door past the
+   boundary the whole split exists to hold. */
+
+/* Which plate is open, by task directory rather than by object identity: a live
+   refresh replaces every plate object, and the card has to survive that with
+   the same task in it. */
+let openTask = null;
+
+function row(dl, key, value, src) {
+  if (value === null || value === undefined || value === "") return;
+  const dt = document.createElement("dt"); dt.textContent = key;
+  const dd = document.createElement("dd");
+  dd.appendChild(document.createTextNode(value));
+  /* The card has room, so the observation is printed under the value instead of
+     being hidden in a `title` nobody on a phone can open. */
+  if (src) {
+    const note = document.createElement("div");
+    note.className = "src"; note.textContent = "наблюдено: " + src;
+    dd.appendChild(note);
+  }
+  dl.appendChild(dt); dl.appendChild(dd);
+}
+
+/* A section that has nothing to say is not drawn. It used to print «нечего
+   показать: на диске об этом ничего нет», and on the live board four of the
+   nine sections said exactly that — with the first of them standing fourth,
+   above everything a reader had opened the card for. */
+function section(title, build) {
+  const s = document.createElement("section");
+  const h = document.createElement("h4"); h.textContent = title;
+  s.appendChild(h);
+  return build(s) ? s : null;
+}
+
+function add(body, node) { if (node) body.appendChild(node); }
+
+function bytes(n) {
+  if (n === null || n === undefined) return "";
+  if (n < 1024) return n + " Б";
+  if (n < 1024 * 1024) return Math.round(n / 1024) + " КБ";
+  return (n / 1048576).toFixed(1) + " МБ";
+}
+
+function stamp(iso) {
+  if (!iso) return null;
+  const t = Date.parse(iso);
+  return isNaN(t) ? iso : new Date(t).toLocaleString("ru-RU");
+}
+
+/* ---------- the order a person reads a card in ----------
+   Top to bottom: what the task is in the user's own words, what is happening,
+   why it stands where it stands, what happens next, what came out of it — and
+   the machinery of the run last, folded. The previous order was the order the
+   fields were collected in: «Прогон» — the runner, the workflow and the sandbox —
+   stood second, above the review, the gates and the delivery, and the user's own
+   description of the task was not on the card at all. */
+function cardBody(p) {
+  const d = p.detail || {};
+  const body = document.createElement("div");
+
+  /* What the person asked for, in their words. It comes from `## Summary` of
+     `task.md` — the one place on disk that says what the task is about rather
+     than what state it is in. */
+  add(body, section("Своими словами", s => {
+    if (!d.summary) return false;
+    const text = document.createElement("div");
+    text.className = "summary"; text.textContent = d.summary;
+    s.appendChild(text);
+    const src = document.createElement("div");
+    src.className = "src"; src.textContent = "наблюдено: раздел «Summary» в task.md";
+    s.appendChild(src);
+    return true;
+  }));
+
+  add(body, section("Что происходит", s => {
+    const dl = document.createElement("dl"); dl.className = "kv";
+    row(dl, "Статус", ru(STATUS_RU, p.status));
+    row(dl, "Исполнитель", p.actor, p.actor_src);
+    row(dl, "Станция", p.role ? (ROLE_RU[p.role] || p.role) : null, p.role_src);
+    /* The child's own line about what it is doing, and when it wrote it. The
+       time is the mtime of the file, never the timestamp the child put inside
+       it: children routinely write local time into a UTC field and the contour
+       has already paid for believing one. */
+    const pr = d.progress || {};
+    row(dl, "Сейчас делает", human(pr.activity || p.happening),
+        pr.activity ? "строка activity в progress.json" : null);
+    if (pr.total) row(dl, "Сделано", pr.done + " из " + pr.total, "progress.json");
+    row(dl, "Записано", pr.minutes_ago === null || pr.minutes_ago === undefined
+        ? null : pr.minutes_ago + " мин назад", "mtime файла progress.json");
+    row(dl, "Шаг", human(d.current_step), "поле current_step в status.json");
+    /* A live process and a label claiming one are two facts and stay two lines:
+       the contour has been burned by reading one as the other. */
+    row(dl, "Процесс", p.alive ? "жив"
+        : (p.stale_label ? "мёртв, хотя ярлык говорит «идёт»" : "не запущен"),
+        p.alive ? "pid и стартовый тик ядра совпали с .runner/runner.json" : null);
+    row(dl, "Попытка", p.attempt > 1 ? p.attempt : null);
+    const age = ago(ageOf(p));
+    row(dl, "Без изменений", age, p.since_src);
+    s.appendChild(dl);
+    return dl.children.length > 0;
+  }));
+
+  add(body, section("Почему так", s => {
+    const dl = document.createElement("dl"); dl.className = "kv";
+    row(dl, p.blocked_by && p.why === p.blocked_by ? "Стоит за" : "Почему",
+        human(p.why), p.why_src);
+    if (d.refusal) {
+      row(dl, "Отказ в завершении", ru(REFUSAL_RU, d.refusal), "completion_refusal в status.json");
+      row(dl, "Что именно отказано", human(d.refusal_summary), "completion_refusal в status.json");
+    }
+    row(dl, "Остановлен надзором", human(d.stop_reason), "watcher_stop_reason в .runner/runner.json");
+    s.appendChild(dl);
+    /* The whole point of the observation: a directory that kept moving after
+       its owner refused its closing step is work that may already be finished
+       and that nobody has been back to. It is said in words, not in a flag. */
+    if ((p.flags || []).includes("work_outside_owner")) {
+      const warn = document.createElement("div");
+      warn.className = "src warn";
+      warn.textContent = "Владелец кончился раньше своего закрывающего шага, а файлы каталога "
+        + "двигались после этого: работа могла доработать снаружи — стоит посмотреть артефакты.";
+      s.appendChild(warn);
+      return true;
+    }
+    return dl.children.length > 0;
+  }));
+
+  add(body, section("Что дальше", s => {
+    let filled = false;
+    const r = d.review;
+    /* A verdict that asks for more work is «что дальше»; a verdict that accepted
+       the work is «результат», and it stands in the next section. */
+    if (r && r.verdict && r.verdict !== "approved") {
+      const dl = document.createElement("dl"); dl.className = "kv";
+      row(dl, "Ревью", ru(VERDICT_RU, r.verdict), r.src);
+      const by = Object.entries(r.by_severity || {}).map(([k, v]) => k + " " + v).join(", ");
+      row(dl, "Находок", r.findings + (by ? " (" + by + ")" : ""), r.src);
+      s.appendChild(dl);
+      filled = true;
+    }
+    for (const q of p.questions) {
+      const line = document.createElement("div");
+      line.className = "gate";
+      const mark = document.createElement("span"); mark.className = "r";
+      mark.textContent = q.owner === "user" ? "?" : "·";
+      const n = document.createElement("span");
+      n.textContent = q.text + (q.owner === "user" ? " — ждёт пользователя" : " — наш вопрос");
+      line.appendChild(mark); line.appendChild(n);
+      s.appendChild(line);
+      const bits = [];
+      if (q.asked_src) bits.push(q.asked_src);
+      if (q.answer_src) bits.push("ответ: " + q.answer_src);
+      if (q.note) bits.push(q.note);
+      if (bits.length) {
+        const src = document.createElement("div");
+        src.className = "src"; src.textContent = "наблюдено: " + bits.join(" · ");
+        s.appendChild(src);
+      }
+      filled = true;
+    }
+    return filled;
+  }));
+
+  add(body, section("Результат и доставка", s => {
+    let filled = false;
+    const dl = document.createElement("dl"); dl.className = "kv";
+    const r = d.review;
+    if (r && r.verdict === "approved") {
+      row(dl, "Ревью", ru(VERDICT_RU, r.verdict), r.src);
+      const by = Object.entries(r.by_severity || {}).map(([k, v]) => k + " " + v).join(", ");
+      row(dl, "Находок", r.findings + (by ? " (" + by + ")" : ""), r.src);
+    }
+    /* The document first, the receipts after it. The receipts were all anyone
+       looked at, and they answer a different question: 783 had two of them and
+       its report had still not left the server. */
+    const hand = d.handoff;
+    if (hand) {
+      row(dl, "Документ", hand.name + (hand.bytes ? " · " + bytes(hand.bytes) : ""), hand.src);
+      if (hand.count > 1) row(dl, "Всего документов", hand.count, hand.src);
+      row(dl, "Доставлено", hand.delivered ? "да" : "нет", hand.delivered_src);
+    }
+    if (d.delivery) {
+      row(dl, "Сообщений", d.delivery.count, d.delivery.src);
+      row(dl, "Последнее", stamp(d.delivery.last_at), d.delivery.src);
+      row(dl, "По событию", d.delivery.last_kind, d.delivery.src);
+    }
+    if (dl.children.length) { s.appendChild(dl); filled = true; }
+    if (hand && !hand.delivered) {
+      const warn = document.createElement("div");
+      warn.className = "src warn";
+      warn.textContent = "Работа закончена, документ лежит в каталоге задачи, а того, "
+        + "что его кто-то получил, на диске нет. Так пролежал час отчёт задачи 783.";
+      s.appendChild(warn);
+      filled = true;
+    }
+    const gates = d.gates || [];
+    if (gates.length) {
+      const head = document.createElement("div");
+      head.className = "src"; head.textContent = "наблюдено: гейты verification.md";
+      for (const g of gates) {
+        const line = document.createElement("div");
+        line.className = "gate";
+        const mark = document.createElement("span");
+        mark.className = "r " + (g.result === "OK" ? "ok" : "bad");
+        mark.textContent = g.result;
+        const n = document.createElement("span"); n.textContent = g.gate;
+        line.appendChild(mark); line.appendChild(n);
+        s.appendChild(line);
+      }
+      s.appendChild(head);
+      filled = true;
+    }
+    return filled;
+  }));
+
+  /* The machinery of the run. It is reference — which runner, which sandbox,
+     which files moved — so it is last and folded, and `<details>` is used
+     because the browser already gives it a focus, a name and a state. */
+  const tech = document.createElement("details");
+  tech.className = "tech";
+  const sum = document.createElement("summary");
+  sum.textContent = "Технические детали прогона";
+  tech.appendChild(sum);
+  const dl = document.createElement("dl"); dl.className = "kv";
+  row(dl, "Раннер", d.runner, "поле runner в .runner/runner.json");
+  row(dl, "Рабочий процесс", ru(WORKFLOW_RU, d.workflow), "поле workflow в .runner/runner.json");
+  row(dl, "Песочница", ru(SANDBOX_RU, d.sandbox), "поле sandbox в .runner/runner.json");
+  row(dl, "Репозиторий предмета", d.repo, "поле --repo в .runner/runner.json");
+  row(dl, "Ярлык прогона", ru(RUN_STATE_RU, d.state), "поле state в status.json");
+  row(dl, "Код возврата", d.exit_code === null || d.exit_code === undefined
+      ? null : String(d.exit_code), ".runner/runner.json");
+  if (d.moved) {
+    row(dl, "Последнее движение артефактов", stamp(d.moved), d.moved_src);
+  }
+  if (dl.children.length) tech.appendChild(dl);
+  const files = d.files || [];
+  if (files.length) {
+    const box = document.createElement("div");
+    box.className = "files";
+    for (const f of files) {
+      const line = document.createElement("div");
+      const n = document.createElement("span"); n.className = "n"; n.textContent = f.name;
+      const m = document.createElement("span"); m.className = "m";
+      m.textContent = [bytes(f.bytes), stamp(f.at)].filter(Boolean).join(" · ");
+      line.appendChild(n); line.appendChild(m);
+      box.appendChild(line);
+    }
+    tech.appendChild(box);
+    const src = document.createElement("div");
+    src.className = "src";
+    /* Names, sizes and times. Opening any of them would be reading the work
+       rather than observing it, and a transcript is never listed at all. */
+    src.textContent = "имена, размеры и время изменения: " + d.dir
+      + " — содержимое не читается, транскрипты не показываются";
+    tech.appendChild(src);
+  }
+  if (dl.children.length || files.length) body.appendChild(tech);
+
+  return body;
+}
+
+/* Where the board was when the card was opened, so closing puts the eye back on
+   the plate it came from. The card takes the page rather than floating over it —
+   that is what removed the last scrollbar inside a box — so the offset has to be
+   remembered here instead of being kept by a layer that never moved. */
+let boardScroll = 0;
+let cardReturn = "board";
+
+/* `keepScroll` is for a live refresh redrawing the card that is already open on
+   the same task. Opening a card is a navigation and starts at its top; a
+   ten-second poll is not, and sending the reader back to the top of a card they
+   were halfway down is the same interruption `location.reload()` used to be. */
+function openCard(p, keepScroll, from) {
+  if (!openTask) boardScroll = window.scrollY;
+  const wasAt = window.scrollY;
+  cardReturn = from || currentScreen;
+  openTask = p.task;
+  el("cardnum").textContent = p.id === null ? "—" : "#" + p.id;
+  el("cardname").textContent = p.title;
+  const body = el("cardbody");
+  body.textContent = "";
+  body.appendChild(cardBody(p));
+  el("card").classList.add("open");
+  el("board").style.display = "none";
+  el("tasklist").style.display = "none";
+  window.scrollTo(0, keepScroll ? wasAt : 0);
+}
+
+function closeCard() {
+  openTask = null;
+  el("card").classList.remove("open");
+  el("board").style.display = cardReturn === "board" ? "flex" : "none";
+  el("tasklist").style.display = cardReturn === "tasks" ? "flex" : "none";
+  window.scrollTo(0, boardScroll);
+}
+
+el("cardclose").addEventListener("click", closeCard);
+window.addEventListener("keydown", e => { if (e.key === "Escape" && openTask) closeCard(); });
+el("card").addEventListener("click", e => { if (e.target === el("card")) closeCard(); });
+
+/* Which areas the viewer folded open survives a live refresh, so an update
+   never yanks the screen out from under someone reading it. */
+const shutKey = (col, area) => "shut:" + col + ":" + area;
+function isShut(col, area, byDefault) {
+  const stored = sessionStorage.getItem(shutKey(col, area));
+  return stored === null ? byDefault : stored === "1";
+}
+
+/* Одна область одной колонки. Пустая область сюда не попадает вовсе: их считает
+   и называет одной строкой `voidsNode` ниже — на живом состоянии пустыми были
+   около тридцати пяти блоков из сорока восьми, и каждый занимал высоту
+   заголовком и словом «пусто». */
+function areaNode(panel, area) {
+  const node = document.createElement("section");
+  const shut = isShut(panel.key, area.key, area.collapsed);
+  node.className = "area a-" + area.key + (shut ? " shut" : "");
+
+  const title = document.createElement("h3");
+  /* The heading is still a heading; what folds it is a button inside it, so the
+     fold has a focus, a name and a stated state. */
+  const head = document.createElement("button");
+  head.className = "areahead";
+  head.appendChild(document.createTextNode(area.title + " "));
+  const n = document.createElement("span");
+  n.className = "n"; n.textContent = area.count;
+  head.appendChild(n);
+  /* «(показано 25, скрыто 188)» рядом с числом 213 говорит то же самое дважды и
+     разгоняет заголовок колонки до четырёх строк. Отсечка при этом остаётся
+     названной: молчаливая читалась бы как «показано всё». */
+  if (area.hidden) head.appendChild(document.createTextNode(
+      " · видно " + area.plates.length));
+  /* «Старшая» is a comparison, and one plate has nothing to be older than. The
+     user said so directly: «Если в группе одна задача, слово „старшая“ не
+     показывать». Its age is on the plate itself either way. */
+  const oldest = ago(area.oldest);
+  if (oldest && area.count > 1) {
+    const old = document.createElement("span");
+    old.className = "old"; old.textContent = "старшая: " + oldest;
+    head.appendChild(old);
+  }
+  asFolder(head, shut, () => {
+    const now = !node.classList.contains("shut");
+    node.classList.toggle("shut", now);
+    sessionStorage.setItem(shutKey(panel.key, area.key), now ? "1" : "0");
+    return now;
+  });
+  title.appendChild(head);
+  node.appendChild(title);
+
+  if (AREA_RULE[area.key]) {
+    /* Правило отбора — это тот же аппарат проверяющего, что и «источник»: оно
+       позволяет судить список, а не читать его, и уходит за тот же
+       переключатель. */
+    const rule = document.createElement("div");
+    rule.className = "rule prov"; rule.textContent = AREA_RULE[area.key];
+    node.appendChild(rule);
+  }
+
+  const plates = document.createElement("div");
+  plates.className = "plates";
+  for (const p of area.plates) plates.appendChild(plateNode(p, area.key));
+  /* The product's own open questions, in the same area and the same count as the
+     tasks. They are questions to the same person; splitting them into a second
+     place with a second number is how seventeen of them stayed off the board. */
+  for (const q of (area.questions || [])) plates.appendChild(questionNode(q, area.key));
+  for (const q of (area.promises || [])) plates.appendChild(promiseNode(q));
+  node.appendChild(plates);
+  return node;
+}
+
+/* The rule that picked what an area holds, printed with the area. «Надо
+   запланировать» is the one area whose entire content is text chosen by a test,
+   and the test says less than the heading: what is observed is that no task
+   could be linked to the line, which is not the same claim as «эта работа не
+   начата». The rule used to be «в строке нет номера задачи», and under it three
+   of the four shown lines already had tasks (finding HIGH-1 of review 814). A
+   reader who can see the rule can judge the list. */
+const AREA_RULE = {
+  plan: "строки раздела «В работе», для которых не удалось наблюсти задачу: сверка идёт по номеру-ссылке, по названию задачи в строке и по слагу — под каждой строкой написано, с чем её сверили",
+  pickup: "живого прогона нет, гейты не отказали, ничто на диске эту задачу не держит, и в очередь план её не ставил",
+  queued: "порядок здесь установлен действующей редакцией портфельного плана — он назван на каждой плашке; ниже плана идут задачи, которые план очередью не называл, но которые стоят за наблюдаемым держателем",
+  /* Область, которой на доске не было вовсе, хотя работа в ней стояла: у
+     пользователя это «что просто в бэклоге и автоматом не запустится». Держит
+     работу здесь только прочитанная редакция плана, и её строка стоит на
+     плашке. Молчание редакции о задаче сюда не относится: оно не значит, что по
+     задаче нет разбора, и не мешает ей запуститься. */
+  backlog: "план не двинет это сам: его действующая редакция держит работу своим словом — эта строка стоит на плашке, и в ней же сказано, чьим словом и когда",
+  /* The rule of the area whose contents the user counted by hand and found
+     thirteen of sixteen wrong. Printing it is what lets the next reader do the
+     same check in a minute instead of an evening. */
+  waiting_human: "только то, что спрошено у пользователя письмом или сообщением — с датой и идентификатором — и на что ответа не наблюдалось: ни письма от него в том же треде, ни решения, записанного в строке",
+  product_owner: "наши собственные вопросы: открытые, но пользователю их не задавали, либо он ответил, а решение осталось незаписанным. Решает продакт, а не человек",
+  ready_to_start: "у задачи записано машиночитаемое условие запуска — после каких задач и какое рабочее дерево она занимает, — и по наблюдению ничто из названного её больше не держит",
+  decision_unmet: "на задаче записано решение продакта, а наблюдения, что оно исполнено, нет: для доставки таким наблюдением служит delivery.md или квитанция с идентификатором сообщения",
+  undelivered: "задача завершена, документ для человека лежит в каталоге задачи, а свидетельства доставки нет: ни delivery.md, ни квитанции о документе — только события жизненного цикла прогона",
+};
+
+function questionNode(q, areaKey) {
+  const node = document.createElement("div");
+  node.className = "plate p-" + areaKey + " q";
+  const head = document.createElement("div");
+  head.className = "head";
+  const num = document.createElement("span");
+  num.className = "num"; num.textContent = q.owner === "user" ? "?" : "·";
+  const name = document.createElement("span");
+  /* Вопрос, который решаем мы сами, написан нами же и как придётся — «получить
+     из офисного контура commit engine, commit API, собранный image и один живой
+     trace». На первом экране он стоял английской прозой (приёмка продакта
+     2026-08-14, замечание 2), и это та же чужая для читателя строка, что вердикт
+     или причина затора: та же граница, тот же переключатель источников.
+
+     Сам вопрос при этом остаётся на экране: он написан по-русски, и за источник
+     уезжает только его английский хвост — на сегодняшнем состоянии так выходит
+     у всех восьми. Заглушка ниже — последнее средство для вопроса, в котором
+     читателю не написано ни одного предложения; фактов, которые доска знала бы
+     о вопросе сверх его текста, у неё нет: чей это вопрос, уже сказано надписью
+     рядом.
+
+     Вопрос к человеку через эту границу не идёт: «что требуется лично от вас» —
+     первый вопрос доски, и ответ «вопрос записан не для этого экрана» отвечал бы
+     на него отказом. */
+  const asked = q.owner === "user"
+    ? { shown: human(q.text), full: null }
+    : said(q.text, "вопрос записан не для этого экрана — целиком в источнике");
+  name.className = "name fold"; name.textContent = asked.shown;
+  head.appendChild(num); head.appendChild(name);
+  node.appendChild(head);
+  const row = document.createElement("div");
+  row.className = "row";
+  const sources = [["Вопрос", "раздел «Открытые вопросы» в content/products/" + q.product + "/snapshot.md"]];
+  if (asked.full) sources.push(["Вопрос, как записан", asked.full]);
+  row.appendChild(tag("вопрос продукта " + q.product));
+  /* When it went out, through what, and with which message. This is the whole
+     of the rule: an area that tells a person they are blocking work has to show
+     what put the question in front of them, and the date and the message are
+     what a reader checks it by. */
+  if (q.asked_at) {
+    const when = tag("спрошено " + q.asked_at + " · " +
+      (q.channel === "email" ? "письмо " : "Telegram ") + q.ref);
+    if (q.asked_src) sources.push(["Спрошено", q.asked_src]);
+    row.appendChild(when);
+  }
+  node.appendChild(row);
+  const bits = [];
+  if (q.answer_src) bits.push("ответ: " + q.answer_src);
+  if (q.note) bits.push(q.note);
+  if (bits.length) {
+    const note = document.createElement("div");
+    note.className = "asked prov"; note.textContent = bits.join(" · ");
+    node.appendChild(note);
+  }
+  sourceNote(node, sources);
+  return node;
+}
+
+function promiseNode(q) {
+  const node = document.createElement("div");
+  node.className = "plate p-plan q";
+  const head = document.createElement("div");
+  head.className = "head";
+  const num = document.createElement("span");
+  num.className = "num"; num.textContent = "•";
+  const name = document.createElement("span");
+  name.className = "name fold"; name.textContent = human(q.text);
+  head.appendChild(num); head.appendChild(name);
+  node.appendChild(head);
+  const row = document.createElement("div");
+  row.className = "row";
+  row.appendChild(tag("«В работе» продукта " + q.product));
+  /* What the line is claimed to be, in the words the observation supports. «Связь
+     с задачей не установлена» is a statement about a comparison that failed;
+     «задачи нет» would be a statement about the world, and the previous version
+     made it on evidence that could not carry it. The comparison itself hangs on
+     the same line, so the reader can check the verdict instead of trusting it. */
+  row.appendChild(tag("связь с задачей не установлена"));
+  node.appendChild(row);
+  sourceNote(node, [["Строка", "раздел «В работе» в content/products/" + q.product + "/snapshot.md"],
+                    ["Сверка", q.checked]]);
+  return node;
+}
+
+function channelsNode(panel) {
+  const node = document.createElement("div");
+  const shut = isShut(panel.key, "chan", true);
+  node.className = "chan" + (shut ? " shut" : "");
+
+  /* The summary carries what a folded block must not hide: a repository with
+     uncommitted or unpushed work is work that exists and is invisible in prose,
+     which is one of the things the board is for. */
+  const dirty = panel.repos.filter(r => r.tracked_dirty || r.unpushed);
+  const sum = document.createElement("button");
+  sum.className = "sum";
+  sum.textContent = "Репозитории и связь: " + panel.repos.length;
+  if (dirty.length) {
+    const warn = document.createElement("span");
+    warn.className = "warn";
+    warn.textContent = " — не опубликовано в " + dirty.length +
+      (dirty.length === 1 ? " репозитории" : " репозиториях");
+    sum.appendChild(warn);
+  }
+  asFolder(sum, shut, () => {
+    const now = !node.classList.contains("shut");
+    node.classList.toggle("shut", now);
+    sessionStorage.setItem(shutKey(panel.key, "chan"), now ? "1" : "0");
+    return now;
+  });
+  node.appendChild(sum);
+
+  const body = document.createElement("div");
+  body.className = "body";
+  const names = { telegram: "Telegram", email: "Почта продакта", git: "Git" };
+  const out = [];
+  for (const c of panel.channels) {
+    out.push(names[c.channel] + (c.direction === "in" ? " входящих " : " исходящих ") + c.count);
+  }
+  if (out.length) {
+    const line = document.createElement("div");
+    line.textContent = "Связь: " + out.join(" · ");
+    body.appendChild(line);
+  }
+  /* Commits and pushes at the level of the product, not the task: nothing on
+     disk ties a commit to a task number, so no such tie is drawn. */
+  for (const repo of panel.repos) {
+    const line = document.createElement("div");
+    const head = document.createElement("b");
+    head.textContent = repo.name;
+    line.appendChild(head);
+    line.appendChild(document.createTextNode(" " + (repo.branch || "?") + " · " +
+      (repo.head || "?") + " · " + (repo.head_subject || "")));
+    if (repo.tracked_dirty || repo.unpushed) {
+      const warn = document.createElement("span");
+      warn.className = "warn";
+      const bits = [];
+      if (repo.tracked_dirty) bits.push("незакоммичено " + repo.tracked_dirty);
+      if (repo.unpushed) bits.push("не отправлено " + repo.unpushed);
+      warn.textContent = " — " + bits.join(", ");
+      line.appendChild(warn);
+    }
+    body.appendChild(line);
+  }
+  node.appendChild(body);
+  return node;
+}
+
+function stripItem(p, cls) {
+  const s = document.createElement("span");
+  s.className = "item " + cls;
+  /* Направление — первым словом самой строки, а не подсказкой: «что идёт прямо
+     сейчас» спрошено вместе с направлением, задачей, автором и возрастом. */
+  const bits = [];
+  if (p.thread) bits.push(p.thread + " ·");
+  bits.push("#" + p.id, human(p.title));
+  if (p.actor) bits.push("— " + p.actor);
+  if (p.role) bits.push("(" + (ROLE_RU[p.role] || p.role) + ")");
+  const age = ago(ageOf(p));
+  if (age) bits.push("· " + age);
+  s.textContent = bits.join(" ");
+  /* The jam is named on the first screen, so its reason has to be there too:
+     «где затор» without «почему» is two thirds of an acceptance question. The
+     text is shown as its own span and in full, so it is read rather than
+     hovered over or cut. The observed reason and a live child's activity line
+     are two different facts — as they are on the plate — so they keep two
+     classes: `.why` carries a paired source and `.doing` does not. */
+  const why = p.why || p.happening;
+  const reason = said(why, p.why
+    ? insteadOfWords(p, "в источнике")
+    : "исполнитель пишет о ходе работы себе — строка целиком в источнике");
+  if (why) foldable(s, p.why ? "why" : "doing", " — " + reason.shown, "span");
+  /* The direction this item belongs to and what observed its reason. Both used
+     to be `title`, which is to say neither existed on a phone. */
+  sourceNote(s, [["Направление", p.thread],
+                 [p.why ? "Почему" : "Что делает",
+                  p.why ? p.why_src : "строка progress.json ребёнка"],
+                 [p.why ? "Почему, как записано" : "Строка исполнителя", reason.full]]);
+  return s;
+}
+
+/* The headline of the whole board: what the user still owes, what it is made of,
+   and what we owe ourselves. The two numbers stand together because the split
+   between them is the point — a number that merely got smaller would read as
+   questions having been thrown away. */
+function waitingGroup(board) {
+  const grp = document.createElement("div");
+  grp.className = "grp";
+  const lbl = document.createElement("span");
+  /* Единственная строка доски, обращённая к человеку. Она была набрана серым,
+     тем же весом, что и всё остальное, и склеена с нашим внутренним «решает
+     продакт: 19» — то есть читалась как ещё одна служебная надпись. */
+  lbl.className = "lbl you"; lbl.textContent = "Требуется от вас";
+  const n = document.createElement("span");
+  n.className = board.waiting ? "ask you" : "none";
+  /* The number, and what it is made of. A single figure nobody could take apart
+     is what let thirteen wrong entries stand as an answer; split by source, a
+     reader can check it against the first area of the columns below. */
+  const parts = [];
+  if (board.waiting_tasks) parts.push(board.waiting_tasks + " в задачах");
+  if (board.waiting_questions) parts.push(board.waiting_questions + " вопросов продуктов");
+  n.textContent = board.waiting
+    ? board.waiting + " — " + parts.join(" и ") + ", первой областью в колонках ниже"
+    : "ничего: всё, что спрашивали у вас, отвечено";
+  grp.appendChild(lbl); grp.appendChild(n);
+  /* Нерешённое продактом — работа продакта, а не долг человека: приклеенное к
+     его строке, оно читалось как его. Уходит за переключатель источников; сами
+     вопросы стоят областью «Решает продакт» в колонках. */
+  const ours = document.createElement("span");
+  ours.className = (board.ours ? "ours" : "none") + " prov";
+  ours.textContent = board.ours
+    ? "· решает продакт: " + board.ours + ", своей областью в колонках"
+    : "· у продакта нерешённого нет";
+  grp.appendChild(ours);
+  return grp;
+}
+
+function drawStrip(board) {
+  const strip = el("strip");
+  strip.textContent = "";
+  /* Полоса отвечает на три вопроса из четырёх: что идёт прямо сейчас, что стоит
+     и почему, что требуется лично от вас. Четвёртый — по направлениям — в
+     колонках, которые теперь стоят сразу под ней.
+
+     «Что подхватить» убрано: это наш список дел, запустить оттуда пользователь
+     ничего не может. Сам список остался областью «Можно подхватить» в колонке.
+     Пустая группа «Сделано, но не доставлено» не рисуется: строка, сообщающая,
+     что сообщать нечего, занимает место ответа. */
+  const groups = [
+    ["Кто работает сейчас", board.now, "who",
+     "никто: живого прогона нет ни в одном направлении — почему, сказано в каждой "
+     + "колонке ниже", board.now_hidden, true],
+    ["Где затор", board.jams, "jam", "заторов нет", board.jams_hidden, true],
+    /* Finished work whose result nobody was shown. It is on the strip because
+       that is the only place it would have been noticed: 783 finished at 16:14
+       and its 441 KB report lay on the server for an hour, behind two receipts
+       that both spoke about the life of the run. */
+    ["Сделано, но не доставлено", board.undelivered, "undelivered",
+     "", board.undelivered_hidden, false],
+  ];
+  /* The headline stands first, before the names. It is the question that made
+     this board wrong — sixteen entries of which the user owned three — so it is
+     the one line that must be читаемо without scrolling anything, including on a
+     390-wide screen where the strip is several lines tall. */
+  strip.appendChild(waitingGroup(board));
+  for (const [label, items, cls, empty, hidden, whenEmpty] of groups) {
+    if (!items.length && !whenEmpty) continue;
+    const grp = document.createElement("div");
+    grp.className = "grp";
+    const lbl = document.createElement("span");
+    lbl.className = "lbl"; lbl.textContent = label;
+    grp.appendChild(lbl);
+    if (!items.length) {
+      const none = document.createElement("span");
+      none.className = "none"; none.textContent = empty;
+      grp.appendChild(none);
+    }
+    for (const p of items) grp.appendChild(stripItem(p, cls));
+    /* The strip shows as many names as fit with their reason whole, so what it
+       did not take has to be counted here: a cap nobody can see reads as
+       «показано всё», and the rest stands in the columns below. */
+    if (hidden > 0) {
+      const more = document.createElement("span");
+      more.className = "more";
+      more.textContent = "ещё " + hidden + " — в колонках ниже";
+      grp.appendChild(more);
+    }
+    strip.appendChild(grp);
+  }
+  /* Второй разбуженный продакт. Две пары задач-двойников за час — 790/792 и
+     791/793 — были заведены потому, что продакт в консоли и продакт, разбуженный
+     таймером, не видели очередей друг друга, поэтому запись остаётся. Но
+     адресована она агенту, а не человеку («сверьтесь с его очередью, прежде чем
+     заводить задачу»), и на первом экране стоит за переключателем источников. */
+  const awake = board.owners_awake || [];
+  const mine = document.createElement("div");
+  mine.className = "grp prov";
+  const ml = document.createElement("span");
+  ml.className = "lbl"; ml.textContent = "Другой я";
+  mine.appendChild(ml);
+  if (!awake.length) {
+    const none = document.createElement("span");
+    none.className = "none";
+    none.textContent = "никто больше не разбужен";
+    mine.appendChild(none);
+  }
+  for (const owner of awake) {
+    const s = document.createElement("span");
+    s.className = "item jam";
+    const age = ago(ageOf({ since: owner.since, age_seconds: owner.age_seconds }));
+    const who = owner.kind === "tick"
+      ? "фоновое пробуждение треда «" + (owner.thread || "?") + "»"
+      : owner.kind === "mail" ? "почтовое пробуждение продакта"
+      : owner.kind === "woken" ? "продакт, разбуженный тиком" : "продакт в консоли";
+    const trees = (owner.worktrees || []).map(path => path.split("/").pop()).join(", ");
+    /* Awake and deciding are two different states, and only the second one is a
+       reason to hold back. A window left open used to read here as «сверьтесь с
+       его очередью», which is advice to wait for somebody who is not there. */
+    const idle = owner.activity && owner.activity.active === false;
+    s.textContent = who + (age ? " · " + age : "")
+      + (trees ? " · может занять " + trees : " · рабочее дерево не названо")
+      + (idle ? " — решение в нём не принимается: работа ему уже передана"
+              : " — сверьтесь с его очередью, прежде чем заводить задачу");
+    s.title = "наблюдено: " + owner.src
+      + (owner.activity ? "; " + owner.activity.src : "");
+    mine.appendChild(s);
+  }
+  strip.appendChild(mine);
+}
+
+/* ---------- состояние направления одной строкой ----------
+   Вопрос письма дословно: «как быстро я могу понять статус по направлениям,
+   глядя на панель? Или для этого мне нужно вчитываться в прозу?». Здесь стояли
+   шесть равновесных чисел — «задач 228 · в работе 0 · ждёт пользователя 0 ·
+   решает продакт 8 · заторов 1 · не доставлено 0», — большинство нули.
+
+   Собирается из полей, которые сборщик уже отдаёт: области колонки, `startable`
+   (тот же предикат, которым считает пробуждение), причины простоя последней
+   проверки и слово плана на плашке. Ничего нового не наблюдается. Ею же отвечено
+   «что происходит, когда ни одна задача не в работе»: пусто здесь не бывает,
+   вместо нуля стоит причина и ближайший следующий шаг. */
+function areaOf(panel, key) {
+  return panel.areas.find(a => a.key === key) || { count: 0, plates: [], hidden: 0 };
+}
+
+/* Ближайшая работа направления, в порядке, в котором её берут: очередь плана,
+   готовое к запуску, свободное, задержанное словом плана. */
+const NEXT_RU = { queued: "дальше по плану", ready_to_start: "готово к запуску",
+                  pickup: "можно подхватить", backlog: "в бэклоге" };
+
+function stateNode(panel) {
+  const node = document.createElement("div");
+  node.className = "state";
+  const running = areaOf(panel, "running");
+  const waiting = areaOf(panel, "waiting_human");
+  const stuck = areaOf(panel, "stuck");
+  const backlog = areaOf(panel, "backlog");
+  const queued = areaOf(panel, "queued");
+
+  /* Порядок ветвей — порядок важности для человека, а не порядок областей.
+     «Простаивает» стоит выше «стоит»: простой при доступной работе — дефект
+     контура, а затор при этом называется строкой ниже. */
+  let mark = "свободно", cls = "free", what = "незакрытых работ у направления нет";
+  let why = "";
+  if (running.count) {
+    mark = "идёт"; cls = "live";
+    what = running.plates.map(p => "#" + p.id + " " + human(p.title)
+      + (p.actor ? " — " + p.actor : "")
+      + (ago(ageOf(p)) ? " · " + ago(ageOf(p)) : "")).join("; ")
+      + (running.hidden ? " и ещё " + running.hidden : "");
+  } else if (waiting.count) {
+    mark = "ждёт вашего решения"; cls = "ask";
+    what = "вопросов: " + waiting.count + " — первой областью ниже";
+  } else if (panel.startable) {
+    mark = "простаивает"; cls = "idle";
+    /* «К запуску 9» рядом с областью «Готово к запуску 0» читалось
+       противоречием, а считают они разное: область — задачи с выполненным
+       условием запуска, это число — всё, что вообще ничем не держится. Стоит
+       оно теперь в одном месте колонки: под кнопкой печаталось то же самое. */
+    what = "живых прогонов нет, а ничто не держит задач: " + panel.startable;
+  } else if (backlog.count) {
+    mark = "на паузе"; cls = "hold";
+    what = "работу держит слово в плане, запускать нечего";
+    const place = backlog.plates[0] && backlog.plates[0].plan_place;
+    if (place && place.line) why = human(place.line);
+  } else if (queued.count) {
+    mark = "стоит в очереди"; cls = "hold";
+    what = "всё, что стоит, чем-то занято, и начать нечего";
+    const first = queued.plates[0];
+    if (first && first.why) {
+      why = "#" + first.id + " — "
+        + said(first.why, insteadOfWords(first, "на плашке ниже")).shown;
+    }
+  } else if (stuck.count) {
+    mark = "стоит"; cls = "stuck"; what = "заторов: " + stuck.count;
+  }
+  /* Затор называется при любом слове состояния, кроме идущей работы: это и есть
+     «что стоит и почему», второй вопрос пользователя. */
+  const jam = stuck.plates[0];
+  if (!running.count && jam) {
+    /* Причина затора — чаще всего вердикт проверяющего или список непройденных
+       гейтов, и написаны они не читателю. Решается это до склейки: в собранной
+       строке латиница уже утонула бы в русском начале и осталась бы на экране. */
+    const reason = said(jam.why, insteadOfWords(jam, "на плашке ниже"));
+    why = (why ? why + ". " : "") + "заторов: " + stuck.count + ", старший — #"
+      + jam.id + " " + human(jam.title) + (jam.why ? ": " + reason.shown : "");
+  }
+  const line = document.createElement("div");
+  const word = document.createElement("span");
+  word.className = "mark " + cls; word.textContent = mark;
+  const rest = document.createElement("span");
+  rest.className = "what"; rest.textContent = ": " + what;
+  line.appendChild(word); line.appendChild(rest);
+  node.appendChild(line);
+
+  /* Причины: наблюдаемая по областям, потом названные последней проверкой —
+     «занят другой продакт», «занято рабочее дерево», «исчерпан бюджет», «ждём
+     ответа пользователя». Это те слова, которых пользователь просил вместо нуля.
+     Направление, стоящее без наблюдаемой причины, — его жалоба, сделанная
+     видимой, и оно не становится ещё одной серой строкой (`alarm`). */
+  const whys = why ? [{ text: why, code: null, src: null }] : [];
+  if (!running.count) for (const reason of idleReasons(panel.check)) whys.push(reason);
+  for (const reason of whys) {
+    foldable(node, "why" + (reason.code === "none_observed" ? " alarm" : ""),
+             human(reason.text));
+    if (reason.src) {
+      const src = document.createElement("div");
+      src.className = "why prov"; src.textContent = "наблюдено: " + reason.src;
+      node.appendChild(src);
+    }
+  }
+
+  /* И ближайшая работа: «что дальше по каждому направлению». */
+  const next = document.createElement("span");
+  next.className = "next";
+  next.textContent = "дальше по этому направлению ничего не стоит";
+  for (const key of Object.keys(NEXT_RU)) {
+    const plate = areaOf(panel, key).plates[0];
+    if (!plate) continue;
+    next.textContent = NEXT_RU[key] + ": ";
+    const name = document.createElement("b");
+    name.textContent = "#" + plate.id + " " + human(plate.title);
+    next.appendChild(name);
+    break;
+  }
+  node.appendChild(next);
+  return node;
+}
+
+/* Сколько областей колонки пусты и какие. Один ответ вместо тридцати пяти
+   заголовков со словом «пусто». */
+function voidsNode(panel) {
+  const empty = panel.areas.filter(a => !a.count);
+  if (!empty.length) return null;
+  const node = document.createElement("div");
+  foldable(node, "voids", "пусто в " + empty.length + " областях: "
+    + empty.map(a => a.title.toLocaleLowerCase("ru-RU")).join(", "));
+  return node;
+}
+
+/* When the owner of this direction looks next, when it looked last and what came
+   of that look. The user's question in their own words: «панель показывает, что
+   в работе ничего нет… тогда почему ничего не делаешь?» — a board that shows a
+   column of zeros and never says when anybody last checked leaves that question
+   with nowhere to go.
+
+   Every value about the last check is what the tick wrote into
+   `state/threads/<тред>.json` at the moment of that check; the next check is
+   what systemd reported while this document was being collected. Nothing here
+   is the prose of a woken agent, and nothing is recomputed by the page: the
+   outcome is the difference between the live runs the tick saw before waking
+   the owner and the ones it saw after. */
+function checkNode(check, nextCheck) {
+  const node = document.createElement("div");
+  node.className = "check";
+
+  /* The next check is drawn even when no tick has ever run for this direction:
+     the two answers come from two different observations, and «проверок ещё не
+     было» says nothing about when the timer fires. */
+  if (nextCheck) {
+    const next = document.createElement("span");
+    next.className = "next";
+    next.textContent = nextCheck.at
+      ? "следующая проверка " + stamp(nextCheck.at)
+      : "когда следующая проверка — неизвестно";
+    next.title = "наблюдено: " + nextCheck.src;
+    node.appendChild(next);
+    /* With no time, the observation that came instead of one is the whole
+       answer, so it is printed as text rather than hidden in the tooltip
+       above — on a touch screen that tooltip does not exist. Внутренности
+       планировщика при этом остаются внутренностями: за переключателем. */
+    if (!nextCheck.at) {
+      const why = document.createElement("span");
+      why.className = "nextwhy prov";
+      why.textContent = "наблюдено: " + nextCheck.src;
+      node.appendChild(why);
+    }
+  }
+
+  if (!check) {
+    const none = document.createElement("span");
+    none.className = "last";
+    none.textContent = "проверок этого направления ещё не было";
+    node.appendChild(none);
+    if (!nextCheck) node.classList.add("none");
+    return node;
+  }
+
+  const last = foldable(node, "last",
+    "прошлая " + stamp(check.at) + " — " + human(check.outcome), "span");
+  last.title = "наблюдено: " + check.outcome_src + "; " + check.src;
+
+  /* Причины простоя этой проверки стоят не здесь, а в строке состояния над ней:
+     «почему стоит» — один вопрос, и отвечать на него в двух местах колонки
+     значит писать один ответ дважды. Правило отбора переехало вместе с ними. */
+  return node;
+}
+
+/* Причины простоя последней проверки и правило, по которому они что-то
+   объясняют: направление, запустившее три задачи, оправдываться не обязано, а
+   проверка, которая ещё идёт (`started === null`), ничего не решила. */
+function idleReasons(check) {
+  if (!check) return [];
+  const idle = !check.queue.live && (check.queue.pickup + check.queue.ready + check.queue.decided);
+  if (!idle || !Array.isArray(check.started) || check.started.length) return [];
+  return check.reasons || [];
+}
+
+/* ---------- «продолжить сейчас» ----------
+   The twenty-minute timer stays the safety net; this is the way to say «работа
+   кончилась, посмотри сейчас» without waiting for it. The request goes to the
+   board's own server, which starts `product-thread@<тред>.service` — the same
+   unit the timer starts. So a second click, and a firing of the timer in the
+   same minute, are one check: systemd runs one instance of a unit, and no
+   queue, lock or supervisor of ours stands in for that.
+
+   What the button does *not* do is start a task. It wakes the owner, which
+   reads the plan and decides, exactly as it does at any other wake-up.
+
+   Which check a person asked for is remembered here only long enough to say
+   «запрос принят»; whether one is running is read from the snapshot, so a
+   reload answers it too. */
+const asked = new Map();
+
+function continueNode(panel) {
+  const node = document.createElement("div");
+  node.className = "continue";
+  /* A recording has no server to ask, so it says so instead of showing a control
+     that cannot do anything: every call to the server on this page lives in one
+     place — the live-mode section at the very bottom. */
+  if (!DATA.live_url) {
+    const said = document.createElement("span");
+    said.className = "said";
+    said.textContent = "«Продолжить сейчас» работает на живой доске; это снимок,"
+      + " и сервера у него нет";
+    node.appendChild(said);
+    return node;
+  }
+  const wake = panel.wake || {};
+  const running = wake.running === true;
+  /* «Запрос принят» is said until the check it asked for has been recorded, and
+     then it goes: from that moment the line above answers the same question
+     better, with what the check actually came to. */
+  const answered = asked.get(panel.key);
+  if (answered && !answered.pending && panel.check
+      && Date.parse(panel.check.at) > answered.at) asked.delete(panel.key);
+  const request = asked.get(panel.key);
+  /* Кнопка стоит в каждой колонке и в любом состоянии. Она рисовалась при
+     `!panel.live && panel.startable > 0`, то есть ровно в одной колонке из
+     четырёх: кнопки «Продолжить» там нет — слово пользователя. Условие снято
+     целиком. Нажатие ничего не запускает — оно будит владельца направления,
+     который читает план и решает, — а значит осмысленно и при живом прогоне, и
+     когда к запуску ноль. Что наблюдается сейчас, говорит строка рядом. */
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "primary";
+  button.textContent = "Продолжить сейчас";
+  /* Выключена, только пока эту проверку и правда просят: идущая проверка и свой
+     неотвеченный запрос. Отказ кнопку не выключает — иначе единственный орган
+     управления доски неотличим от сломанного. */
+  button.disabled = running || (request && (request.pending || request.accepted));
+  button.addEventListener("click", () => askToContinue(panel.key));
+  node.appendChild(button);
+
+  const said = document.createElement("span");
+  said.className = "said";
+  if (running) {
+    said.textContent = "проверка идёт: продакт смотрит состояние";
+    said.title = "наблюдено: " + wake.src;
+  } else if (request) {
+    said.textContent = request.text;
+    /* Что ответил сервер на самом деле — рядом, за общим переключателем. */
+    if (request.detail) {
+      const detail = document.createElement("span");
+      detail.className = "prov";
+      detail.textContent = " · ответ сервера: " + request.detail;
+      said.appendChild(detail);
+    }
+  } else if (wake.running === null) {
+    /* Not «проверка не идёт»: nobody was there to ask. The button stays, and
+       the answer to a press will say what happened. */
+    said.textContent = "идёт ли проверка — неизвестно";
+    said.title = "наблюдено: " + wake.src;
+  } else if (panel.live) {
+    said.textContent = "прогон идёт; нажатие попросит продакта посмотреть состояние сейчас";
+  } else if (!panel.startable) {
+    /* Прежде кнопки здесь просто не было, а молчащий орган управления неотличим
+       от сломанного. Чего не хватает — сказано, и нажатие всё равно будит. */
+    said.textContent = "начинать нечего: свободных задач у направления нет — "
+      + "нажатие всё равно разбудит продакта";
+  } else {
+    /* Что стоит и почему, колонка уже сказала строкой состояния наверху: там же
+       стояло «простаивает: живых прогонов нет, а ничто не держит задач: 10», и
+       здесь оно печаталось во второй раз. У кнопки свой вопрос — что сделает
+       нажатие, — и отвечает она теперь только на него. */
+    said.textContent = "нажатие попросит продакта посмотреть состояние сейчас";
+  }
+  node.appendChild(said);
+  return node;
+}
+
+/* The durable goals of one direction: what was promised to the user, where it
+   is not converging, which task is the main one and which repair it is waiting
+   on. Every line is printed as the store holds it — the board paraphrases a
+   promise no more than it paraphrases an observation.
+
+   Пересказывать их доска не будет: текст стоит как записан, но свёрнут до трёх
+   строк. Колонка Продукт выводила полторы тысячи знаков прозы цели с путями файлов
+   и `journalctl` — это ровно то «вчитываться в прозу», о котором письмо. */
+function goalsNode(goals) {
+  if (!goals || !goals.length) return null;
+  const wrap = document.createElement("div");
+  wrap.className = "goals";
+  for (const goal of goals) {
+    const node = document.createElement("div");
+    node.className = "goal";
+    node.title = "наблюдено: " + goal.src;
+
+    const head = foldable(node, "head", "цель " + goal.id + " — " + human(goal.outcome));
+    if (goal.control === "reinforced") {
+      const mode = document.createElement("span");
+      mode.className = "mode";
+      /* Named in the head rather than hidden in a tooltip: the whole point of
+         the mode is that turning it on is visible without asking anybody. */
+      mode.textContent = " · усиленный контроль";
+      mode.title = goal.signals.map(s => s.text + " (" + s.src + ")").join("; ");
+      head.appendChild(mode);
+    }
+
+    /* Что обещано — в шапке колонки, а как оно идёт — под складкой: разрыв,
+       основная задача, корректирующие и следующий переход отвечают на вопрос
+       «как мы к этому идём», и это не тот вопрос, за которым открывают доску. */
+    const shut = isShut("goal", goal.id, true);
+    const rest = document.createElement("div");
+    rest.className = "rest" + (shut ? " shut" : "");
+    const open = document.createElement("button");
+    open.className = "foldbtn";
+    open.textContent = shut ? "как идёт цель" : "свернуть цель";
+    asFolder(open, shut, () => {
+      const now = !rest.classList.contains("shut");
+      rest.classList.toggle("shut", now);
+      open.textContent = now ? "как идёт цель" : "свернуть цель";
+      sessionStorage.setItem(shutKey("goal", goal.id), now ? "1" : "0");
+      return now;
+    });
+    node.appendChild(open);
+    node.appendChild(rest);
+
+    foldable(rest, "gap", "ближайший разрыв: " + human(goal.gap || "не назван"));
+
+    const main = document.createElement("div");
+    main.className = "line";
+    main.textContent = "основная задача " + goal.main_task +
+      (goal.state === "paused" ? " — на паузе" : "");
+    rest.appendChild(main);
+
+    if (goal.pause) {
+      foldable(rest, "line", "пауза: " + human(goal.pause.reason))
+        .title = "наблюдено: " + goal.pause.src;
+    }
+    for (const item of goal.correctives) {
+      /* Accepted is shown, not dropped: a closed repair is exactly the point at
+         which the chain used to stop, and the next line says what comes after
+         it. */
+      foldable(rest, item.accepted ? "done" : "line", "корректирующая " + item.task +
+        (item.accepted ? " принята" : " в работе") + ": " + human(item.effect))
+        .title = "возврат к основной задаче: " + item.return_criterion;
+    }
+    if (goal.next_transition) {
+      foldable(rest, "line", "следующий переход: " + human(goal.next_transition));
+    }
+    wrap.appendChild(node);
+  }
+  return wrap;
+}
+
+/* Кто ведёт цели этого направления прямо сейчас. Пока строка говорит «сессия
+   ведёт», двадцатиминутный тик сознательно не поднимает второго продакта, —
+   поэтому она стоит рядом с целями, а не в подсказке, и всегда называет, чем
+   живость наблюдена. */
+function goalSessionNode(session) {
+  if (!session) return null;
+  const node = document.createElement("div");
+  node.className = "goal";
+  node.title = "наблюдено: " + session.src;
+  const head = document.createElement("div");
+  head.className = "head";
+  head.textContent = session.live
+    ? "цели ведёт непрерывная сессия · ходов " + session.turns
+    : "непрерывной сессии нет — ведёт двадцатиминутный тик";
+  node.appendChild(head);
+  const why = document.createElement("div");
+  /* Чем наблюдена живость сессии — то же «наблюдено», что и всюду: за общим
+     переключателем. Сам факт, ведёт цели сессия или тик, остаётся на экране. */
+  why.className = (session.live ? "line" : "gap") + " prov";
+  why.textContent = session.reason;
+  node.appendChild(why);
+  if (session.last_turn_at) {
+    const last = document.createElement("div");
+    last.className = "line prov";
+    last.textContent = "последний ход " + session.last_turn_at.slice(11, 16) +
+      " UTC · реакция " + session.last_turn_reaction_seconds + " с" +
+      (session.recovered ? " · сессия восстановлена watchdog'ом" : "");
+    node.appendChild(last);
+  }
+  return node;
+}
+
+/* ---------- очередь и бэклог: то, что установил план ----------
+   Наблюдение очереди не знает: `planned` — это статус, а не место в очереди, и
+   план говорит это сам. Пока доска выводила порядок из наблюдения, она называла
+   очередью не то, что установлено, а «Надо запланировать» стояло пустым по
+   построению. Здесь показывается прочитанная редакция: строки в её порядке, за
+   каждой — задачи, которые в ней названы, и рядом то, что наблюдение видит на
+   самом деле. */
+const AREA_SEEN = {
+  running: ["идёт сейчас", "live"], done: ["сделано", "done"],
+  undelivered: ["сделано, но не доставлено", "done"],
+  stuck: ["затор", "stuck"], waiting_human: ["ждёт решения пользователя", "stuck"],
+  queued: ["в очереди", ""], pickup: ["можно подхватить", ""],
+  ready_to_start: ["готово к запуску", ""], backlog: ["в бэклоге", ""],
+  decision_unmet: ["решено, но не исполнено", "stuck"],
+  product_owner: ["решает продакт", ""],
+};
+
+/* Работы, которые строка называет, не будучи про них. Одной строкой и номерами:
+   предметом решается порядок очереди, а это — только оговорка «план о них тут
+   говорит», и раздел стоит над колонками, где каждая лишняя строка отнимает
+   экран у ответа. Название каждой стоит на её собственной плашке. */
+function planAlsoNode(tasks) {
+  const s = document.createElement("span");
+  /* «Также названы» — оговорка о том, что строка упоминает ещё какие-то номера.
+     Порядка очереди она не меняет и читателю очереди не нужна: это аппарат
+     сверки, и он уходит за общий переключатель источников вместе с ним. */
+  s.className = "item prov";
+  const mark = document.createElement("span");
+  mark.className = "num"; mark.textContent = "также названы: ";
+  s.appendChild(mark);
+  tasks.forEach((task, index) => {
+    const one = document.createElement("span");
+    one.className = "name";
+    one.textContent = (index ? ", " : "") + "#" + task.id;
+    s.appendChild(one);
+    const known = AREA_SEEN[task.area];
+    const seen = document.createElement("span");
+    seen.className = "seen" + (known && known[1] ? " " + known[1] : "");
+    seen.textContent = " (" + (known ? known[0]
+      : task.area ? task.area : "в направлениях доски не наблюдалась") + ")";
+    s.appendChild(seen);
+  });
+  return s;
+}
+
+function planTaskNode(task) {
+  const s = document.createElement("span");
+  s.className = "item";
+  const num = document.createElement("span");
+  num.className = "num"; num.textContent = "#" + task.id + " ";
+  const name = document.createElement("span");
+  name.className = "name"; name.textContent = human(task.title || "");
+  s.appendChild(num); s.appendChild(name);
+  /* Направление — на самой строке: очередь без него на «статус по
+     направлениям» не отвечает. */
+  if (task.thread) {
+    const where = document.createElement("span");
+    where.className = "seen"; where.textContent = " · " + task.thread;
+    s.appendChild(where);
+  }
+  /* Что видит наблюдение там, где план назвал место. Задача, которой доска не
+     наблюдала ни в одном направлении, так и говорит: «в направлениях доски не
+     наблюдалась» — это утверждение о том, что смотрели, а не о том, что её нет. */
+  const seen = document.createElement("span");
+  const known = AREA_SEEN[task.area];
+  seen.className = "seen" + (known && known[1] ? " " + known[1] : "");
+  seen.textContent = " — наблюдение: " + (known ? known[0]
+    : task.area ? task.area : "в направлениях доски не наблюдалась");
+  s.appendChild(seen);
+  return s;
+}
+
+function planRow(entry, position) {
+  const row = document.createElement("div");
+  const closed = entry.tasks.length
+    && entry.tasks.every(t => t.area === "done" || t.area === "undelivered");
+  row.className = "row" + (closed ? " closed" : "");
+  if (position) {
+    const pos = document.createElement("span");
+    pos.className = "pos"; pos.textContent = position + ".";
+    row.appendChild(pos);
+  }
+  const items = document.createElement("div");
+  items.className = "items";
+  for (const task of entry.tasks) items.appendChild(planTaskNode(task));
+  /* Строка, за которой задачи наблюсти не удалось, показывается целиком: её
+     содержание и есть вся запись. «Связь с задачей не установлена» — это
+     сверка, которая не сошлась, а не утверждение, что задачи нет. */
+  if (!entry.tasks.length) foldable(items, "free", human(entry.text), "span");
+  if ((entry.also || []).length) items.appendChild(planAlsoNode(entry.also));
+  if (!entry.tasks.length) {
+    const mark = document.createElement("span");
+    /* Разница честная и важная: строка без предмета, которая всё же называет
+       задачи, связана с ними упоминанием, и они перечислены выше. Сказать про
+       неё «связь с задачей не установлена» значило бы соврать в обе стороны.
+       Читателю очереди это ничего не решает: сверка уходит за переключатель. */
+    mark.className = "prov";
+    mark.appendChild(tag((entry.also || []).length
+      ? "предметом строки задача не названа; названные ею — выше"
+      : "связь с задачей не установлена"));
+    items.appendChild(mark);
+  }
+  /* Откуда запись бэклога взята — словами редакции, а не нашим выводом: «На
+     паузе» это поле плана, а «очередью не является» — слова самой строки. Тогда
+     строка, которая лежит в поле пауз и говорит, что пауза снята, читается как
+     устаревшая строка плана, а не как утверждение доски. */
+  if (entry.kind) {
+    const where = document.createElement("span");
+    where.appendChild(tag(entry.field === "paused"
+      ? "стоит в «На паузе» плана"
+      : "строка плана говорит: очередью не является"));
+    items.appendChild(where);
+  }
+  sourceNote(items, [["Строка плана", entry.text],
+                     ["Поле редакции", entry.field], ["Сверка", entry.checked]]);
+  row.appendChild(items);
+  return row;
+}
+
+/* Сколько строк редакции группа показывает сразу. Сразу видна голова списка, то
+   есть ближайшее, а хвост складывается и называет своё число: молчаливая отсечка
+   читалась бы как «это весь план». Ни строки при этом не теряется. */
+const PLAN_ROWS_SHOWN = 4;
+
+/* Строка, каждая задача которой по наблюдению закрыта: в очереди ей не место,
+   две из четырёх видимых занимали её верх. Строка не исчезает — уходит в тот же
+   раскрываемый хвост, и место в редакции за ней сохраняется. */
+function planDone(entry) {
+  return entry.tasks.length
+    && entry.tasks.every(t => t.area === "done" || t.area === "undelivered");
+}
+
+function planGroup(label, owner, entries, empty, numbered) {
+  const grp = document.createElement("div");
+  grp.className = "grp";
+  const lbl = document.createElement("span");
+  lbl.className = "lbl"; lbl.textContent = label;
+  grp.appendChild(lbl);
+  if (owner) {
+    const who = document.createElement("div");
+    who.className = "owner"; who.textContent = owner;
+    grp.appendChild(who);
+  }
+  /* Место в очереди принадлежит редакции: строка, стоящая в плане пятой,
+     остаётся пятой и когда четвёртая уже сделана. */
+  const numbered_entries = entries.map((entry, index) => [entry, numbered ? index + 1 : 0]);
+  const open = numbered_entries.filter(([entry]) => !planDone(entry));
+  const rows = document.createElement("div");
+  rows.className = "rows";
+  if (!entries.length) {
+    const none = document.createElement("div");
+    none.className = "none"; none.textContent = empty;
+    rows.appendChild(none);
+  }
+  const shown = open.slice(0, PLAN_ROWS_SHOWN);
+  shown.forEach(([entry, position]) => rows.appendChild(planRow(entry, position)));
+  grp.appendChild(rows);
+
+  const rest = numbered_entries.filter(pair => !shown.includes(pair));
+  if (rest.length) {
+    /* Складка та же, что у областей: своё состояние она держит в том же
+       `sessionStorage`, поэтому раскрытый хвост переживает живое обновление и
+       страница не захлопывается под читающим. */
+    const shut = isShut("plan", label, true);
+    const tail = document.createElement("div");
+    tail.className = "rows" + (shut ? " shut" : "");
+    rest.forEach(([entry, position]) => tail.appendChild(planRow(entry, position)));
+    const more = document.createElement("button");
+    more.className = "more";
+    /* Кнопкой и словами: «ещё строк редакции: 19» серым мелким шрифтом читалось
+       сноской, и никто не понимал, что на неё жмут. */
+    more.textContent = shut ? "показать все " + entries.length : "свернуть";
+    asFolder(more, shut, () => {
+      const now = !tail.classList.contains("shut");
+      tail.classList.toggle("shut", now);
+      more.textContent = now ? "показать все " + entries.length : "свернуть";
+      sessionStorage.setItem(shutKey("plan", label), now ? "1" : "0");
+      return now;
+    });
+    grp.appendChild(more);
+    grp.appendChild(tail);
+  }
+  return grp;
+}
+
+function drawPlan(plan) {
+  const node = el("plan");
+  node.textContent = "";
+  if (!plan || plan.revision === null) {
+    /* «Плана нет» — честный ответ и единственный доступный: очередь не выводится
+       из статусов, и молчание владельца порядка догадкой не заменяется. */
+    const none = document.createElement("div");
+    none.className = "none";
+    none.textContent = "Портфельного плана нет: порядок работ не установлен, "
+      + "и доска его не выдумывает. Наблюдено: " + ((plan && plan.src) || "—");
+    node.appendChild(none);
+    return;
+  }
+  const owner = "владелец порядка — портфельный план, редакция " + plan.revision
+    + " от " + stamp(plan.accepted_at) + "; доска только читает его";
+  node.appendChild(planGroup("В очереди", owner, plan.queue,
+                             "очередь пуста: редакция не называет следующих работ", true));
+  /* Группа названа тем, что наблюдается, а не выводом: это строки редакции,
+     которыми план держит работу. Строка, которая лежит в поле пауз и при этом
+     говорит, что пауза снята, читается тогда как устаревшая строка плана — а
+     заголовок «разобрано, но на паузе» утверждал бы про неё паузу. Что задача от
+     такой строки действительно не запустится, видно в области «В бэклоге» в
+     колонках: туда попадает предмет держащей строки — и только он, — но не та
+     работа, которую та же редакция поставила в очередь. */
+  node.appendChild(planGroup("В бэклоге: план держит это своим словом",
+                             "поле «На паузе» редакции и строки, которые сами "
+                             + "говорят, что очередью не являются",
+                             plan.backlog, "нет: план ничего не держит", false));
+}
+
+/* Бэклог — строки плана, которые держат работу его собственными словами: в самой
+   строке сказано, чьим словом и когда. Раньше эта работа лежала под «можно
+   подхватить», то есть доска предлагала подхватить остановленное пользователем.
+
+   Второго вида — «неразобранного» — здесь нет. Им стояли задачи, которых просто
+   не называет текущая редакция, и круг 1 независимого ревью показал на 1091,
+   1093, 1130 и 1135, что все четыре разобраны в собственных task.md. Раздел
+   «сам не запустится» лгал бы о них дважды: они запускаются автоматом. Признака
+   разбора контур не наблюдает, выдумывать его нельзя, и постановщик снял
+   требование 2026-08-14: задача без строки плана наблюдается не как
+   неразобранная, а как неназванная. Что наблюдается на самом деле, стоит на
+   самой плашке словами «план о ней не говорит». */
+
+function drawBoard(board, snapshot) {
+  drawStrip(board);
+  drawPlan(board.plan);
+  const columns = el("columns");
+  columns.textContent = "";
+  for (const panel of board.panels) {
+    const col = document.createElement("div");
+    col.className = "col";
+
+    const head = document.createElement("div");
+    head.className = "colhead";
+    const h2 = document.createElement("h2");
+    h2.textContent = panel.title;
+    head.appendChild(h2);
+    /* Строка состояния вместо шести равновесных чисел, и «Продолжить сейчас»
+       сразу под ней: ради этого колонку читают, и оба на первом экране. Счёт
+       задач направления назван тем, что считает, и уехал за переключатель. */
+    head.appendChild(stateNode(panel));
+    const now = continueNode(panel);
+    if (now) head.appendChild(now);
+    const meta = document.createElement("div");
+    meta.className = "meta prov";
+    meta.textContent = "задач этого направления в каталоге за всё время: "
+      + panel.task_count + " — считает не то же, что счётчик вкладки «Задачи» "
+      + "(весь каталог) и не то же, что области ниже (незакрытая работа)";
+    head.appendChild(meta);
+    head.appendChild(checkNode(panel.check, panel.next_check));
+    const goals = goalsNode(panel.goals);
+    if (goals) head.appendChild(goals);
+    const session = goalSessionNode(panel.goal_session);
+    if (session) head.appendChild(session);
+    col.appendChild(head);
+
+    const body = document.createElement("div");
+    body.className = "colbody";
+    for (const area of panel.areas) {
+      if (area.count) body.appendChild(areaNode(panel, area));
+    }
+    const voids = voidsNode(panel);
+    if (voids) body.appendChild(voids);
+    col.appendChild(body);
+    col.appendChild(channelsNode(panel));
+    columns.appendChild(col);
+  }
+
+  drawHead(board);
+  drawFeed(DATA.timeline, DATA.timeline_total);
+  drawFoot(snapshot);
+  if (snapshot.mode === "demo") el("boardmode").textContent = "обезличено";
+  /* После отрисовки: нужна ли складка, видно только по измеренной высоте. */
+  settleFolds();
+}
+
+/* The topmost line of the board: when it was collected, how much is running,
+   and — only when there is any — what the user still owes an answer to.
+
+   It used to repeat every area count of every column: «в работе N · ждёт
+   решения пользователя N · решает продакт N · заторов N · …», seven numbers
+   standing above the same seven numbers. The user asked for the top of the
+   board to be the recent changes instead, and for this line to hold three
+   things only. The full breakdown did not go anywhere — it is in the columns
+   below, where each number stands next to the tasks it counts.
+
+   «В работе N» тоже ушло. Это был счёт без подлежащего, а тот же факт с именем
+   задачи, автором и возрастом стоит на двести пикселей ниже, в полосе-сводке:
+   два ответа на один вопрос, и худший из них первым. «Ждёт решения пользователя
+   N» осталось: оно единственное обращено к человеку, и полоса раскрывает его
+   тут же. Значок «живой режим» снят — режим наш, а не его. */
+function drawHead(board) {
+  const line = el("boardstate");
+  line.textContent = "";
+  const at = document.createElement("span");
+  at.className = "at";
+  at.textContent = "обновлено " + new Date(DATA.built_at).toLocaleTimeString("ru-RU");
+  line.appendChild(at);
+
+  /* Shown in red when there is anything, and absent altogether when there is
+     not. A zero next to «ждёт решения пользователя» is a debt that does not
+     exist, and the line is shorter without it. */
+  if (board.waiting) {
+    const waiting = document.createElement("span");
+    waiting.className = "count waiting";
+    waiting.textContent = "Ждёт решения пользователя " + board.waiting;
+    line.appendChild(waiting);
+  }
+}
+
+/* The feed above the columns: the last observed changes, freshest first.
+
+   Same records the scribe writes into `state/timeline.jsonl`, shown with the
+   instant each change was observed at — a file's mtime, a commit's date, the
+   timestamp of a pipeline event — and never with the moment the page drew it.
+   The renderer sends only the last few and says how many stayed on disk. */
+const KIND_RU = {
+  task_appeared: "новая задача", task_status: "смена статуса",
+  pipeline_event: "событие пайплайна", artifact: "артефакт",
+  activity: "работа идёт", commit: "коммит",
+  notification: "уведомление", mail: "письмо"
+};
+
+function drawFeed(records, total) {
+  const feed = el("feed");
+  feed.textContent = "";
+  const head = document.createElement("span");
+  head.className = "lbl";
+  /* «Показано 6 из 5878» обещало корпус, до которого с доски не добраться: то,
+     сколько записано в журнале, — факт о нашем журнале, и он за переключателем. */
+  head.textContent = "Последние изменения";
+  if (records.length) {
+    const all = document.createElement("span");
+    all.className = "prov";
+    all.textContent = " — показано " + records.length + " из " + total
+      + " записей журнала state/timeline.jsonl";
+    head.appendChild(all);
+  }
+  feed.appendChild(head);
+  if (!records.length) {
+    const none = document.createElement("span");
+    none.className = "none";
+    none.textContent = "лента пуста: наблюдений ещё не записано";
+    feed.appendChild(none);
+    return;
+  }
+  for (const record of records) {
+    const row = document.createElement("div");
+    row.className = "row";
+    const when = document.createElement("span");
+    when.className = "when";
+    /* The exact instant, to the second: «сколько времени назад» is what the
+       plates below already say, and a feed of five «минуту назад» in a row says
+       nothing about the order of what happened. */
+    when.textContent = stamp(record.at) || record.at;
+    const kind = document.createElement("span");
+    kind.className = "kind";
+    kind.textContent = ru(KIND_RU, record.kind);
+    const what = document.createElement("span");
+    what.className = "what";
+    /* Подпись записи — то, что написал о себе ребёнок; она бывает английской, и
+       лента — такой же текст для читателя, как всё остальное. */
+    const label = said(record.label, "запись сделана не для этого экрана — целиком в источнике");
+    what.textContent = label.shown;
+    row.appendChild(when); row.appendChild(kind); row.appendChild(what);
+    if (record.task_title) {
+      const number = String(record.task || "").match(/^(\d+)-/);
+      const task = document.createElement("span");
+      task.className = "task";
+      task.textContent = (number ? "#" + number[1] + " " : "") + human(record.task_title);
+      row.appendChild(task);
+    }
+    sourceNote(row, [["Наблюдено", record.observed_by],
+                     ["Направление", record.thread],
+                     ["Запись, как написана", label.full]]);
+    feed.appendChild(row);
+  }
+}
+
+/* Ревизия, на которой работает то, что человек читает. Служба держит свой Python
+   в памяти с момента запуска, а шаблон страницы читает с диска на каждый запрос:
+   14 августа из-за этого полчаса показывалась страница нового шаблона на старом
+   сборщике, и узнать это можно было только расследованием в systemd. Здесь стоят
+   обе ревизии, и расхождение видно глазами. */
+function drawFoot(snapshot) {
+  const rev = snapshot.revision || {};
+  const foot = el("foot");
+  foot.textContent = "Доска работает на ревизии " + (rev.running || "неизвестной");
+  if (rev.running && rev.disk && rev.running !== rev.disk) {
+    const warn = document.createElement("span");
+    warn.className = "warn";
+    warn.textContent = " — а в рабочем дереве уже " + rev.disk
+      + ": службу не перезапускали после коммита";
+    foot.appendChild(warn);
+  }
+  const src = document.createElement("span");
+  src.className = "prov";
+  src.textContent = " · наблюдено: " + (rev.src || "");
+  foot.appendChild(src);
+}
+
+/* The index owns only number, title and status. Cards come from task directories
+   in the initial document and survive light live polls; they never become index
+   data or a second browser-to-disk route. */
+function indexedFallback(item) {
+  return {
+    id: item.id, task: item.task, title: item.title, status: item.status,
+    status_detail: null, actor: null, actor_src: null, role: null, role_src: null,
+    happening: null, why: null, why_src: null, age_seconds: null, since: null,
+    since_src: null, alive: false, stale_label: false, attempt: 0, questions: [],
+    asked_user: [], our_questions: [], flags: [], blocked_by: null,
+    blocked_by_src: null, plan_place: null,
+    detail: { summary: "Задача появилась после загрузки списка; обновите страницу для подробностей.", review: null,
+              delivery: null, files: [], moved: null, moved_age_seconds: null,
+              moved_src: null, handoff: null, gates: [], dir: item.task,
+              runner: null, workflow: null, sandbox: null, state: null,
+              current_step: null, refusal: null, refusal_summary: null, repo: null,
+              progress: null, stop_reason: null, exit_code: null }
+  };
+}
+
+function boardPlate(task) {
+  return DATA.board.panels.flatMap(p => p.areas).flatMap(a => a.plates)
+    .find(p => p.task === task);
+}
+
+function openIndexedTask(item) {
+  openCard(boardPlate(item.task) || item.card || indexedFallback(item), false, "tasks");
+}
+
+function drawTaskIndex() {
+  const query = el("tasksearch").value.trim().toLocaleLowerCase("ru-RU");
+  const number = query.replace(/^#/, "");
+  const searchesNumber = number.length > 0 && /^\d+$/.test(number);
+  const all = DATA.snapshot.task_index || [];
+  const shown = all.filter(item => !query || (searchesNumber && String(item.id).includes(number))
+    || String(item.title).toLocaleLowerCase("ru-RU").includes(query));
+  const rows = el("taskrows");
+  rows.textContent = "";
+  for (const item of shown) {
+    const row = document.createElement("div");
+    row.className = "taskrow";
+    asButton(row, "Открыть детали задачи #" + item.id + ": " + item.title,
+             () => openIndexedTask(item));
+    const num = document.createElement("span");
+    num.className = "num"; num.textContent = "#" + item.id;
+    const name = document.createElement("span");
+    name.className = "name"; name.textContent = item.title;
+    const status = document.createElement("span");
+    status.className = "status"; status.textContent = ru(STATUS_RU, item.status) || "без статуса";
+    row.appendChild(num); row.appendChild(name); row.appendChild(status);
+    rows.appendChild(row);
+  }
+  if (!shown.length) {
+    const empty = document.createElement("div");
+    empty.id = "taskempty"; empty.textContent = "Ничего не найдено";
+    rows.appendChild(empty);
+  }
+  /* Число подписано тем, что считает: три разных числа задач без подписи
+     читаются как расхождение. */
+  el("taskcount").textContent = shown.length === all.length
+    ? "всего задач в каталоге: " + all.length
+    : "найдено " + shown.length + " из " + all.length;
+}
+
+el("tasksearch").addEventListener("input", drawTaskIndex);
+
+/* Redraw in place with a fresher document. Live mode used to call
+   `location.reload()`, which is fine for a picture and wrong for a tool: it
+   throws away the open card, the scroll position and the selection every ten
+   seconds, so a person reading a task would be interrupted mid-sentence by a
+   repository going dirty somewhere else. The board is rebuilt from the new
+   payload, the folded areas already survive through `sessionStorage`, and the
+   open card is reopened on the same task if that task is still there. */
+function applyFresh(fresh) {
+  const cards = new Map((DATA.snapshot.task_index || [])
+    .filter(item => item.card).map(item => [item.task, item.card]));
+  for (const item of fresh.snapshot.task_index || []) {
+    if (!item.card && cards.has(item.task)) item.card = cards.get(item.task);
+  }
+  DATA.snapshot = fresh.snapshot;
+  DATA.board = fresh.board;
+  DATA.timeline = fresh.timeline;
+  DATA.timeline_total = fresh.timeline_total;
+  DATA.built_at = fresh.built_at;
+  DATA.digest = fresh.digest;
+  const wanted = openTask;
+  /* The page is what scrolls now, so the place to keep is the page offset. It
+     used to be `#columns.scrollTop`, which is zero on a board that no longer
+     has a scrollbar of its own — a live refresh would have quietly sent every
+     reader back to the top. */
+  const scroll = wanted ? boardScroll : window.scrollY;
+  drawBoard(DATA.board, DATA.snapshot);
+  drawTaskIndex();
+  boardScroll = scroll;
+  if (!wanted) window.scrollTo(0, scroll);
+  if (wanted) {
+    const boardAgain = DATA.board.panels
+      .flatMap(p => p.areas).flatMap(a => a.plates)
+      .find(p => p.task === wanted);
+    const indexAgain = (DATA.snapshot.task_index || []).find(item => item.task === wanted);
+    const again = cardReturn === "board" ? boardAgain
+      : boardAgain || (indexAgain && (indexAgain.card || indexedFallback(indexAgain)));
+    /* A board card that left the board closes; an index card stays while its row
+       stays and reuses a fresher board card when one exists. Either way the card
+       that stays keeps the reader's page offset through the ten-second poll. */
+    if (again) openCard(again, true, cardReturn); else closeCard();
+  }
+}
+
+/* ---------- two screens ----------
+   The board and the searchable task index of 1054. The third one — the
+   isometric map with its own dark palette, its playhead and its own switch —
+   is gone with the switch itself (task 1067): «переключатели „Доска / Карта“
+   убраны и не занимают место». What it played back stays: the timeline is now
+   read by the feed above the columns. */
+let currentScreen = "board";
+function showBoard(on) {
+  if (on && openTask) closeCard();     // the card belongs to the board screen
+  currentScreen = on ? "board" : "tasks";
+  el("board").style.display = on ? "flex" : "none";
+  el("tasklist").style.display = on ? "none" : "flex";
+  el("card").style.display = "";
+  el("toboard").classList.toggle("on", on);
+  el("totasks").classList.toggle("on", !on);
+  el("toboard2").classList.toggle("on", on);
+  el("totasks2").classList.toggle("on", !on);
+  sessionStorage.setItem("screen", on ? "board" : "tasks");
+}
+function showTasks() {
+  if (openTask) closeCard();
+  showBoard(false);
+}
+el("toboard").addEventListener("click", () => showBoard(true));
+el("totasks").addEventListener("click", showTasks);
+el("toboard2").addEventListener("click", () => showBoard(true));
+el("totasks2").addEventListener("click", showTasks);
+
+/* Один переключатель на весь аппарат происхождения (`.prov` и правило выше).
+   Выключен по умолчанию, ничего не удалено; состояние живёт там же, где складки
+   областей, и переживает живое обновление, не сбрасываясь под читающим. */
+function showSources(on) {
+  document.body.classList.toggle("prov", on);
+  el("tosources").classList.toggle("on", on);
+  el("tosources").setAttribute("aria-pressed", on ? "true" : "false");
+  el("tosources").textContent = on ? "Скрыть источники" : "Показать источники";
+  sessionStorage.setItem("sources", on ? "1" : "0");
+}
+el("tosources").addEventListener("click",
+  () => showSources(!document.body.classList.contains("prov")));
+showSources(sessionStorage.getItem("sources") === "1");
+
+drawBoard(BOARD, SNAP);
+drawTaskIndex();
+setInterval(() => {
+  for (const node of document.querySelectorAll(".tag.age[data-since]")) {
+    const age = ago(ageOf({ since: node.dataset.since }));
+    if (age) node.textContent = ageCaption(age);
+  }
+}, 30000);
+showBoard(sessionStorage.getItem("screen") !== "tasks");
+
+/* Live mode: the same renderer, served with a fresh snapshot. A recording never
+   takes this branch — `file://` cannot fetch, and its data is already inside. */
+if (DATA.live_url) {
+  setInterval(async () => {
+    try {
+      const fresh = await (await fetch(DATA.live_url, { cache: "no-store" })).json();
+      /* The digest covers the whole shown document, not the length of the
+         timeline. A status change, a run that died, a repository gone dirty —
+         none of them append a record, and all of them have to reach the screen
+         (finding MEDIUM-1 of review 780). */
+      if (fresh.digest !== DATA.digest) applyFresh(fresh);
+    } catch (err) { /* server gone: keep showing what we have */ }
+  }, 10000);
+}
+/* The other call to the server, and it stands here for the same reason: every
+   `fetch` of this page is inside the live-mode region, so a recording handed to
+   somebody cannot reach anything. The button that calls this is not drawn at all
+   without `live_url`. */
+async function askToContinue(thread) {
+  const at = Date.now();
+  /* Что сказано о запросе, держит `asked`, а рисует его `continueNode` — как и
+     при любой другой перерисовке. Ссылок на кнопку и её строку здесь нет: живое
+     обновление раз в десять секунд перерисовывает доску целиком и во время
+     запроса тоже, и записывать ответ в узлы, которых уже нет на странице,
+     значило бы оставить новую кнопку выключенной до следующего изменения. */
+  asked.set(thread, { pending: true, at, text: "запрос отправлен…" });
+  drawBoard(DATA.board, DATA.snapshot);
+  let request;
+  try {
+    const answer = await fetch("/wake", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ thread }),
+    });
+    const said = await answer.json();
+    request = (answer.ok && said.accepted)
+      ? { accepted: true,
+          text: "запрос принят " + new Date().toLocaleTimeString("ru-RU") +
+                " — итог проверки появится строкой «прошлая …» выше" }
+      /* Отказ говорит по-человечески, а не пересказывает systemd: ответ
+         «Failed to connect to bus: Operation not permitted» — это ровно та
+         английская строка, которую пользователь читать не должен. Сам ответ не
+         теряется: он стоит рядом и включается общим переключателем источников. */
+      : { text: "продолжить не удалось: проверку запускает systemd, и он отказал",
+          detail: String(said.detail || answer.status) };
+  } catch (error) {
+    /* A recording opened from a file has no server to ask, and a server that
+       went away answers nothing. Either way the person is told, rather than
+       left looking at a button that did nothing. */
+    request = { text: "продолжить не удалось: доска сейчас без сервера" };
+  }
+  asked.set(thread, { pending: false, at, ...request });
+  drawBoard(DATA.board, DATA.snapshot);
+}
+</script>
+</body>
+</html>

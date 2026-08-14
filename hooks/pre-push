@@ -1,0 +1,233 @@
+#!/usr/bin/env python3
+"""Refuse a push that would publish this installation's own life.
+
+This repository is public and is also somebody's working home: the product owner
+commits into it while it watches real products. Everything living is already out
+of git — `content/`, `products/`, `state/`, `threads.json`, `lessons/` — but an
+ignore rule is a habit, not a guard, and the first `git add -f` or a new
+directory nobody thought about undoes it silently.
+
+The check itself is not written here. The task system this product owner already
+depends on owns it (`skills/repo-health/scripts/check_pre_push.py`): outgoing
+files only, forbidden local paths, likely secrets, unexpected refs, and a list of
+private names the installation keeps to itself. Writing a second one beside it
+would mean two answers to one question, and the weaker one would be the one that
+runs before a push.
+
+What that owner does not look at is the commit object. An author or committer
+identity, and the message itself, go out with the push exactly like a file does,
+and this repository's whole reason to exist is that a name of this installation
+must not. So the identity and the message of every outgoing commit are compared
+here — with the owner's own private-name list and its own secret patterns, not
+with a second policy invented beside it.
+
+Closed by default. No task system, no check script, no private-name list, an
+owner too old to know private names at all — the push is refused and the reason
+is named. A guard that lets the push through whenever it cannot check anything is
+the shape of guard that publishes the leak.
+
+Install: `git config core.hooksPath hooks` (README, «Установка»).
+"""
+from __future__ import annotations
+
+import importlib.util
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+HOME = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(HOME / "scripts"))
+
+import product_memory  # noqa: E402
+
+CHECK = Path("skills") / "repo-health" / "scripts" / "check_pre_push.py"
+# The names this installation must never publish — its own addresses, its
+# dialogs, the products it watches. The list lives in `state/`, which is outside
+# git, because a list of private names is itself private.
+MARKERS = HOME / "state" / "private-history-markers"
+
+# What the borrowed check must be able to do for this repository. An older copy
+# scans files for secrets but knows nothing about private names, and a guard
+# that silently loses half its job is worse than one that stops.
+REQUIRED = ("private_history_markers", "private_history_match", "SECRET_PATTERNS",
+            "default_base")
+
+# One record per outgoing commit: hash, author identity, committer identity, then
+# the message. Records are NUL-separated so a message with blank lines stays one.
+COMMIT_FORMAT = "%H%n%an <%ae>%n%cn <%ce>%n%B"
+
+
+def refuse(reason: str) -> int:
+    print(f"push отклонён: {reason}", file=sys.stderr)
+    return 1
+
+
+def main() -> int:
+    remote = sys.argv[1] if len(sys.argv) > 1 else "origin"
+    checker = product_memory.leak_check_repo() / CHECK
+    if not checker.is_file():
+        return refuse(
+            f"проверка утечек не найдена: {checker}. Её владелец — система задач, "
+            "путь к которой называет `tasks_repo` в threads.json (или "
+            "`leak_check_repo`, если проверку держит другая установка)")
+    if not MARKERS.is_file():
+        return refuse(
+            f"список приватных имён отсутствует: {MARKERS}. Без него проверка "
+            "сравнивать не с чем, а «нечего сравнить» — это не «чисто»")
+
+    environment = {**os.environ, "TASK_AGENT_PRIVATE_HISTORY_MARKERS": str(MARKERS)}
+    module = load_owner(checker, environment)
+    if module is None:
+        return 1
+    missing = [name for name in REQUIRED if not hasattr(module, name)]
+    if missing:
+        return refuse(
+            f"владелец проверки {checker} старше, чем нужно: он не знает "
+            f"{', '.join(missing)}, то есть не умеет сравнивать со списком "
+            "приватных имён. Обновите систему задач или назовите ключом "
+            "`leak_check_repo` установку, где проверка новее")
+
+    # The owner reads the repository it stands in, so it is asked to look here
+    # instead: an import of one implementation, not a copy of it.
+    result = run_owner(module, checker, remote, environment)
+    if result != 0:
+        return refuse("проверка утечек не пропустила исходящие изменения")
+    return check_commit_metadata(module, remote, environment)
+
+
+def load_owner(checker: Path, environment: dict):
+    """Import the borrowed check, or say why it could not be imported."""
+    spec = importlib.util.spec_from_file_location("borrowed_pre_push", checker)
+    if spec is None or spec.loader is None:
+        refuse(f"проверка утечек не загружается: {checker}")
+        return None
+    module = importlib.util.module_from_spec(spec)
+    try:
+        with borrowed_environment(environment):
+            spec.loader.exec_module(module)
+    except Exception as error:  # noqa: BLE001 — any failure here refuses the push
+        print(f"{type(error).__name__}: {error}", file=sys.stderr)
+        refuse(f"проверка утечек не загружается: {checker}")
+        return None
+    return module
+
+
+def run_owner(module, checker: Path, remote: str, environment: dict) -> int:
+    """Ask the borrowed check about *this* repository.
+
+    It answers about the repository its own file stands in, so `repo_root` is
+    replaced by this home. `--require-private-history-markers` makes an empty
+    list a refusal rather than a notice.
+    """
+    module.repo_root = lambda: HOME
+    argv = sys.argv
+    sys.argv = [str(checker), "--remote", remote,
+                "--require-private-history-markers"]
+    try:
+        with borrowed_environment(environment):
+            return module.main()
+    except SystemExit as exit_code:  # an owner that refuses its own arguments
+        print(f"{checker}: {exit_code}", file=sys.stderr)
+        return 1
+    except Exception as error:  # noqa: BLE001 — any failure here refuses the push
+        print(f"{type(error).__name__}: {error}", file=sys.stderr)
+        return 1
+    finally:
+        sys.argv = argv
+
+
+def check_commit_metadata(module, remote: str, environment: dict) -> int:
+    """Compare the identity and message of every outgoing commit.
+
+    The same list and the same secret patterns the file check uses; the only new
+    thing here is where they are read from — the commit object, which no file
+    scan can reach. The refusal names the commit and the field, never the value:
+    a guard that prints the private name it found publishes it into the terminal
+    and the CI log.
+    """
+    try:
+        with borrowed_environment(environment):
+            markers = module.private_history_markers(HOME)
+            base = module.default_base(remote, HOME)
+        commits = outgoing_commits(base)
+    except Exception as error:  # noqa: BLE001 — unable to check is a refusal
+        print(f"{type(error).__name__}: {error}", file=sys.stderr)
+        return refuse("метаданные исходящих коммитов проверить не удалось")
+
+    if not markers:
+        return refuse(f"список приватных имён пуст: {MARKERS}")
+
+    errors: list[str] = []
+    for commit in commits:
+        short = commit["hash"][:12]
+        for field in ("author", "committer", "message"):
+            text = commit[field]
+            if module.private_history_match(text, markers):
+                errors.append(f"{short}: приватное имя в поле {field} коммита")
+                continue
+            for label, pattern in module.SECRET_PATTERNS:
+                if pattern.search(text):
+                    errors.append(f"{short}: похоже на секрет ({label}) в поле {field}")
+                    break
+
+    if errors:
+        for error in errors:
+            print(f"  ERROR: {error}", file=sys.stderr)
+        return refuse(
+            f"метаданные исходящих коммитов не прошли проверку "
+            f"({len(commits)} коммит(ов) проверено). Личность коммита уезжает "
+            "наружу так же, как файл: перепишите её (`git commit --amend "
+            "--reset-author` или `git rebase`) и настройте `user.email` этого "
+            "репозитория на публичную")
+    print(f"Проверка метаданных пройдена: {len(commits)} коммит(ов).")
+    return 0
+
+
+def outgoing_commits(base: str | None) -> list[dict]:
+    """The commits this push would publish, newest first.
+
+    Without a remote branch to compare against — a first push, exactly the case
+    this repository was created for — that is every commit reachable from HEAD.
+    """
+    revision = f"{base}..HEAD" if base else "HEAD"
+    result = subprocess.run(
+        ["git", "log", "-z", f"--format={COMMIT_FORMAT}", revision],
+        cwd=HOME, check=False, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError((result.stderr or result.stdout or "git log failed").strip())
+
+    commits = []
+    for record in result.stdout.split("\0"):
+        if not record.strip():
+            continue
+        lines = record.split("\n")
+        commits.append({
+            "hash": lines[0],
+            "author": lines[1] if len(lines) > 1 else "",
+            "committer": lines[2] if len(lines) > 2 else "",
+            "message": "\n".join(lines[3:]),
+        })
+    return commits
+
+
+class borrowed_environment:
+    """Run a borrowed call with this installation's environment, then restore."""
+
+    def __init__(self, environment: dict):
+        self.environment = environment
+        self.previous: dict[str, str] = {}
+
+    def __enter__(self):
+        self.previous = dict(os.environ)
+        os.environ.update(self.environment)
+        return self
+
+    def __exit__(self, *exception):
+        os.environ.clear()
+        os.environ.update(self.previous)
+        return False
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,11 @@
+[Unit]
+Description=Product owner thread tick timer (%i)
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=20min
+AccuracySec=1min
+Unit=product-thread@%i.service
+
+[Install]
+WantedBy=timers.target
