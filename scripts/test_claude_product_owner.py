@@ -1,6 +1,7 @@
 import unittest
 from unittest import mock
 import urllib.error
+from datetime import datetime, timezone
 
 import claude_product_owner as router
 from claude_product_owner import (
@@ -9,6 +10,8 @@ from claude_product_owner import (
     Route,
     claude_command,
     codex_command,
+    claude_weekly_remaining,
+    codex_weekly_remaining,
     inspect_live,
     inspect_observation,
     model_limits,
@@ -20,7 +23,25 @@ from claude_product_owner import (
 )
 
 
+def observed_codex(remaining: float) -> dict:
+    now = datetime.now(timezone.utc)
+    return {
+        "used_percent": 100 - remaining,
+        "remaining_percent": remaining,
+        "window_minutes": 10_080,
+        "window_days": 7.0,
+        "observed_at": now.isoformat(),
+        "resets_at_epoch": now.timestamp() + 3 * 86_400,
+    }
+
+
 class ProductOwnerModelRouterTests(unittest.TestCase):
+    def setUp(self):
+        patcher = mock.patch("claude_product_owner.codex_budget.latest",
+                             return_value=observed_codex(81))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_interactive_owner_receives_no_code_first_order(self):
         self.assertIn("ничего не делать", STARTUP_PROMPT)
         self.assertIn("убрать или отключить", STARTUP_PROMPT)
@@ -69,17 +90,77 @@ class ProductOwnerModelRouterTests(unittest.TestCase):
 
     def test_malformed_values_are_ignored(self):
         self.assertEqual(select_model({"seven_day_opus": {"utilization": "96"}})[0], "opus")
-        self.assertEqual(select_route({"five_hour": {"utilization": 130}}).engine, "claude")
+        self.assertEqual(select_route({"five_hour": {"utilization": 130}}, None).engine,
+                         "claude")
 
     def test_available_opus_and_fable_stay_on_claude(self):
-        self.assertEqual(select_route({}).engine, "claude")
-        route = select_route({"seven_day_opus": {"utilization": 96}})
+        self.assertEqual(select_route({}, observed_codex(80)).engine, "claude")
+        route = select_route({
+            "seven_day": {"utilization": 10},
+            "seven_day_opus": {"utilization": 96},
+        }, observed_codex(80))
         self.assertEqual((route.engine, route.model), ("claude", "fable"))
+
+    def test_larger_observed_codex_remainder_selects_codex(self):
+        usage = {"seven_day": {"utilization": 69}}
+        route = select_route(usage, observed_codex(81))
+        self.assertEqual(route, Route(
+            "codex", CODEX_MODEL, "weekly_remaining:claude=31%,codex=81%"
+        ))
+        self.assertEqual(claude_weekly_remaining(usage), 31.0)
+
+    def test_larger_observed_claude_remainder_selects_claude(self):
+        route = select_route(
+            {"seven_day": {"utilization": 18}}, observed_codex(31)
+        )
+        self.assertEqual(route, Route(
+            "claude", "opus", "weekly_remaining:claude=82%,codex=31%"
+        ))
+
+    def test_missing_remainder_is_visible_and_not_fabricated(self):
+        no_codex = select_route({"seven_day": {"utilization": 69}}, None)
+        self.assertEqual(no_codex.engine, "claude")
+        self.assertEqual(
+            no_codex.reason,
+            "codex_weekly_remaining_unavailable:claude_remaining=31%",
+        )
+        no_claude = select_route({}, observed_codex(81))
+        self.assertEqual(no_claude.engine, "claude")
+        self.assertEqual(no_claude.reason, "claude_weekly_remaining_unavailable")
+
+    def test_missing_codex_observation_preserves_the_fable_fallback(self):
+        route = select_route({
+            "seven_day": {"utilization": 69},
+            "seven_day_opus": {"utilization": 96},
+        }, None)
+        self.assertEqual((route.engine, route.model), ("claude", "fable"))
+        self.assertIn("codex_weekly_remaining_unavailable", route.reason)
+
+    def test_codex_remainder_requires_a_current_explicit_weekly_window(self):
+        not_weekly = {**observed_codex(81), "window_minutes": 300}
+        self.assertIsNone(codex_weekly_remaining(not_weekly))
+        self.assertEqual(
+            select_route({"seven_day": {"utilization": 69}}, not_weekly).reason,
+            "codex_weekly_remaining_unavailable:claude_remaining=31%",
+        )
+        stale = {**observed_codex(81), "resets_at_epoch": 1}
+        self.assertIsNone(codex_weekly_remaining(stale))
+
+    def test_codex_observation_failure_is_visible_in_status_record(self):
+        with (mock.patch("claude_product_owner.codex_budget.latest",
+                         side_effect=OSError("sessions unreadable")),
+              mock.patch("claude_product_owner.fetch_usage", return_value={
+                  "seven_day": {"utilization": 69},
+              })):
+            observation = inspect_observation()
+        self.assertEqual(observation.route.reason,
+                         "codex_weekly_remaining_unavailable:claude_remaining=31%")
+        self.assertEqual(observation.codex_error["kind"], "codex_observation")
 
     def test_observed_shared_exhaustion_selects_codex(self):
         route = select_route({
             "five_hour": {"utilization": 100, "resets_at": "2033-05-18T03:33:20Z"},
-        })
+        }, observed_codex(80))
         self.assertEqual(route, Route(
             "codex", CODEX_MODEL, "observed_shared_limit_exhausted:five_hour"
         ))
@@ -90,14 +171,14 @@ class ProductOwnerModelRouterTests(unittest.TestCase):
             {"percent": 100, "scope": {"model": {"display_name": "Fable"}}},
         ]}
         self.assertEqual(model_used_percentages(usage, "fable"), [100.0])
-        self.assertEqual(select_route(usage).engine, "codex")
+        self.assertEqual(select_route(usage, observed_codex(80)).engine, "codex")
 
     def test_fable_exhaustion_does_not_discard_remaining_opus(self):
         usage = {"limits": [
             {"percent": 96, "scope": {"model": {"display_name": "Opus"}}},
             {"percent": 100, "scope": {"model": {"display_name": "Fable"}}},
         ]}
-        route = select_route(usage)
+        route = select_route(usage, observed_codex(3))
         self.assertEqual((route.engine, route.model), ("claude", "opus"))
 
     def test_unavailable_or_unknown_usage_keeps_fail_visible_opus(self):

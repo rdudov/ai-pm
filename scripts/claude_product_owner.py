@@ -19,6 +19,7 @@ import urllib.request
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import codex_budget  # noqa: E402
 import product_memory  # noqa: E402
 
 
@@ -73,6 +74,8 @@ class Route:
 class UsageObservation:
     route: Route
     usage: dict[str, Any] | None
+    codex_budget: dict[str, Any] | None
+    codex_error: dict[str, Any] | None
     attempted_at: str
     observed_at: str | None
     authorization_recovery: str
@@ -181,10 +184,45 @@ def shared_limits(usage: dict[str, Any]) -> list[dict[str, Any]]:
     return result
 
 
+def claude_weekly_remaining(usage: dict[str, Any]) -> float | None:
+    """Return only the observed shared seven-day remainder."""
+    weekly = next((item for item in shared_limits(usage)
+                   if item["kind"] == "seven_day"), None)
+    return weekly["remaining_percent"] if weekly else None
+
+
+def codex_weekly_remaining(codex: dict[str, Any] | None) -> float | None:
+    """Return a current remainder only from an explicitly seven-day snapshot."""
+    if not isinstance(codex, dict):
+        return None
+    if codex.get("window_minutes") != codex_budget.WEEKLY_WINDOW_MINUTES:
+        return None
+    remaining = _number(codex.get("remaining_percent"))
+    resets_at = codex.get("resets_at_epoch")
+    observed_at = codex.get("observed_at")
+    if (remaining is None or isinstance(resets_at, bool)
+            or not isinstance(resets_at, (int, float))
+            or not isinstance(observed_at, str)):
+        return None
+    try:
+        observed = datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
+        if observed.tzinfo is None:
+            return None
+    except ValueError:
+        return None
+    now = datetime.now(timezone.utc)
+    age = (now - observed.astimezone(timezone.utc)).total_seconds()
+    if (age < -300 or age > codex_budget.WEEKLY_WINDOW_MINUTES * 60
+            or float(resets_at) <= now.timestamp()):
+        return None
+    return remaining
+
+
 def select_route(
-    usage: dict[str, Any], threshold: float = OPUS_REMAINING_THRESHOLD
+    usage: dict[str, Any], codex: dict[str, Any] | None,
+    threshold: float = OPUS_REMAINING_THRESHOLD,
 ) -> Route:
-    """Use Codex only when the usage payload proves no Claude route is usable."""
+    """Choose the family with the larger observed weekly remainder."""
     exhausted_shared = [item for item in shared_limits(usage) if item["used_percent"] >= 100.0]
     if exhausted_shared:
         kinds = ",".join(item["kind"] for item in exhausted_shared)
@@ -199,17 +237,25 @@ def select_route(
     if opus_exhausted and fable_exhausted:
         return Route("codex", CODEX_MODEL, "observed_opus_and_fable_limits_exhausted")
 
-    if opus_used is None:
-        return Route("claude", OPUS_MODEL, "no_opus_specific_limit")
-    remaining = 100.0 - opus_used
-    if remaining < threshold and not fable_exhausted:
-        return Route("claude", FABLE_MODEL, f"opus_remaining={remaining:g}%")
-    if remaining < threshold and fable_exhausted:
+    opus_remaining = 100.0 - opus_used if opus_used is not None else None
+    claude_model = (FABLE_MODEL if opus_remaining is not None
+                    and opus_remaining < threshold and not fable_exhausted
+                    else OPUS_MODEL)
+    claude_remaining = claude_weekly_remaining(usage)
+    codex_remaining = codex_weekly_remaining(codex)
+    if claude_remaining is None:
+        return Route("claude", claude_model, "claude_weekly_remaining_unavailable")
+    if codex_remaining is None:
         return Route(
-            "claude", OPUS_MODEL,
-            f"fable_exhausted_but_opus_remaining={remaining:g}%",
+            "claude", claude_model,
+            f"codex_weekly_remaining_unavailable:claude_remaining={claude_remaining:g}%",
         )
-    return Route("claude", OPUS_MODEL, f"opus_remaining={remaining:g}%")
+    comparison = (f"weekly_remaining:claude={claude_remaining:g}%,"
+                  f"codex={codex_remaining:g}%")
+    if codex_remaining > claude_remaining:
+        return Route("codex", CODEX_MODEL, comparison)
+
+    return Route("claude", claude_model, comparison)
 
 
 def select_model(
@@ -369,6 +415,22 @@ def _error_record(exc: BaseException) -> dict[str, Any]:
 def inspect_observation() -> UsageObservation:
     attempted_at = datetime.now(timezone.utc).isoformat()
     recovery = "not_needed"
+    codex_error = None
+    try:
+        codex = codex_budget.latest()
+    except Exception as exc:
+        codex = None
+        codex_error = {
+            "kind": "codex_observation",
+            "exception_type": type(exc).__name__,
+            "message": str(exc),
+        }
+    if codex_error is None and codex_weekly_remaining(codex) is None:
+        codex_error = {
+            "kind": "unavailable_or_stale",
+            "exception_type": None,
+            "message": "no current explicitly seven-day Codex observation",
+        }
     try:
         try:
             usage = fetch_usage()
@@ -377,8 +439,10 @@ def inspect_observation() -> UsageObservation:
                 raise
             usage, recovery = _usage_after_authorization_recovery()
         return UsageObservation(
-            route=select_route(usage),
+            route=select_route(usage, codex),
             usage=usage,
+            codex_budget=codex,
+            codex_error=codex_error,
             attempted_at=attempted_at,
             observed_at=datetime.now(timezone.utc).isoformat(),
             authorization_recovery=recovery,
@@ -396,6 +460,8 @@ def inspect_observation() -> UsageObservation:
         return UsageObservation(
             route=Route("claude", OPUS_MODEL, "usage_unavailable"),
             usage=None,
+            codex_budget=codex,
+            codex_error=codex_error,
             attempted_at=attempted_at,
             observed_at=None,
             authorization_recovery=recovery,
@@ -479,6 +545,13 @@ def main(argv: list[str] | None = None) -> int:
                 "opus": model_limits(usage or {}, "opus"),
                 "fable": model_limits(usage or {}, "fable"),
             },
+            "codex_budget": observation.codex_budget,
+            "codex_quota_observation": {
+                "status": "observed" if observation.codex_error is None else "unavailable",
+                "source": "codex_session_rate_limits",
+                "freshness": "current_window" if observation.codex_error is None else "unavailable",
+                "error": observation.codex_error,
+            },
             "quota_observation": {
                 "status": "observed" if usage is not None else "unavailable",
                 "source": "anthropic_oauth_usage_endpoint",
@@ -518,12 +591,14 @@ def main(argv: list[str] | None = None) -> int:
         os.execvpe(CLAUDE_BIN, command, {**os.environ, "IS_SANDBOX": "1"})
         return 127
 
-    notice = (
-        "Продакт: наблюдаемый лимит не оставил пригодного Claude-маршрута; "
-        "продолжаю через резервный Codex GPT-5.6 Sol."
-        if not args.force_codex else
-        "Продакт запущен явной командой codex-pm через Codex GPT-5.6 Sol."
-    )
+    if args.force_codex:
+        notice = "Продакт запущен явной командой codex-pm через Codex GPT-5.6 Sol."
+    elif route.reason.startswith("weekly_remaining:"):
+        notice = ("Продакт: у Codex больше наблюдаемый остаток недельного окна; "
+                  "продолжаю через Codex GPT-5.6 Sol.")
+    else:
+        notice = ("Продакт: наблюдаемый лимит не оставил пригодного Claude-маршрута; "
+                  "продолжаю через Codex GPT-5.6 Sol.")
     if entry == "interactive":
         print(notice, file=sys.stderr)
         os.execvpe(CODEX_BIN, command, os.environ)

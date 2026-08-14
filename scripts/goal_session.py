@@ -101,9 +101,10 @@ POLL_SECONDS = tunable("PRODUCT_OWNER_GOAL_SESSION_POLL_SECONDS", 30)
 MIN_TURN_GAP_SECONDS = tunable("PRODUCT_OWNER_GOAL_SESSION_MIN_TURN_GAP_SECONDS", 60)
 # Сколько ждать ход модели.
 TURN_TIMEOUT = tunable("PRODUCT_OWNER_GOAL_SESSION_TURN_TIMEOUT_SECONDS", 1800)
-# После скольких ходов разговор ротируется принудительно. Это не лимит работы:
-# ротация записывается, watchdog поднимает новую сессию из той же цели.
-MAX_TURNS = tunable("PRODUCT_OWNER_GOAL_SESSION_MAX_TURNS", 60)
+# После скольких ходов разговор ротируется принудительно. Наблюдаемый дорогой
+# разговор дошёл до 57 ходов и 4 044 193 токенов чтения кеша за ход; ротация
+# записывается, а watchdog поднимает новую сессию из той же долговечной цели.
+MAX_TURNS = tunable("PRODUCT_OWNER_GOAL_SESSION_MAX_TURNS", 57)
 # Предельная жизнь одной сессии. Тот же смысл: ротация, а не остановка работы.
 MAX_LIFETIME_SECONDS = tunable("PRODUCT_OWNER_GOAL_SESSION_MAX_LIFETIME_SECONDS", 21600)
 # Сколько последних ходов остаётся в контрольном снимке.

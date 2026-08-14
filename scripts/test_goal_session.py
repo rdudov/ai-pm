@@ -429,6 +429,10 @@ class OneConversation(unittest.TestCase):
         self.observations = [look(live=[1094]), look(live=[1094], blocked=[1094]),
                              look(live=[1094], blocked=[1094])]
         self.observe, session.observation = session.observation, self.fake_observation
+        self.route, session.session_route = session.session_route, lambda: {
+            "ok": True, "engine": "claude", "model": "opus",
+            "reason": "test_observed_route", "error": None,
+        }
         self.notify, tick.notify = tick.notify, lambda text: None
         self.deliver, tick.deliver = tick.deliver, lambda *args, **kwargs: {"action": "hold"}
         self.addCleanup(self.restore_stubs)
@@ -441,6 +445,7 @@ class OneConversation(unittest.TestCase):
 
     def restore_stubs(self) -> None:
         session.run_turn, session.observation = self.turn, self.observe
+        session.session_route = self.route
         tick.notify, tick.deliver = self.notify, self.deliver
 
     def fake_observation(self, thread: str) -> dict:
@@ -509,8 +514,8 @@ class OneConversation(unittest.TestCase):
         session.MIN_TURN_GAP_SECONDS = 0
         session.write("process", {"pid": 999_999_999, "since": 1,
                                   "heartbeat": session.now(),
-                                  "session": {"id": "s-old", "turns": 60},
-                                  "stopped": {"at": session.now(), "reason": "60 ходов",
+                                  "session": {"id": "s-old", "turns": 57},
+                                  "stopped": {"at": session.now(), "reason": "57 ходов",
                                               "rotation": "требуется новая сессия"}})
         session.loop("process", once=True)
         record = session.read("process")
@@ -518,6 +523,44 @@ class OneConversation(unittest.TestCase):
         self.assertEqual(record["recovered"]["resumed_conversation"], False)
         self.assertEqual(record["turns"][0]["kind"], "open")
         self.assertTrue(record["turns"][0]["context_rebuilt"])
+
+    def test_observed_turn_threshold_rebuilds_context_without_losing_the_goal(self):
+        session.MIN_TURN_GAP_SECONDS = 0
+        previous_max_turns = session.MAX_TURNS
+        self.addCleanup(lambda: setattr(session, "MAX_TURNS", previous_max_turns))
+        session.MAX_TURNS = 57
+        session.write("process", {"pid": 999_999_999, "since": 1,
+                                  "heartbeat": session.now(),
+                                  "session": {"id": "s-costly", "turns": 56}})
+
+        def measured_turn(model: str, session_id: str, prompt: str, opening: bool) -> dict:
+            self.prompts.append({"id": session_id, "opening": opening, "prompt": prompt})
+            cache_read = 30_000 if opening else 4_044_193
+            return {"ok": True, "reply": "продолжаю задачу 1094",
+                    "session_id": session_id, "duration_seconds": 1.0,
+                    "cost_usd": 0.0, "error": None,
+                    "usage": {"input_tokens": 1, "cache_creation_input_tokens": 2,
+                              "cache_read_input_tokens": cache_read,
+                              "output_tokens": 4}}
+
+        session.run_turn = measured_turn
+        self.assertEqual(session.loop("process", once=True), 0)
+        rotated = session.read("process")
+        self.assertEqual(rotated["session"]["turns"], 57)
+        self.assertEqual(rotated["stopped"]["rotation"], "требуется новая сессия")
+        self.assertEqual(rotated["last_turn"]["usage"]["cache_read_input_tokens"],
+                         4_044_193)
+
+        self.assertEqual(session.loop("process", once=True), 0)
+        rebuilt = session.read("process")
+        self.assertNotEqual(rebuilt["session"]["id"], "s-costly")
+        self.assertEqual(rebuilt["goals"], rotated["goals"])
+        self.assertTrue(rebuilt["last_turn"]["context_rebuilt"])
+        self.assertTrue(self.prompts[-1]["opening"])
+        self.assertIn("Долговечные цели этого направления", self.prompts[-1]["prompt"])
+        self.assertIn("результат", self.prompts[-1]["prompt"])
+        self.assertLess(rebuilt["last_turn"]["usage"]["cache_read_input_tokens"],
+                        rotated["last_turn"]["usage"]["cache_read_input_tokens"])
 
     def test_the_conversation_is_resumed_rather_than_started_again(self):
         """`--session-id` открывает разговор, `--resume` продолжает тот же."""
