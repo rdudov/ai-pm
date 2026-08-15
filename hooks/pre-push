@@ -26,7 +26,7 @@ owner too old to know private names at all — the push is refused and the reaso
 is named. A guard that lets the push through whenever it cannot check anything is
 the shape of guard that publishes the leak.
 
-Install: `git config core.hooksPath hooks` (README, «Установка»).
+Install: `git config core.hooksPath hooks` (README, «Разработка и проверка»).
 """
 from __future__ import annotations
 
