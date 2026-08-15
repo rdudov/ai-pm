@@ -532,7 +532,7 @@ def build_board(snapshot: dict) -> dict:
 
 
 def payload(timeline_path: Path, snapshot_path: Path, live_url: str | None = None,
-            anonymize: bool = False) -> dict:
+            anonymize: bool = False, live_page_url: str | None = None) -> dict:
     """The whole document the page gets, built from a snapshot and a timeline.
 
     The renderer takes a validated JSON document and nothing else. It does not
@@ -570,6 +570,9 @@ def payload(timeline_path: Path, snapshot_path: Path, live_url: str | None = Non
         "board": build_board(snapshot),
         "built_at": datetime.now(timezone.utc).isoformat(),
         "live_url": live_url,
+        # Separate from the JSON poll route so a browser-saved copy can point
+        # back to its live page without pretending it can still poll.
+        "live_page_url": live_page_url,
     }
     # A digest of everything shown, so live mode notices a status or a liveness
     # change that appends nothing to the timeline (finding MEDIUM-1).

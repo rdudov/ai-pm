@@ -107,7 +107,8 @@ def collect(anonymize: bool, include_task_cards: bool = False) -> Path:
 
 
 def build_payload(anonymize: bool, timeline: Path, live_url: str | None,
-                  include_task_cards: bool = False) -> dict:
+                  include_task_cards: bool = False,
+                  live_page_url: str | None = None) -> dict:
     """One anonymisation decision, applied to everything that reaches the page.
 
     The snapshot was collected anonymously and the timeline was read from disk as
@@ -118,7 +119,8 @@ def build_payload(anonymize: bool, timeline: Path, live_url: str | None,
     """
     path = collect(anonymize, include_task_cards)
     try:
-        return render.payload(timeline, path, live_url=live_url, anonymize=anonymize)
+        return render.payload(timeline, path, live_url=live_url, anonymize=anonymize,
+                              live_page_url=live_page_url)
     finally:
         path.unlink(missing_ok=True)
 
@@ -177,6 +179,11 @@ class LiveHandler(BaseHTTPRequestHandler):
         self._send(json.dumps(payload, ensure_ascii=False).encode(),
                    "application/json; charset=utf-8", code)
 
+    def _live_page_url(self) -> str:
+        """Point a saved copy to this loopback service, never to a Host header."""
+        port = self.server.server_address[1]
+        return f"http://127.0.0.1:{port}/"
+
     def _same_origin(self) -> bool:
         """Whether this request came from the board itself.
 
@@ -198,7 +205,8 @@ class LiveHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802 - http.server API
         if self.path.startswith("/data.json"):
-            data = build_payload(self.anonymize, self.timeline, "/data.json")
+            data = build_payload(self.anonymize, self.timeline, "/data.json",
+                                 live_page_url=self._live_page_url())
             self._send(json.dumps(data, ensure_ascii=False).encode(),
                        "application/json; charset=utf-8")
             # After the answer, never before it: the poll must not wait for a
@@ -208,7 +216,8 @@ class LiveHandler(BaseHTTPRequestHandler):
             return
         if self.path in ("/", "/index.html"):
             data = build_payload(self.anonymize, self.timeline, "/data.json",
-                                 include_task_cards=True)
+                                 include_task_cards=True,
+                                 live_page_url=self._live_page_url())
             self._send(render.render(data).encode(), "text/html; charset=utf-8")
             record_timeline(self.timeline)
             return
@@ -251,6 +260,8 @@ def main() -> int:
                         help="strip absolute paths, mail addresses and numeric identifiers")
     parser.add_argument("--serve", type=int, metavar="PORT",
                         help="live mode: same renderer, fresh snapshot on every load")
+    parser.add_argument("--live-page-url",
+                        help="address of the live board to show in a saved --out snapshot")
     args = parser.parse_args()
 
     if args.serve:
@@ -273,7 +284,8 @@ def main() -> int:
     try:
         if args.snapshot_out:
             args.snapshot_out.write_text(snapshot_path.read_text())
-        data = render.payload(args.timeline, snapshot_path, anonymize=args.anonymize)
+        data = render.payload(args.timeline, snapshot_path, anonymize=args.anonymize,
+                              live_page_url=args.live_page_url)
     finally:
         snapshot_path.unlink(missing_ok=True)
 

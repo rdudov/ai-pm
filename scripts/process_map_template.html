@@ -667,6 +667,10 @@
 "use strict";
 const DATA = JSON.parse(document.getElementById("payload").textContent);
 const SNAP = DATA.snapshot;
+/* Saving a live page keeps its `/data.json` payload field, but file:// cannot
+   reach that relative route. At runtime it is a recording, not a broken live
+   board. */
+const LIVE = Boolean(DATA.live_url) && window.location.protocol !== "file:";
 
 const el = id => document.getElementById(id);
 
@@ -2119,7 +2123,7 @@ function continueNode(panel) {
   /* A recording has no server to ask, so it says so instead of showing a control
      that cannot do anything: every call to the server on this page lives in one
      place — the live-mode section at the very bottom. */
-  if (!DATA.live_url) {
+  if (!LIVE) {
     const said = document.createElement("span");
     said.className = "said";
     said.textContent = "«Продолжить сейчас» работает на живой доске; это снимок,"
@@ -2689,12 +2693,27 @@ function drawFeed(records, total) {
 function drawFoot(snapshot) {
   const rev = snapshot.revision || {};
   const foot = el("foot");
-  foot.textContent = "Доска работает на ревизии " + (rev.running || "неизвестной");
+  if (!LIVE) {
+    const at = DATA.built_at
+      ? new Date(DATA.built_at).toLocaleString("ru-RU") : "неизвестного времени";
+    foot.textContent = "Сохранённый снимок от " + at + ". Он не обновляется.";
+    if (DATA.live_page_url) {
+      const link = document.createElement("a");
+      link.href = DATA.live_page_url;
+      link.textContent = "Открыть живую доску";
+      foot.append(" ", link, ".");
+    } else {
+      foot.append(" Откройте живую доску по обычному адресу вашего SSH-туннеля.");
+    }
+    return;
+  }
+  foot.textContent = "Живая доска · установлена ревизия "
+    + (rev.running || "неизвестна");
   if (rev.running && rev.disk && rev.running !== rev.disk) {
     const warn = document.createElement("span");
     warn.className = "warn";
-    warn.textContent = " — а в рабочем дереве уже " + rev.disk
-      + ": службу не перезапускали после коммита";
+    warn.textContent = " · доступно обновление до " + rev.disk
+      + ": перезапустите product-owner-board.service";
     foot.appendChild(warn);
   }
   const src = document.createElement("span");
@@ -2866,7 +2885,7 @@ showBoard(sessionStorage.getItem("screen") !== "tasks");
 
 /* Live mode: the same renderer, served with a fresh snapshot. A recording never
    takes this branch — `file://` cannot fetch, and its data is already inside. */
-if (DATA.live_url) {
+if (LIVE) {
   setInterval(async () => {
     try {
       const fresh = await (await fetch(DATA.live_url, { cache: "no-store" })).json();

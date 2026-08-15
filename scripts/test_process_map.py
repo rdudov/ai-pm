@@ -1764,7 +1764,7 @@ class OfflineRecording(unittest.TestCase):
         # in the template. The live branch has to exist — without it a status
         # change never reaches the screen — so what is asserted is that the
         # delivered file has no reachable call: `live_url` is null, and every
-        # `fetch` in the page sits behind that null.
+        # `fetch` in the page sits behind the derived false `LIVE` value.
         data = {"snapshot": a_snapshot(), "timeline": [a_record()],
                 "board": render.build_board(a_snapshot()),
                 "built_at": "2026-08-06T12:00:00+00:00", "live_url": None, "digest": "d"}
@@ -1773,7 +1773,7 @@ class OfflineRecording(unittest.TestCase):
         for forbidden in ("http://", "https://", "XMLHttpRequest", 'src="//', "WebSocket",
                           "EventSource", "importScripts", "navigator.sendBeacon"):
             self.assertNotIn(forbidden, html.replace('lang="ru"', ""))
-        body = html[html.index("if (DATA.live_url)"):]
+        body = html[html.index("if (LIVE)"):]
         self.assertEqual(html.count("fetch("), body.count("fetch("))
 
     def test_the_board_is_the_screen_that_opens(self):
@@ -1827,7 +1827,7 @@ def a_page(snapshot=None) -> str:
     return render.render({"snapshot": snapshot, "timeline": [],
                           "board": render.build_board(snapshot),
                           "built_at": "2026-08-06T12:00:00+00:00",
-                          "live_url": None, "digest": "d"})
+                          "live_url": None, "live_page_url": None, "digest": "d"})
 
 
 class WorkOutsideDeadOwner(unittest.TestCase):
@@ -3026,7 +3026,7 @@ class DrillDown(unittest.TestCase):
 
     def test_board_and_index_cards_travel_with_the_document(self):
         page = a_page()
-        body = page[page.index("if (DATA.live_url)"):]
+        body = page[page.index("if (LIVE)"):]
         self.assertEqual(page.count("fetch("), body.count("fetch("))
         self.assertIn("function openCard", page)
         self.assertNotIn("fetch(", page[page.index("function openCard"):page.index("function closeCard")])
@@ -3114,7 +3114,7 @@ class LiveWithoutLosingThePlace(unittest.TestCase):
         page = a_page()
         # The poll branch itself, not the prose around it: the old call is named
         # in a comment there on purpose, and a literal search would find it.
-        poll = page[page.index("if (DATA.live_url)"):]
+        poll = page[page.index("if (LIVE)"):]
         self.assertIn("applyFresh(fresh)", poll)
         self.assertNotIn("location.reload();", poll)
 
@@ -5326,9 +5326,21 @@ class TheFirstScreenAnswersFourQuestions(unittest.TestCase):
         snapshot = a_snapshot()
         snapshot["revision"] = a_code_revision(running="aaaaaaa", disk="bbbbbbb")
         page = a_page(snapshot)
-        self.assertIn('"Доска работает на ревизии "', page)
-        self.assertIn('" — а в рабочем дереве уже "', page)
-        self.assertIn("службу не перезапускали после коммита", page)
+        self.assertIn('"Живая доска · установлена ревизия "', page)
+        self.assertIn('" · доступно обновление до "', page)
+        self.assertIn("перезапустите product-owner-board.service", page)
+
+    def test_a_saved_page_says_it_is_a_snapshot_and_points_back_to_live(self):
+        page = render.render({"snapshot": a_snapshot(), "timeline": [],
+                              "board": render.build_board(a_snapshot()),
+                              "built_at": "2026-08-15T12:00:00+00:00",
+                              "live_url": "/data.json",
+                              "live_page_url": "http://127.0.0.1:8791/",
+                              "digest": "d"})
+        self.assertIn('window.location.protocol !== "file:"', page)
+        self.assertIn('"Сохранённый снимок от "', page)
+        self.assertIn('"Открыть живую доску"', page)
+        self.assertIn('"http://127.0.0.1:8791/"', page)
 
     def test_a_revision_named_without_its_observation_is_refused(self):
         broken = a_snapshot()
