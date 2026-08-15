@@ -587,6 +587,12 @@ def main(argv: list[str] | None = None) -> int:
             f"({error['kind']}: {error['message']})",
             file=sys.stderr,
         )
+    if route.engine == "claude" and "weekly_remaining_unavailable" in route.reason:
+        print(
+            "product-owner: route observation unavailable; keeping Claude "
+            f"({route.reason})",
+            file=sys.stderr,
+        )
     if route.engine == "claude":
         os.execvpe(CLAUDE_BIN, command, {**os.environ, "IS_SANDBOX": "1"})
         return 127

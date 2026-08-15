@@ -515,8 +515,8 @@ class OneConversation(unittest.TestCase):
         session.MIN_TURN_GAP_SECONDS = 0
         session.write("process", {"pid": 999_999_999, "since": 1,
                                   "heartbeat": session.now(),
-                                  "session": {"id": "s-old", "turns": 57},
-                                  "stopped": {"at": session.now(), "reason": "57 ходов",
+                                  "session": {"id": "s-old", "turns": 60},
+                                  "stopped": {"at": session.now(), "reason": "60 ходов",
                                               "rotation": "требуется новая сессия"}})
         session.loop("process", once=True)
         record = session.read("process")
@@ -525,14 +525,15 @@ class OneConversation(unittest.TestCase):
         self.assertEqual(record["turns"][0]["kind"], "open")
         self.assertTrue(record["turns"][0]["context_rebuilt"])
 
-    def test_observed_turn_threshold_rebuilds_context_without_losing_the_goal(self):
+    def test_observed_cache_threshold_rebuilds_context_without_losing_the_goal(self):
         session.MIN_TURN_GAP_SECONDS = 0
-        previous_max_turns = session.MAX_TURNS
-        self.addCleanup(lambda: setattr(session, "MAX_TURNS", previous_max_turns))
-        session.MAX_TURNS = 57
+        previous_threshold = session.MAX_CACHE_READ_INPUT_TOKENS
+        self.addCleanup(lambda: setattr(
+            session, "MAX_CACHE_READ_INPUT_TOKENS", previous_threshold))
+        session.MAX_CACHE_READ_INPUT_TOKENS = 4_044_193
         session.write("process", {"pid": 999_999_999, "since": 1,
                                   "heartbeat": session.now(),
-                                  "session": {"id": "s-costly", "turns": 56}})
+                                  "session": {"id": "s-costly", "turns": 12}})
 
         def measured_turn(model: str, session_id: str, prompt: str, opening: bool) -> dict:
             self.prompts.append({"id": session_id, "opening": opening, "prompt": prompt})
@@ -547,8 +548,9 @@ class OneConversation(unittest.TestCase):
         session.run_turn = measured_turn
         self.assertEqual(session.loop("process", once=True), 0)
         rotated = session.read("process")
-        self.assertEqual(rotated["session"]["turns"], 57)
+        self.assertEqual(rotated["session"]["turns"], 13)
         self.assertEqual(rotated["stopped"]["rotation"], "требуется новая сессия")
+        self.assertIn("порог 4.04419e+06 достигнут", rotated["stopped"]["reason"])
         self.assertEqual(rotated["last_turn"]["usage"]["cache_read_input_tokens"],
                          4_044_193)
 

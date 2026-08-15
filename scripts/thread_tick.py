@@ -104,6 +104,12 @@ MAIL_SCRIPT = REPO / "skills" / "gmail-client" / "scripts" / "send_email.py"
 MAIL_PYTHON = REPO / ".venv" / "bin" / "python"
 
 
+def route_diagnostics(stderr: str) -> list[str]:
+    """Keep the router's fail-visible line without replaying model stderr."""
+    return [line for line in stderr.splitlines()
+            if line.startswith("product-owner: route observation unavailable;")]
+
+
 # How often the same standing reminder may be repeated. The tick itself runs
 # every twenty minutes, so this is the frequency of the *reminder*, not of the
 # observation: a queue that has not moved is said once an hour, and a queue that
@@ -1142,6 +1148,8 @@ def main() -> int:
                      product_goal.block(args.thread)), env=environment,
         capture_output=True, text=True, cwd=HOME, timeout=WAKE_TIMEOUT,
     )
+    for diagnostic in route_diagnostics(result.stderr or ""):
+        print(diagnostic, file=sys.stderr)
     message = (result.stdout or "").strip()
     if result.returncode != 0:
         failure = f"[{args.thread}] пробуждение треда не отработало: {(result.stderr or '')[:300]}"

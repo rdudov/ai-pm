@@ -1,7 +1,9 @@
 import unittest
 from unittest import mock
 import urllib.error
+from contextlib import redirect_stderr
 from datetime import datetime, timezone
+from io import StringIO
 
 import claude_product_owner as router
 from claude_product_owner import (
@@ -156,6 +158,24 @@ class ProductOwnerModelRouterTests(unittest.TestCase):
         self.assertEqual(observation.route.reason,
                          "codex_weekly_remaining_unavailable:claude_remaining=31%")
         self.assertEqual(observation.codex_error["kind"], "codex_observation")
+
+    def test_codex_observation_failure_is_visible_before_claude_exec(self):
+        stderr = StringIO()
+        with (mock.patch("claude_product_owner.codex_budget.latest",
+                         side_effect=OSError("sessions unreadable")),
+              mock.patch("claude_product_owner.fetch_usage", return_value={
+                  "seven_day": {"utilization": 69},
+              }),
+              mock.patch("claude_product_owner.os.execvpe",
+                         side_effect=RuntimeError("exec boundary")),
+              redirect_stderr(stderr),
+              self.assertRaisesRegex(RuntimeError, "exec boundary")):
+            router.main(["--entry", "print"])
+        self.assertIn(
+            "product-owner: route observation unavailable; keeping Claude "
+            "(codex_weekly_remaining_unavailable:claude_remaining=31%)",
+            stderr.getvalue(),
+        )
 
     def test_observed_shared_exhaustion_selects_codex(self):
         route = select_route({

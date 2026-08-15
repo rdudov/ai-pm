@@ -101,10 +101,14 @@ POLL_SECONDS = tunable("PRODUCT_OWNER_GOAL_SESSION_POLL_SECONDS", 30)
 MIN_TURN_GAP_SECONDS = tunable("PRODUCT_OWNER_GOAL_SESSION_MIN_TURN_GAP_SECONDS", 60)
 # Сколько ждать ход модели.
 TURN_TIMEOUT = tunable("PRODUCT_OWNER_GOAL_SESSION_TURN_TIMEOUT_SECONDS", 1800)
-# После скольких ходов разговор ротируется принудительно. Наблюдаемый дорогой
-# разговор дошёл до 57 ходов и 4 044 193 токенов чтения кеша за ход; ротация
-# записывается, а watchdog поднимает новую сессию из той же долговечной цели.
-MAX_TURNS = tunable("PRODUCT_OWNER_GOAL_SESSION_MAX_TURNS", 57)
+# После скольких ходов разговор ротируется принудительно. Это страховочный
+# потолок, а наблюдаемый рост контекста ниже имеет собственный прямой порог.
+MAX_TURNS = tunable("PRODUCT_OWNER_GOAL_SESSION_MAX_TURNS", 60)
+# Наблюдаемый дорогой ход прочитал из кеша 4 044 193 токена. После такого хода
+# разговор ротируется до следующего обращения модели; watchdog поднимает новую
+# сессию из той же долговечной цели и заново собирает стартовый контекст.
+MAX_CACHE_READ_INPUT_TOKENS = tunable(
+    "PRODUCT_OWNER_GOAL_SESSION_MAX_CACHE_READ_INPUT_TOKENS", 4_044_193)
 # Предельная жизнь одной сессии. Тот же смысл: ротация, а не остановка работы.
 MAX_LIFETIME_SECONDS = tunable("PRODUCT_OWNER_GOAL_SESSION_MAX_LIFETIME_SECONDS", 21600)
 # Сколько последних ходов остаётся в контрольном снимке.
@@ -752,6 +756,18 @@ def loop(thread: str, once: bool = False) -> int:
                                      "rotation": "требуется новая сессия"}
                 write(thread, record)
                 return 1
+            cache_read = (turn.get("usage") or {}).get("cache_read_input_tokens")
+            if (isinstance(cache_read, (int, float))
+                    and not isinstance(cache_read, bool)
+                    and cache_read >= MAX_CACHE_READ_INPUT_TOKENS):
+                record["stopped"] = {
+                    "at": now(),
+                    "reason": (f"ход прочитал из кеша {cache_read:g} токенов: "
+                               f"порог {MAX_CACHE_READ_INPUT_TOKENS:g} достигнут"),
+                    "rotation": "требуется новая сессия",
+                }
+                write(thread, record)
+                return 0
             if record["session"]["turns"] >= MAX_TURNS:
                 record["stopped"] = {"at": now(),
                                      "reason": f"сессия отработала {MAX_TURNS} ходов: "

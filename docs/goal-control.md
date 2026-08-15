@@ -135,9 +135,10 @@ python3 scripts/product_goal.py close <id> --live-check "..." --src "..."
 
 Ротация сессии — записанное состояние, а не тихий обход: ход не отработал, окно
 исчерпано, маршрут увёл к Codex (у того разговора нет продолжения по этому
-идентификатору), сессия прошла `PRODUCT_OWNER_GOAL_SESSION_MAX_TURNS` ходов (по
-умолчанию 57: наблюдённая дорогая сессия дошла до 57 ходов и 4 044 193 токенов
-чтения кеша за ход) или
+идентификатору), ход достиг наблюдённого порога
+`PRODUCT_OWNER_GOAL_SESSION_MAX_CACHE_READ_INPUT_TOKENS` (по умолчанию
+4 044 193 токена чтения кеша), сессия прошла страховочный потолок
+`PRODUCT_OWNER_GOAL_SESSION_MAX_TURNS` ходов или
 прожила `PRODUCT_OWNER_GOAL_SESSION_MAX_LIFETIME_SECONDS`. Во всех случаях
 пишется `stopped`, и дальше действует watchdog.
 
