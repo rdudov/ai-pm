@@ -69,6 +69,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import codex_budget  # noqa: E402
+import daily_standup  # noqa: E402
 import goal_session  # noqa: E402  (обращения только в рантайме: импорт взаимный)
 import outbound  # noqa: E402
 import product_goal  # noqa: E402
@@ -562,7 +563,8 @@ def outcome(before: dict, after: dict | None, woke: bool, report: dict,
 
 def send_mail(subject: str, body: str, *,
               reply_to_message_id: str | None = None,
-              attachments: list[str] | None = None) -> str | bool | None:
+              attachments: list[str] | None = None,
+              raw_message: bytes | None = None) -> str | bool | None:
     """Put one letter in the mailbox the user actually reads.
 
     The push path needs a bot token in the environment, and the systemd unit
@@ -580,28 +582,37 @@ def send_mail(subject: str, body: str, *,
     """
     if not MAIL_TO or not MAIL_SCRIPT.is_file() or not MAIL_PYTHON.is_file():
         return False
-    command = [str(MAIL_PYTHON), str(MAIL_SCRIPT), "--to", MAIL_TO, "--body", body]
+    if raw_message is not None and (reply_to_message_id or attachments):
+        raise ValueError("raw_message owns its MIME structure and cannot be combined")
+    command = [str(MAIL_PYTHON), str(MAIL_SCRIPT), "--to", MAIL_TO]
+    if raw_message is not None:
+        command += ["--raw-message", "-"]
+    else:
+        command += ["--body", body]
     # A finished report is delivered only when the user can open it. An
     # approved research report once sat on disk for fourteen hours because the
     # only door mail leaves through could carry text and nothing else, and the
     # user had to ask where the reports they were told about actually were.
     for path in attachments or []:
         command += ["--attach", str(path)]
-    if reply_to_message_id:
+    if raw_message is not None:
+        pass
+    elif reply_to_message_id:
         command += ["--reply-to-message-id", reply_to_message_id]
     else:
         command += ["--subject", subject]
     try:
         result = subprocess.run(
-            command,
-            cwd=str(REPO), capture_output=True, text=True,
+            command, input=raw_message,
+            cwd=str(REPO), capture_output=True, text=raw_message is None,
             timeout=MAIL_TIMEOUT, check=False,
         )
     except Exception:
         return None
     if result.returncode != 0:
         return None
-    receipt = re.search(r"Message ID:\s*([A-Za-z0-9_-]+)", result.stdout or "")
+    stdout = (result.stdout or b"").decode() if isinstance(result.stdout, bytes) else (result.stdout or "")
+    receipt = re.search(r"Message ID:\s*([A-Za-z0-9_-]+)", stdout)
     # A successful upload must never be retried merely because a future sender
     # changed its human-readable receipt. The string is evidence when present;
     # True preserves the older success contract without risking a duplicate.
@@ -611,7 +622,8 @@ def send_mail(subject: str, body: str, *,
 def deliver(thread: str, kind: str, subject: str, body: str,
             report: dict | None, moment: datetime, chat: dict | None = None,
             *, reply_to_message_id: str | None = None,
-            attachments: list[str] | None = None) -> dict:
+            attachments: list[str] | None = None,
+            raw_message: bytes | None = None) -> dict:
     """The one door mail leaves this contour through.
 
     The push above is unconditional and stays that way: «прогон стартовал»,
@@ -638,19 +650,23 @@ def deliver(thread: str, kind: str, subject: str, body: str,
         delivered = None
         message_id = None
         if decision["action"] == "send":
-            send_result = send_mail(
-                subject, decision["body"], reply_to_message_id=reply_to_message_id,
-                attachments=attachments)
+            mail_options = {"reply_to_message_id": reply_to_message_id,
+                            "attachments": attachments}
+            if raw_message is not None:
+                mail_options["raw_message"] = raw_message
+            send_result = send_mail(subject, decision["body"], **mail_options)
             delivered = bool(send_result)
             message_id = send_result if isinstance(send_result, str) else None
             if not delivered:
-                if kind == "reply":
+                if kind in {"reply", "daily"}:
                     # A reply may not ride out later as proactive news. Keep the
                     # failure explicit for the mail-wake owner to handle; putting
                     # it in generic pending would violate the very reply boundary
                     # this kind establishes.
                     decision = {**decision, "action": "fail",
-                                "reason": "отправка ответа не удалась; повтор не выполнен",
+                                "reason": ("отправка ответа не удалась; повтор не выполнен"
+                                           if kind == "reply" else
+                                           "отправка оперативки не удалась; следующий утренний тик повторит"),
                                 "body": decision["raw_body"], "flush": []}
                 else:
                     # Held as it was written, not as it was merged: what
@@ -969,6 +985,22 @@ def main() -> int:
     moment = datetime.now(timezone.utc)
     now = moment.isoformat()
 
+    # The existing process timer fires on :00/:20/:40. Its first firing at or
+    # after 08:00 owns the daily letter. A failed mail is retried hourly from
+    # the observation already written here, without adding another scheduler.
+    daily_result = None
+    daily_failure = None
+    if args.thread == "process" and not args.dry_run:
+        try:
+            daily_result = daily_standup.maybe_send(
+                moment, previous=stored.get("daily_standup"))
+        except Exception as error:
+            daily_result = {"action": "fail", "at": moment.isoformat(),
+                            "reason": str(error)[:500]}
+        if daily_result.get("action") == "fail":
+            daily_failure = daily_result["reason"]
+            print(f"утренняя оперативка не доставлена: {daily_failure}", file=sys.stderr)
+
     # Before anything is observed, because a broken contract with the runner is
     # what makes the observation itself worthless — and it comes first so the
     # alarm is already out even if `build` then dies on that very name.
@@ -1042,6 +1074,9 @@ def main() -> int:
                 "src": f"скан RUNNER.<имя> в scripts/*.py против {RUNNER_SCRIPTS}",
             },
             "runner_contract_reminder": contract_reminder,
+            # A daily failure must stay visible without suppressing the normal
+            # thread observation that tells the user what else happened.
+            "daily_standup": daily_result,
             # What this check saw and what came of it, at the moment of the
             # check. When the *next* one falls is deliberately not here: this
             # process is the service paired with the timer, so the only instant
@@ -1075,7 +1110,7 @@ def main() -> int:
     # managed to observe something: an exit code is the one signal that survives
     # a wake-up nobody reads, and «наблюдение считает сломанным кодом» is not a
     # success whatever came out of it.
-    verdict = 1 if contract else 0
+    verdict = 1 if contract or daily_failure else 0
 
     if args.dry_run:
         print(json.dumps({"events": events, "snapshot": current, **standing,

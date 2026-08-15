@@ -95,7 +95,7 @@ IDLE_LETTER_SECONDS = tunable("PRODUCT_OWNER_IDLE_LETTER_SECONDS", 6 * 3600)
 # where they are raised, and an explicit reply is the answer owed to an incoming
 # user letter. None may be thresholded or coalesced into silence. `reply` is set
 # by the mail-wake producer; no text heuristic in this gateway may infer it.
-ALWAYS = ("alarm", "wake_failure", "reply")
+ALWAYS = ("alarm", "wake_failure", "reply", "daily")
 
 # Prompts written by a machine, not typed by the user. A session that has a user
 # turn matching none of these had a human in it, and only such a session counts
@@ -589,7 +589,9 @@ def decide(thread: str, kind: str, subject: str, body: str, report: dict,
 
     if kind in ALWAYS:
         reason = ("ответ на входящее письмо пользователя доходит всегда"
-                  if kind == "reply" else "сбой контура, не новость")
+                  if kind == "reply" else
+                  "ежедневная оперативка приходит по расписанию"
+                  if kind == "daily" else "сбой контура, не новость")
         return {"action": "send", "reason": reason, "body": body,
                 "raw_body": body, "fingerprint": candidate, "flush": []}
     if asks_user(body):
