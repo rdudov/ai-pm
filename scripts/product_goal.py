@@ -579,6 +579,7 @@ def projection(goal: dict) -> dict:
         "signals": [{"code": item["code"], "text": item["text"], "src": item["src"]}
                     for item in goal.get("signals", [])],
         "waiting_on": live_tasks(goal) if goal.get("state") != CLOSED else [],
+        "updated_at": goal.get("updated_at"),
         "src": f"долговечная запись цели {goal.get('id')} в {root()}",
     }
 

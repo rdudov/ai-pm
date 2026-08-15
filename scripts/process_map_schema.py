@@ -63,7 +63,7 @@ THREAD_FIELDS = ("key", "title", "products", "task_count", "tasks", "repos", "ch
                  # board offers «продолжить сейчас» against it.
                  "wake")
 
-TASK_INDEX_FIELDS = ("id", "task", "title", "status")
+TASK_INDEX_FIELDS = ("id", "task", "title", "status", "updated_at", "updated_src")
 
 # What a next-check observation carries. `at` may be `None` — a timer systemd is
 # holding unarmed is an honest gap — but then `src` has to say what was seen
@@ -113,7 +113,7 @@ OWNER_KINDS = ("tick", "session", "woken", "mail")
 # the same rule as every caption here, what observed all of it.
 GOAL_FIELDS = ("id", "state", "control", "outcome", "observable", "main_task",
                "correctives", "gap", "next_transition", "pause", "signals",
-               "waiting_on", "src")
+               "waiting_on", "updated_at", "src")
 GOAL_STATES = ("active", "paused", "closed")
 # Two kinds of attention, and the second one is turned on by an observed
 # deviation rather than chosen. Normal work never gets it.
@@ -239,7 +239,13 @@ QUESTION_FIELDS = ("text", "owner", "asked_at", "channel", "ref",
 # So the order and the pauses are read from their owner, one revision file, and
 # the board stays a reader: it never writes a plan, never renumbers one, and
 # never invents an entry the revision does not carry.
-PLAN_FIELDS = ("revision", "accepted_at", "src", "queue", "backlog")
+PLAN_FIELDS = ("revision", "accepted_at", "src", "outcomes", "queue", "backlog")
+
+# One result named by the current plan's ``now`` section. It carries the line
+# unchanged, the tasks the line names, and the next line of the same result.
+# Current state and time are deliberately not stored here: the renderer joins
+# this plan-owned projection with the already collected task observations.
+PLAN_OUTCOME_FIELDS = ("title", "text", "tasks", "goals", "next", "checked")
 
 # What one line of the plan carries onto the board. `text` is the line as the
 # product owner wrote it — never a paraphrase — and `checked` says what it was
@@ -606,8 +612,23 @@ def validate_plan(plan: dict, where: str = "план") -> dict:
     _require(plan, PLAN_FIELDS, where)
     if not str(plan["src"] or "").strip():
         raise ContractError(f"{where}: не сказано, чем наблюдён")
-    if plan["revision"] is None and (plan["queue"] or plan["backlog"]):
-        raise ContractError(f"{where}: редакции нет, а очередь или бэклог не пусты")
+    if plan["revision"] is None and (plan["outcomes"] or plan["queue"] or plan["backlog"]):
+        raise ContractError(f"{where}: редакции нет, а результаты, очередь или бэклог не пусты")
+    for index, outcome in enumerate(plan["outcomes"]):
+        outcome_where = f"{where}: результат дня, строка {index + 1}"
+        _require(outcome, PLAN_OUTCOME_FIELDS, outcome_where)
+        if not str(outcome["title"] or "").strip() or not str(outcome["text"] or "").strip():
+            raise ContractError(f"{outcome_where}: пустое название или строка")
+        if not str(outcome["checked"] or "").strip():
+            raise ContractError(f"{outcome_where}: не сказано, с чем сверена строка")
+        if not isinstance(outcome["next"], list) or not all(
+                isinstance(line, str) and line.strip() for line in outcome["next"]):
+            raise ContractError(f"{outcome_where}: next должен быть списком непустых строк")
+        for task in outcome["tasks"]:
+            _require(task, ("id", "title", "status"), f"{outcome_where}: задача")
+        if not isinstance(outcome["goals"], list) or not all(
+                isinstance(goal, str) and goal.strip() for goal in outcome["goals"]):
+            raise ContractError(f"{outcome_where}: goals должен быть списком идентификаторов")
     for index, entry in enumerate(plan["queue"]):
         validate_plan_entry(entry, f"{where}: очередь, строка {index + 1}")
     for index, entry in enumerate(plan["backlog"]):

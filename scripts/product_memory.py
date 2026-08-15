@@ -496,7 +496,7 @@ def records(product: str | None = None, base: Path | None = None) -> list[Path]:
 # ---------------------------------------------------------------------------
 
 
-PLAN_FIELDS = ("headline", "now", "next", "parallel", "paused",
+PLAN_FIELDS = ("headline", "now", "next", "outcome_links", "parallel", "paused",
                "grounds", "contradictions")
 
 
@@ -582,6 +582,12 @@ def plan_text(plan: dict | None) -> str:
         lines.append(f"{title}:")
         values = plan.get(field) or []
         lines.extend([f"  - {value}" for value in values] or ["  - нет"])
+    lines.append("")
+    lines.append("Явные связи результатов (now → next, tasks, goals):")
+    links = plan.get("outcome_links") or []
+    lines.extend([f"  - now {link.get('now')} → next {link.get('next', [])}; "
+                  f"tasks {link.get('tasks', [])}; goals {link.get('goals', [])}"
+                  for link in links] or ["  - нет"])
     lines.append("")
     lines.append("Не является очередью:")
     lines.append("  - все прочие задачи со статусом planned")

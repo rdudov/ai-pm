@@ -306,8 +306,19 @@ def observed_places(snapshot: dict) -> dict:
         for task in thread["tasks"]:
             seen.setdefault(task["id"], {"area": task["board"]["area"],
                                          "thread": thread["title"],
-                                         "status": task["status"]})
+                                         "status": task["status"],
+                                         "updated_at": task["board"]["since"],
+                                         "updated_src": task["board"]["since_src"],
+                                         "reason": task["board"]["why"],
+                                         "reason_src": task["board"]["why_src"],
+                                         "happening": task["board"]["happening"]})
     return seen
+
+
+def observed_goals(snapshot: dict) -> dict:
+    """Goal records explicitly linked by the current plan, keyed without prose matching."""
+    return {goal["id"]: goal for thread in snapshot["threads"]
+            for goal in thread.get("goals") or []}
 
 
 def plan_section(snapshot: dict) -> dict:
@@ -328,6 +339,48 @@ def plan_section(snapshot: dict) -> dict:
     """
     plan = snapshot["plan"]
     seen = observed_places(snapshot)
+    goals_seen = observed_goals(snapshot)
+
+    def outcomes(items: list[dict]) -> list[dict]:
+        shown = []
+        for item in items:
+            tasks = [{**task, **seen.get(task["id"], {})} for task in item["tasks"]]
+            goals = [goals_seen[goal_id] for goal_id in item["goals"]
+                     if goal_id in goals_seen]
+            observed = [task for task in tasks if task.get("area")]
+            goal_waiting = {number for goal in goals for number in goal["waiting_on"]}
+            if (any(task.get("area") == "running" for task in observed)
+                    or any(task.get("area") == "running" and number in goal_waiting
+                           for number, task in seen.items())):
+                state = "running"
+            elif ((tasks and len(observed) == len(tasks)
+                   and all(task.get("status") == "completed" for task in observed))
+                  or any(goal["state"] == "closed" for goal in goals)):
+                state = "done"
+            elif (any(task.get("reason") for task in observed)
+                  or any(goal["state"] == "paused" or goal.get("gap") for goal in goals)):
+                state = "stuck"
+            else:
+                state = "unknown"
+            timestamps = ([{"updated_at": task.get("updated_at"),
+                            "updated_src": task.get("updated_src")} for task in tasks]
+                          + [{"updated_at": goal.get("updated_at"),
+                              "updated_src": goal.get("src")} for goal in goals])
+            freshest = max((entry for entry in timestamps if entry.get("updated_at")),
+                           key=lambda entry: entry["updated_at"], default=None)
+            reason_task = next((task for task in tasks if task.get("reason")), None)
+            reason_goal = next((goal for goal in goals
+                                if goal["state"] == "paused" or goal.get("gap")), None)
+            reason = ((reason_task or {}).get("reason")
+                      or ((reason_goal or {}).get("pause") or {}).get("reason")
+                      or (reason_goal or {}).get("gap"))
+            reason_src = ((reason_task or {}).get("reason_src")
+                          or (reason_goal or {}).get("src"))
+            shown.append({**item, "tasks": tasks, "goals": goals, "state": state,
+                          "updated_at": (freshest or {}).get("updated_at"),
+                          "updated_src": (freshest or {}).get("updated_src"),
+                          "reason": reason, "reason_src": reason_src})
+        return shown
 
     def entries(items: list[dict]) -> list[dict]:
         # `also` идёт рядом с `tasks` и своим именем: это работы, которые строка
@@ -345,6 +398,7 @@ def plan_section(snapshot: dict) -> dict:
         "revision": plan["revision"],
         "accepted_at": plan["accepted_at"],
         "src": plan["src"],
+        "outcomes": outcomes(plan["outcomes"]),
         "queue": entries(plan["queue"]),
         # Бэклог: строки плана, которые держат работу его собственными словами —
         # там же сказано, чьим словом и когда.
@@ -554,7 +608,8 @@ def payload(timeline_path: Path, snapshot_path: Path, live_url: str | None = Non
     # does not transfer every task directory every ten seconds.
     task_index = []
     for item in snapshot["task_index"]:
-        row = {key: item[key] for key in ("id", "task", "title", "status")}
+        row = {key: item[key] for key in
+               ("id", "task", "title", "status", "updated_at", "updated_src")}
         if item.get("entry") is not None:
             row["card"] = plate(item["entry"])
         task_index.append(row)

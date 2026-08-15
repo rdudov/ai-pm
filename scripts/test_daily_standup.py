@@ -25,11 +25,18 @@ SAMPLE = {
 
 
 class DailyStandupRendering(unittest.TestCase):
+    def test_background_composition_selects_print_entry_explicitly(self):
+        completed = mock.Mock(returncode=0, stdout=__import__("json").dumps(SAMPLE), stderr="")
+        with mock.patch.object(daily.subprocess, "run", return_value=completed) as run:
+            daily.compose({"plan": "plan"}, "2026-08-15")
+        self.assertEqual(run.call_args.args[0][1:3], ["--entry", "print"])
+
     def test_thread_dry_run_cannot_call_the_daily_sender(self):
         source = Path(thread_tick.__file__).read_text(encoding="utf-8")
         daily_block = source[source.index("daily_result = None"):
                              source.index("# Before anything is observed")]
         self.assertIn('if args.thread == "process" and not args.dry_run:', daily_block)
+        self.assertIn('[str(CLAUDE_PRODUCT_OWNER), "--entry", "print"]', source)
 
     def test_one_source_makes_plain_and_real_html_table(self):
         plain = daily.render_plain(SAMPLE)

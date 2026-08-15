@@ -331,6 +331,10 @@ def task_index(catalogue: list[dict], entries: dict[str, dict] | None = None) ->
                "title": task.get("title") or name, "status": task.get("status")}
         if name in entries:
             row["entry"] = entries[name]
+            row["updated_at"] = entries[name]["board"]["since"]
+            row["updated_src"] = entries[name]["board"]["since_src"]
+        else:
+            row["updated_at"], _age, row["updated_src"] = state_age(REPO / task["path"])
         rows.append(row)
     return rows
 
@@ -1256,6 +1260,9 @@ def jam_reason(status_detail: str | None, run: dict, verdicts: list[dict],
         # живёт остальной аппарат происхождения.
         return ("не пройдено гейтов: " + str(len(failed)),
                 "строки Result в verification.md: " + ", ".join(failed[:3]))
+    if run.get("refusal"):
+        return (run.get("refusal_summary") or run["refusal"],
+                "completion_refusal в status.json")
     if "stale_label" in flags:
         return ("ярлык говорит running, а записанного процесса нет",
                 "status.json против личности процесса из .runner/runner.json")
@@ -1800,7 +1807,9 @@ def task_entry(task: dict, mail: dict,
     since, age, since_src = state_age(task_dir)
     status_detail = task.get("status_detail")
     condition = start_condition(status_detail)
-    why, why_src = jam_reason(status_detail, run, verdicts, flags, condition)
+    reason_run = run if status not in TERMINAL else {
+        **run, "refusal": None, "refusal_summary": None}
+    why, why_src = jam_reason(status_detail, reason_run, verdicts, flags, condition)
     progress = run.get("progress") or {}
 
     return {
@@ -2478,6 +2487,71 @@ def plan_entry(field: str, text: str, known: dict, kind: str | None = None) -> d
     return entry
 
 
+PLAN_HEADING = re.compile(r"^\s*\*\*(.+?)\*\*")
+
+
+def plan_outcomes(plan: dict, known: dict) -> list[dict]:
+    """Results named by ``now`` and only explicitly related ``next`` lines.
+
+    ``outcome_links`` is part of the same immutable current-plan revision.  It
+    contains one-based ``now`` and ``next`` line indexes, so the board never
+    guesses a result relation from similar prose or a coincidental task number.
+    """
+    next_lines = list(plan.get("next") or [])
+    raw_links = plan.get("outcome_links", [])
+    if not isinstance(raw_links, list):
+        raise ContractError("план: outcome_links должен быть списком")
+    links = {}
+    for link in raw_links:
+        if not isinstance(link, dict) or not {"now", "next"} <= set(link) \
+                or set(link) - {"now", "next", "tasks", "goals"}:
+            raise ContractError("план: outcome_links содержит запись не формы now/next/tasks/goals")
+        now_index, next_indexes = link["now"], link["next"]
+        if (not isinstance(now_index, int) or isinstance(now_index, bool)
+                or not 1 <= now_index <= len(plan.get("now") or [])):
+            raise ContractError("план: outcome_links ссылается на отсутствующую строку now")
+        if now_index in links:
+            raise ContractError("план: строка now дважды объявлена в outcome_links")
+        if (not isinstance(next_indexes, list)
+                or any(not isinstance(value, int) or isinstance(value, bool)
+                       or not 1 <= value <= len(next_lines) for value in next_indexes)):
+            raise ContractError("план: outcome_links ссылается на отсутствующую строку next")
+        goal_ids = link.get("goals", [])
+        if not isinstance(goal_ids, list) or not all(
+                isinstance(value, str) and value.strip() for value in goal_ids):
+            raise ContractError("план: outcome_links содержит неверный список goals")
+        task_ids = link.get("tasks", [])
+        if (not isinstance(task_ids, list) or any(
+                not isinstance(value, int) or isinstance(value, bool) or value not in known
+                for value in task_ids)):
+            raise ContractError("план: outcome_links содержит неизвестные tasks")
+        links[now_index] = {"next": next_indexes, "tasks": task_ids, "goals": goal_ids}
+
+    outcomes = []
+    for index, text in enumerate(plan.get("now") or [], 1):
+        relation = links.get(index, {"next": [], "tasks": [], "goals": []})
+        ids = relation["tasks"] or plan_line_tasks(text, known)
+        heading = PLAN_HEADING.search(text)
+        title = heading.group(1).strip() if heading else " ".join(text.split())[:120]
+        positions = relation["next"]
+        transitions = [next_lines[position - 1] for position in positions
+                       if isinstance(position, int) and 1 <= position <= len(next_lines)]
+        outcomes.append({
+            "title": title,
+            "text": text,
+            "tasks": [{"id": number, "title": known[number].get("title"),
+                       "status": known[number].get("status")} for number in ids],
+            "goals": relation["goals"],
+            "next": transitions,
+            "checked": ((f"строка now {index} и явно связанные outcome_links "
+                         f"строки next {positions} действующей редакции; "
+                         if index in links else
+                         f"строка now {index}; явной связи outcome_links в редакции нет; ")
+                        + f"номера сверены с каталогом задач ({len(known)} задач)"),
+        })
+    return outcomes
+
+
 def plan_projection(catalogue: list[dict] | None = None) -> dict:
     """Очередь, бэклог и место каждой задачи — по действующей редакции плана.
 
@@ -2518,7 +2592,8 @@ def plan_projection(catalogue: list[dict] | None = None) -> dict:
         # «Плана нет» — честный ответ и единственный доступный: очередь не
         # выводится из статусов, и молчание владельца порядка не заменяется
         # догадкой. Места задач остаются пустыми, и доска про очередь молчит.
-        return {"revision": None, "accepted_at": None, "queue": [], "backlog": [],
+        return {"revision": None, "accepted_at": None, "outcomes": [],
+                "queue": [], "backlog": [],
                 "places": {}, "conflicts": [],
                 "src": f"редакций плана нет в {product_memory.revisions_dir()}"}
     revisions = product_memory.plan_revisions()
@@ -2526,6 +2601,7 @@ def plan_projection(catalogue: list[dict] | None = None) -> dict:
     revision = plan.get("revision")
     src = f"действующая редакция {revision} портфельного плана, файл {source}"
 
+    outcomes = plan_outcomes(plan, known)
     queue: list[dict] = []
     backlog: list[dict] = []
     for text in plan.get("next") or []:
@@ -2619,7 +2695,7 @@ def plan_projection(catalogue: list[dict] | None = None) -> dict:
         places[number]["ahead"] = [other for other in living
                                    if places[other]["position"] < places[number]["position"]]
     return {"revision": revision, "accepted_at": plan.get("accepted_at"),
-            "queue": queue, "backlog": backlog, "places": places,
+            "outcomes": outcomes, "queue": queue, "backlog": backlog, "places": places,
             "conflicts": conflicts, "src": src}
 
 

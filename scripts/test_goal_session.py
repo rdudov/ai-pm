@@ -38,6 +38,7 @@ def goal(state: str = "active", control: str = "reinforced", waiting: list[int] 
             "main_task": 1094, "correctives": [], "gap": "ремонт не установлен",
             "next_transition": "вернуть основную задачу", "pause": None, "signals": [],
             "waiting_on": [1094] if waiting is None else waiting,
+            "updated_at": "2026-08-15T09:00:00+00:00",
             "src": "долговечная запись цели 0001"}
 
 
