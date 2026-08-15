@@ -3709,6 +3709,18 @@ class TheWakeUpSeesTheQueueMove(unittest.TestCase):
                 "available": True, "reason": None},
         }
 
+    def test_the_tick_forwards_only_the_router_observation_diagnostic(self):
+        diagnostic = (
+            "product-owner: route observation unavailable; keeping Claude "
+            "(codex_weekly_remaining_unavailable:claude_remaining=31%)"
+        )
+        self.assertEqual(
+            tick.route_diagnostics(f"model warning\n{diagnostic}\nother noise\n"),
+            [diagnostic],
+        )
+        source = Path(tick.__file__).read_text()
+        self.assertLess(source.index("def route_diagnostics"), source.index("def main"))
+
     def test_a_condition_that_cleared_is_a_transition_like_a_finished_run(self):
         before = tick.snapshot(self.report())
         after = tick.snapshot(self.report(ready=[831]))
