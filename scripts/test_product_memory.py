@@ -156,6 +156,17 @@ def test_plan_text_names_the_edition_it_replaces(store: Path):
     assert "*" not in text and "=" not in text
 
 
+def test_plan_publishes_and_prints_explicit_outcome_links(store: Path):
+    memory.publish_plan({"headline": "цель", "now": ["результат"],
+                         "next": ["переход"],
+                         "outcome_links": [{"now": 1, "next": [1], "tasks": [1095],
+                                            "goals": ["0002"]}]},
+                        base=store)
+    plan = memory.current_plan(store)
+    assert plan["outcome_links"][0]["goals"] == ["0002"]
+    assert "now 1 → next [1]; tasks [1095]; goals ['0002']" in memory.plan_text(plan)
+
+
 def test_checksums_cover_every_stored_file(store: Path):
     memory.write_record("Решение", "тело", product="demo", base=store)
     memory.attach("payload.bin", b"bytes", product="demo", base=store)

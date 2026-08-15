@@ -229,6 +229,33 @@
      на 390, где строка иначе уезжала за правый край на 46 пикселей. */
   #plan .tag { white-space: normal; }
 
+  /* The answer the user opens this page for: one compact row per result named
+     in the current plan, joined to the task/lifecycle observations already on
+     the page. It is distinct from both the mechanical pickup catalogue and the
+     historical activity feed. */
+  #dayplan { padding: 10px 18px 12px; border-bottom: 1px solid var(--edge);
+             background: var(--bg1); }
+  #dayplan .dayhead { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap;
+                      margin-bottom: 6px; }
+  #dayplan .dayhead b { font-size: 14px; }
+  #dayplan .dayhead span { color: var(--dim); font-size: 11.5px; }
+  #dayrows { display: grid; gap: 5px; }
+  .dayrow { display: grid; grid-template-columns: minmax(190px, 1.2fr) 76px 145px minmax(220px, 1fr);
+            gap: 8px 12px; padding: 7px 9px; border: 1px solid var(--edge);
+            border-radius: 8px; background: var(--surface); align-items: baseline; }
+  .dayrow .name { font-weight: 600; overflow-wrap: anywhere; }
+  .dayrow .state { font-weight: 650; }
+  .dayrow .state.done { color: var(--done); }
+  .dayrow .state.running { color: var(--live); }
+  .dayrow .state.stuck { color: var(--blocked); }
+  .dayrow .state.unknown { color: var(--dim); }
+  .dayrow .changed { color: var(--dim); font-size: 12px; font-variant-numeric: tabular-nums; }
+  .dayrow .why, .dayrow .next { font-size: 12.5px; overflow-wrap: anywhere; }
+  .dayrow .why { grid-column: 1 / 4; color: var(--dim); }
+  .dayrow .next { grid-column: 4; grid-row: 1 / span 2; }
+  .dayrow .next b { font-weight: 600; }
+  .dayrow > .srcbtn, .dayrow > .srcbox { grid-column: 1 / -1; }
+
   #columns { display: grid; grid-template-columns: repeat(4, 1fr);
              gap: 14px; padding: 14px; align-items: start; }
   .col { display: flex; flex-direction: column; min-width: 0;
@@ -494,7 +521,10 @@
   #taskrows { width: min(1040px, calc(100% - 36px)); margin: 14px auto 28px;
               border: 1px solid var(--edge); border-radius: 12px; overflow: hidden;
               background: var(--surface); }
-  .taskrow { display: grid; grid-template-columns: 76px minmax(0, 1fr) 130px;
+  #taskfilter, #tasksort { border: 1px solid var(--edge); border-radius: 8px;
+                           background: var(--surface); color: var(--ink); padding: 7px 9px;
+                           font: inherit; margin: 8px 8px 0 0; }
+  .taskrow { display: grid; grid-template-columns: 76px minmax(0, 1fr) 130px 170px;
              gap: 12px; align-items: baseline; padding: 10px 12px;
              border-bottom: 1px solid var(--edge); cursor: pointer; }
   .taskrow:last-child { border-bottom: 0; }
@@ -503,6 +533,8 @@
   .taskrow .num { color: var(--dim); font-variant-numeric: tabular-nums; }
   .taskrow .name { overflow-wrap: anywhere; }
   .taskrow .status { color: var(--dim); text-align: right; }
+  .taskrow .updated { color: var(--dim); text-align: right; font-size: 12px;
+                      font-variant-numeric: tabular-nums; }
   #taskempty { color: var(--dim); text-align: center; padding: 28px 12px; }
 
   /* Two columns before one: at a tablet width four columns give every plate a
@@ -524,6 +556,11 @@
     /* Очередь и бэклог на телефоне читаются тем же списком: строка переносится,
        а не обрезается, и порядок остаётся порядком. */
     #plan { padding: 8px 12px 10px; }
+    #dayplan { padding: 8px 12px 10px; }
+    .dayrow { grid-template-columns: 1fr auto; gap: 3px 8px; padding: 7px 8px; }
+    .dayrow .changed { grid-column: 1; }
+    .dayrow .why { grid-column: 1 / 3; }
+    .dayrow .next { grid-column: 1 / 3; grid-row: auto; }
     /* The three-line clamp that used to stand here was the phone half of finding
        HIGH-1: reasons #723, #727 and #747 ended in an ellipsis and two of them
        ran past the right edge of a 390 window. What keeps «Ждёт решения
@@ -535,6 +572,7 @@
     #taskrows { width: calc(100% - 24px); margin-top: 12px; }
     .taskrow { grid-template-columns: 62px minmax(0, 1fr); gap: 5px 9px; padding: 10px; }
     .taskrow .status { grid-column: 2; text-align: left; font-size: 12px; }
+    .taskrow .updated { grid-column: 2; text-align: left; }
   }
 
   /* ---------- the card: detail without leaving the page ----------
@@ -625,6 +663,7 @@
        направлением и что дальше. Очередь плана и лента наблюдений ниже: это
        подробности и история, а не ответы. Ничего не удалено, переставлено. -->
   <div id="strip"></div>
+  <div id="dayplan"><div class="dayhead"><b>Результаты плана дня</b><span id="daymeta"></span></div><div id="dayrows"></div></div>
   <div id="columns"></div>
   <div id="plan"></div>
   <div id="feed"></div>
@@ -645,6 +684,17 @@
     <input id="tasksearch" type="search" inputmode="search"
            placeholder="Например, 1054 или списка задач" autocomplete="off">
     <span id="taskcount"></span>
+    <div>
+      <label for="taskfilter">Статус</label>
+      <select id="taskfilter"><option value="all">Все статусы</option></select>
+      <label for="tasksort">Сортировка</label>
+      <select id="tasksort">
+        <option value="updated_desc">Сначала изменённые недавно</option>
+        <option value="updated_asc">Сначала изменённые давно</option>
+        <option value="id_desc">По номеру: новые сначала</option>
+        <option value="id_asc">По номеру: старые сначала</option>
+      </select>
+    </div>
   </div>
   <div id="taskrows"></div>
 </div>
@@ -2516,6 +2566,55 @@ function drawPlan(plan) {
                              plan.backlog, "нет: план ничего не держит", false));
 }
 
+function drawDayPlan(plan) {
+  const rows = el("dayrows");
+  rows.textContent = "";
+  el("daymeta").textContent = plan.revision
+    ? "редакция " + plan.revision + " · состояние — из наблюдаемых задач"
+    : "порядок работ не установлен";
+  for (const item of plan.outcomes || []) {
+    const row = document.createElement("div");
+    row.className = "dayrow";
+    const name = document.createElement("div");
+    name.className = "name";
+    const taskNumbers = (item.tasks || []).map(task => "#" + task.id).join(", ");
+    name.textContent = human(item.title) + (taskNumbers ? " · " + taskNumbers : "");
+    const state = document.createElement("div");
+    state.className = "state " + item.state;
+    state.textContent = item.state === "done" ? "сделано"
+      : item.state === "running" ? "идёт"
+      : item.state === "stuck" ? "стоит" : "нет наблюдения";
+    const changed = document.createElement("div");
+    changed.className = "changed";
+    changed.textContent = item.updated_at ? stamp(item.updated_at) : "время не наблюдается";
+    const why = document.createElement("div");
+    why.className = "why";
+    const reason = String(item.reason || "").replace(/^\s*\*\*.+?\*\*\s*/, "");
+    why.textContent = reason
+      ? (item.state === "stuck" ? "Почему стоит: " : "Что изменилось: ") + human(reason)
+      : "Причина в наблюдаемом состоянии не названа";
+    const next = document.createElement("div");
+    next.className = "next";
+    const nextLabel = document.createElement("b");
+    nextLabel.textContent = "Дальше: ";
+    next.appendChild(nextLabel);
+    next.appendChild(document.createTextNode((item.next || []).length
+      ? item.next.map(human).join(" · ")
+      : "явная связь с переходом в этой редакции не задана"));
+    row.appendChild(name); row.appendChild(state); row.appendChild(changed);
+    row.appendChild(why); row.appendChild(next);
+    sourceNote(row, [["Результат и переход", item.checked],
+                     ["Состояние и время", item.updated_src],
+                     ["Причина", item.reason_src]]);
+    rows.appendChild(row);
+  }
+  if (!(plan.outcomes || []).length) {
+    const none = document.createElement("div");
+    none.className = "none"; none.textContent = "В текущем плане результаты дня не названы";
+    rows.appendChild(none);
+  }
+}
+
 /* Бэклог — строки плана, которые держат работу его собственными словами: в самой
    строке сказано, чьим словом и когда. Раньше эта работа лежала под «можно
    подхватить», то есть доска предлагала подхватить остановленное пользователем.
@@ -2531,6 +2630,7 @@ function drawPlan(plan) {
 
 function drawBoard(board, snapshot) {
   drawStrip(board);
+  drawDayPlan(board.plan);
   drawPlan(board.plan);
   const columns = el("columns");
   columns.textContent = "";
@@ -2753,11 +2853,31 @@ function openIndexedTask(item) {
 
 function drawTaskIndex() {
   const query = el("tasksearch").value.trim().toLocaleLowerCase("ru-RU");
+  const wantedStatus = el("taskfilter").value;
+  const order = el("tasksort").value;
   const number = query.replace(/^#/, "");
   const searchesNumber = number.length > 0 && /^\d+$/.test(number);
   const all = DATA.snapshot.task_index || [];
-  const shown = all.filter(item => !query || (searchesNumber && String(item.id).includes(number))
-    || String(item.title).toLocaleLowerCase("ru-RU").includes(query));
+  const filter = el("taskfilter");
+  const statuses = [...new Set(all.map(item => item.status || "").filter(Boolean))].sort();
+  const selected = filter.value;
+  filter.textContent = "";
+  for (const value of ["all", ...statuses]) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = value === "all" ? "Все статусы" : (ru(STATUS_RU, value) || value);
+    filter.appendChild(option);
+  }
+  filter.value = statuses.includes(selected) ? selected : "all";
+  const activeStatus = statuses.includes(wantedStatus) ? wantedStatus : "all";
+  let shown = all.filter(item => (activeStatus === "all" || item.status === activeStatus)
+    && (!query || (searchesNumber && String(item.id).includes(number))
+      || String(item.title).toLocaleLowerCase("ru-RU").includes(query)));
+  const moment = item => item.updated_at ? Date.parse(item.updated_at) : -Infinity;
+  shown = [...shown].sort((a, b) => order === "id_asc" ? a.id - b.id
+    : order === "id_desc" ? b.id - a.id
+    : order === "updated_asc" ? moment(a) - moment(b)
+    : moment(b) - moment(a));
   const rows = el("taskrows");
   rows.textContent = "";
   for (const item of shown) {
@@ -2771,7 +2891,10 @@ function drawTaskIndex() {
     name.className = "name"; name.textContent = item.title;
     const status = document.createElement("span");
     status.className = "status"; status.textContent = ru(STATUS_RU, item.status) || "без статуса";
-    row.appendChild(num); row.appendChild(name); row.appendChild(status);
+    const updated = document.createElement("span");
+    updated.className = "updated";
+    updated.textContent = item.updated_at ? stamp(item.updated_at) : "изменение не наблюдается";
+    row.appendChild(num); row.appendChild(name); row.appendChild(status); row.appendChild(updated);
     rows.appendChild(row);
   }
   if (!shown.length) {
@@ -2787,6 +2910,8 @@ function drawTaskIndex() {
 }
 
 el("tasksearch").addEventListener("input", drawTaskIndex);
+el("taskfilter").addEventListener("change", drawTaskIndex);
+el("tasksort").addEventListener("change", drawTaskIndex);
 
 /* Redraw in place with a fresher document. Live mode used to call
    `location.reload()`, which is fine for a picture and wrong for a tool: it

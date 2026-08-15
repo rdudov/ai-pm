@@ -103,7 +103,7 @@ def parse_composition(text: str) -> dict:
 
 def compose(packet: dict, local_date: str) -> dict:
     result = subprocess.run(
-        [str(ROUTER), "--print", "--dangerously-skip-permissions"],
+        [str(ROUTER), "--entry", "print"],
         input=prompt(packet, local_date), text=True, capture_output=True,
         cwd=HOME, env={**os.environ, "IS_SANDBOX": "1"}, timeout=MODEL_TIMEOUT,
         check=False)

@@ -196,7 +196,8 @@ def a_plan(**over) -> dict:
     plan = {"revision": 31, "accepted_at": "2026-08-13T20:48:53+00:00",
             "src": "действующая редакция 31 портфельного плана, файл "
                    "content/plan/revisions/000031.json",
-            "queue": [a_plan_entry()], "backlog": [a_plan_entry(**BACKLOG_ENTRY)]}
+            "outcomes": [], "queue": [a_plan_entry()],
+            "backlog": [a_plan_entry(**BACKLOG_ENTRY)]}
     plan.update(over)
     return plan
 
@@ -244,7 +245,9 @@ def a_snapshot(tasks=None, products=None, plan=None) -> dict:
                                   "promises": [a_promise()]}],
         "owners_awake": [],
         "task_index": [{"id": task["id"], "task": task["dir"],
-                        "title": task["title"], "status": task["status"]}
+                        "title": task["title"], "status": task["status"],
+                        "updated_at": task["board"]["since"],
+                        "updated_src": task["board"]["since_src"]}
                        for task in (tasks or [a_task()])],
         # Порядок работ и паузы приходят от их владельца — плана, — а не выводятся
         # из статусов задач снимка.
@@ -397,11 +400,15 @@ class Rendering(unittest.TestCase):
 
 class TaskIndexTab(unittest.TestCase):
     def test_the_index_carries_lookup_fields_and_no_directory_detail(self):
-        rows = state.task_index([{"id": 1054, "path": "tasks/1054-board-task-index-tab",
-                                  "title": "Вкладка списка задач", "status": "planned",
-                                  "status_detail": "not index data"}])
+        with mock.patch.object(state, "state_age", return_value=(
+                "2026-08-15T08:30:00+00:00", 60, "mtime task.md")):
+            rows = state.task_index([{"id": 1054, "path": "tasks/1054-board-task-index-tab",
+                                      "title": "Вкладка списка задач", "status": "planned",
+                                      "status_detail": "not index data"}])
         self.assertEqual(rows, [{"id": 1054, "task": "1054-board-task-index-tab",
-                                 "title": "Вкладка списка задач", "status": "planned"}])
+                                 "title": "Вкладка списка задач", "status": "planned",
+                                 "updated_at": "2026-08-15T08:30:00+00:00",
+                                 "updated_src": "mtime task.md"}])
 
     def test_number_and_title_search_and_clickable_rows_are_on_the_page(self):
         page = (Path(__file__).parent / "process_map_template.html").read_text()
@@ -1269,6 +1276,28 @@ class JamReason(unittest.TestCase):
         why, src = state.jam_reason(None, {**self.NO_RUN, "stop_reason": "memory_limit"}, [], [])
         self.assertEqual(why, "memory_limit")
         self.assertIn("runner.json", src)
+
+    def test_a_completion_refusal_names_the_unfinished_closing_step(self):
+        run = {**self.NO_RUN, "refusal": "pipeline_refused_to_close",
+               "refusal_summary": "Не завершены review и live-проверка"}
+        why, src = state.jam_reason(None, run, [], [])
+        self.assertEqual(why, "Не завершены review и live-проверка")
+        self.assertIn("completion_refusal", src)
+
+    def test_a_specific_status_detail_stays_above_a_general_completion_refusal(self):
+        run = {**self.NO_RUN, "refusal": "pipeline_refused_to_close",
+               "refusal_summary": "Не завершены review и live-проверка"}
+        why, src = state.jam_reason("queued_behind_old_writer", run, [], [])
+        self.assertEqual(why, "queued_behind_old_writer")
+        self.assertIn("status_detail", src)
+
+    def test_a_failed_gate_stays_above_a_general_completion_refusal(self):
+        run = {**self.NO_RUN, "refusal": "pipeline_refused_to_close",
+               "refusal_summary": "Rejected premature completion"}
+        why, src = state.jam_reason(None, run,
+                                    [{"gate": "live_surface", "result": "FAIL"}], [])
+        self.assertEqual(why, "не пройдено гейтов: 1")
+        self.assertIn("verification.md", src)
 
     def test_a_failed_gate_is_a_reason(self):
         why, src = state.jam_reason(None, self.NO_RUN,
@@ -4140,6 +4169,39 @@ class ThePlanOwnsTheQueue(unittest.TestCase):
         self.assertEqual([[t["id"] for t in entry["tasks"]] for entry in queue],
                          [[1082], [1121], [1136, 1138]])
 
+    def test_each_now_result_keeps_its_tasks_and_next_transition(self):
+        projection = self.projection(a_revision(
+            now=["**Companion — результат принят (1121).** Всё доставлено.",
+                 "**Продукт А — контроль по расписанию.** Наблюдение сохранено."],
+            next=["**Companion:** дальше 1136 → 1138.",
+                  "**Продукт А:** следующая проверка 16 августа."],
+            outcome_links=[{"now": 1, "next": [1], "tasks": [1121]},
+                           {"now": 2, "next": [2]}]))
+        self.assertEqual([item["title"] for item in projection["outcomes"]],
+                         ["Companion — результат принят (1121).",
+                          "Продукт А — контроль по расписанию."])
+        self.assertEqual([task["id"] for task in projection["outcomes"][0]["tasks"]],
+                         [1121])
+        self.assertIn("1136", projection["outcomes"][0]["next"][0])
+        self.assertIn("16 августа", projection["outcomes"][1]["next"][0])
+
+    def test_no_transition_is_guessed_without_an_explicit_plan_relation(self):
+        outcome = self.projection(a_revision(
+            now=["**Companion (1121).**"],
+            next=["1121 — совпавший номер сам по себе не связь"]))["outcomes"][0]
+        self.assertEqual(outcome["next"], [])
+        self.assertIn("явной связи", outcome["checked"])
+
+    def test_mentions_in_a_now_line_do_not_change_the_results_state(self):
+        outcome = self.projection(a_revision(
+            now=["**1121 — результат.** Старые 1152 и 1136 только упомянуты"],
+            outcome_links=[]))["outcomes"][0]
+        self.assertEqual([task["id"] for task in outcome["tasks"]], [1121])
+
+    def test_a_broken_explicit_relation_is_refused_not_silently_ignored(self):
+        with self.assertRaises(schema.ContractError):
+            self.projection(a_revision(outcome_links=[{"now": 1, "next": [99]}]))
+
     def test_a_queue_written_one_task_to_a_line_is_read_by_name(self):
         """Приёмочное условие 3: порядок совпадает с редакцией поимённо.
 
@@ -4555,6 +4617,64 @@ class TheBoardShowsThePlan(unittest.TestCase):
         self.assertEqual(board["plan"]["revision"], 31)
         self.assertEqual([t["id"] for t in board["plan"]["queue"][0]["tasks"]], [1121])
 
+    def test_a_plan_result_joins_observed_state_time_reason_and_transition(self):
+        outcome = {"title": "Результат", "text": "**Результат (1121).**",
+                   "tasks": [{"id": 1121, "title": "Работа", "status": "planned"}],
+                   "goals": [],
+                   "next": ["1121 — проверить live"], "checked": "current_plan now/next"}
+        task = a_task(id=1121, dir="1121-t", flags=["blocked"], board={
+            "area": "stuck", "since": "2026-08-15T09:00:00+00:00",
+            "why": "Не завершена live-проверка", "why_src": "completion_refusal"})
+        board = render.build_board(a_snapshot([task], plan=a_plan(outcomes=[outcome])))
+        shown = board["plan"]["outcomes"][0]
+        self.assertEqual((shown["state"], shown["updated_at"]),
+                         ("stuck", "2026-08-15T09:00:00+00:00"))
+        self.assertEqual(shown["reason"], "Не завершена live-проверка")
+        self.assertEqual(shown["next"], ["1121 — проверить live"])
+
+    def test_a_result_without_observation_is_not_called_stuck(self):
+        outcome = {"title": "Продукт А", "text": "**Продукт А — по расписанию.**",
+                   "tasks": [], "goals": [], "next": [], "checked": "current plan"}
+        shown = render.build_board(a_snapshot(plan=a_plan(outcomes=[outcome])))["plan"]["outcomes"][0]
+        self.assertEqual(shown["state"], "unknown")
+        self.assertIsNone(shown["updated_at"])
+        self.assertIsNone(shown["reason"])
+
+    def test_an_explicit_goal_link_supplies_observed_state_time_and_reason(self):
+        outcome = {"title": "Продукт А", "text": "**Продукт А — по расписанию.**",
+                   "tasks": [], "goals": ["0002"], "next": [],
+                   "checked": "current plan outcome_links"}
+        goal = {"id": "0002", "state": "active", "control": "reinforced",
+                "outcome": "штатный отчёт приходит", "observable": [],
+                "main_task": None, "correctives": [], "gap": "ждёт timer 00:15",
+                "next_transition": "наблюдать receipt", "pause": None, "signals": [],
+                "waiting_on": [], "updated_at": "2026-08-15T10:00:00+00:00",
+                "src": "долговечная запись цели 0002"}
+        snapshot = a_snapshot(plan=a_plan(outcomes=[outcome]))
+        snapshot["threads"][0]["goals"] = [goal]
+        shown = render.build_board(snapshot)["plan"]["outcomes"][0]
+        self.assertEqual((shown["state"], shown["reason"]),
+                         ("stuck", "ждёт timer 00:15"))
+        self.assertEqual(shown["updated_at"], "2026-08-15T10:00:00+00:00")
+
+    def test_cancelled_or_superseded_is_not_presented_as_done(self):
+        for status in ("cancelled", "superseded"):
+            outcome = {"title": "Результат", "text": "**Результат (1121).**",
+                       "tasks": [{"id": 1121, "title": "Работа", "status": status}],
+                       "goals": [], "next": [], "checked": "current plan"}
+            task = a_task(id=1121, dir="1121-t", status=status, board={"area": "done"})
+            shown = render.build_board(a_snapshot([task], plan=a_plan(outcomes=[outcome])))["plan"]["outcomes"][0]
+            self.assertEqual(shown["state"], "unknown", status)
+
+    def test_every_task_of_a_multi_task_result_must_be_observed_before_done(self):
+        outcome = {"title": "Цепочка", "text": "**Цепочка (1121, 1136).**",
+                   "tasks": [{"id": 1121, "title": "Один", "status": "completed"},
+                             {"id": 1136, "title": "Два", "status": "completed"}],
+                   "goals": [], "next": [], "checked": "current plan"}
+        only_one = a_task(id=1121, dir="1121-t", status="completed", board={"area": "done"})
+        shown = render.build_board(a_snapshot([only_one], plan=a_plan(outcomes=[outcome])))["plan"]["outcomes"][0]
+        self.assertEqual(shown["state"], "unknown")
+
     def test_the_section_shows_the_observed_state_beside_the_plan_order(self):
         # Расхождение не прячется: план назвал очередь, наблюдение видит задачу
         # живой, и обе стороны стоят рядом.
@@ -4575,7 +4695,7 @@ class TheBoardShowsThePlan(unittest.TestCase):
                                                          line=None, field=None)})
         board = render.build_board(a_snapshot([task]))
         self.assertEqual(set(board["plan"]), {"revision", "accepted_at", "src",
-                                              "queue", "backlog"})
+                                              "outcomes", "queue", "backlog"})
         areas = {a["key"]: a for a in board["panels"][0]["areas"]}
         self.assertEqual([p["id"] for p in areas["pickup"]["plates"]], [1135])
         self.assertEqual(areas["backlog"]["plates"], [])

@@ -1137,7 +1137,7 @@ def main() -> int:
 
     environment = {**os.environ, "IS_SANDBOX": "1"}
     result = subprocess.run(
-        [str(CLAUDE_PRODUCT_OWNER), "--print", "--dangerously-skip-permissions"],
+        [str(CLAUDE_PRODUCT_OWNER), "--entry", "print"],
         input=prompt(report, events, reasons, said, chat,
                      product_goal.block(args.thread)), env=environment,
         capture_output=True, text=True, cwd=HOME, timeout=WAKE_TIMEOUT,
