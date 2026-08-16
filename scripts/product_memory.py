@@ -526,6 +526,45 @@ def current_plan(base: Path | None = None) -> dict | None:
         raise ContentError(f"текущая редакция плана не читается: {error}") from error
 
 
+def validate_outcome_links(plan: dict) -> dict[int, dict]:
+    """Validate and index the explicit result relations of one plan revision."""
+    now_lines = plan.get("now") or []
+    next_lines = plan.get("next") or []
+    raw_links = plan.get("outcome_links", [])
+    if not isinstance(raw_links, list):
+        raise ContentError("план: outcome_links должен быть списком")
+    links = {}
+    for link in raw_links:
+        if not isinstance(link, dict) or not {"now", "next"} <= set(link) \
+                or set(link) - {"now", "next", "tasks", "goals"}:
+            raise ContentError(
+                "план: outcome_links содержит запись не формы now/next/tasks/goals")
+        now_index, next_indexes = link["now"], link["next"]
+        if (not isinstance(now_index, int) or isinstance(now_index, bool)
+                or not 1 <= now_index <= len(now_lines)):
+            raise ContentError(
+                "план: outcome_links ссылается на отсутствующую строку now")
+        if now_index in links:
+            raise ContentError(
+                "план: строка now дважды объявлена в outcome_links")
+        if (not isinstance(next_indexes, list)
+                or any(not isinstance(value, int) or isinstance(value, bool)
+                       or not 1 <= value <= len(next_lines) for value in next_indexes)):
+            raise ContentError(
+                "план: outcome_links ссылается на отсутствующую строку next")
+        task_ids = link.get("tasks", [])
+        if (not isinstance(task_ids, list) or any(
+                not isinstance(value, int) or isinstance(value, bool) or value < 1
+                for value in task_ids)):
+            raise ContentError("план: outcome_links содержит неверный список tasks")
+        goal_ids = link.get("goals", [])
+        if not isinstance(goal_ids, list) or not all(
+                isinstance(value, str) and value.strip() for value in goal_ids):
+            raise ContentError("план: outcome_links содержит неверный список goals")
+        links[now_index] = {"next": next_indexes, "tasks": task_ids, "goals": goal_ids}
+    return links
+
+
 def publish_plan(plan: dict, base: Path | None = None,
                  expect_revision: int | None = None) -> Path:
     """Publish the next revision, or refuse because someone else published one.
@@ -550,6 +589,7 @@ def publish_plan(plan: dict, base: Path | None = None,
     document["accepted_at"] = now()
     for field in PLAN_FIELDS:
         document.setdefault(field, [] if field != "headline" else "")
+    validate_outcome_links(document)
     path = directory / f"{latest + 1:06d}.json"
     payload = json.dumps(document, ensure_ascii=False, indent=2) + "\n"
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL

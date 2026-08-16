@@ -2498,39 +2498,18 @@ def plan_outcomes(plan: dict, known: dict) -> list[dict]:
     guesses a result relation from similar prose or a coincidental task number.
     """
     next_lines = list(plan.get("next") or [])
-    raw_links = plan.get("outcome_links", [])
-    if not isinstance(raw_links, list):
-        raise ContractError("план: outcome_links должен быть списком")
-    links = {}
-    for link in raw_links:
-        if not isinstance(link, dict) or not {"now", "next"} <= set(link) \
-                or set(link) - {"now", "next", "tasks", "goals"}:
-            raise ContractError("план: outcome_links содержит запись не формы now/next/tasks/goals")
-        now_index, next_indexes = link["now"], link["next"]
-        if (not isinstance(now_index, int) or isinstance(now_index, bool)
-                or not 1 <= now_index <= len(plan.get("now") or [])):
-            raise ContractError("план: outcome_links ссылается на отсутствующую строку now")
-        if now_index in links:
-            raise ContractError("план: строка now дважды объявлена в outcome_links")
-        if (not isinstance(next_indexes, list)
-                or any(not isinstance(value, int) or isinstance(value, bool)
-                       or not 1 <= value <= len(next_lines) for value in next_indexes)):
-            raise ContractError("план: outcome_links ссылается на отсутствующую строку next")
-        goal_ids = link.get("goals", [])
-        if not isinstance(goal_ids, list) or not all(
-                isinstance(value, str) and value.strip() for value in goal_ids):
-            raise ContractError("план: outcome_links содержит неверный список goals")
-        task_ids = link.get("tasks", [])
-        if (not isinstance(task_ids, list) or any(
-                not isinstance(value, int) or isinstance(value, bool) or value not in known
-                for value in task_ids)):
+    try:
+        links = product_memory.validate_outcome_links(plan)
+    except product_memory.ContentError as error:
+        raise ContractError(str(error)) from error
+    for relation in links.values():
+        if any(value not in known for value in relation["tasks"]):
             raise ContractError("план: outcome_links содержит неизвестные tasks")
-        links[now_index] = {"next": next_indexes, "tasks": task_ids, "goals": goal_ids}
 
     outcomes = []
     for index, text in enumerate(plan.get("now") or [], 1):
         relation = links.get(index, {"next": [], "tasks": [], "goals": []})
-        ids = relation["tasks"] or plan_line_tasks(text, known)
+        ids = relation["tasks"]
         heading = PLAN_HEADING.search(text)
         title = heading.group(1).strip() if heading else " ".join(text.split())[:120]
         positions = relation["next"]
