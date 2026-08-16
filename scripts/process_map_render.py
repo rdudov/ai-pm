@@ -339,17 +339,25 @@ def plan_section(snapshot: dict) -> dict:
     """
     plan = snapshot["plan"]
     seen = observed_places(snapshot)
+    indexed = {task["id"]: {"status": task.get("status"),
+                              "updated_at": task.get("updated_at"),
+                              "updated_src": task.get("updated_src")}
+               for task in snapshot["task_index"]}
     goals_seen = observed_goals(snapshot)
 
     def outcomes(items: list[dict]) -> list[dict]:
         shown = []
         for item in items:
-            tasks = [{**task, **seen.get(task["id"], {})} for task in item["tasks"]]
+            tasks = [{**task, **indexed.get(task["id"], {}),
+                      **seen.get(task["id"], {})} for task in item["tasks"]]
             goals = [goals_seen[goal_id] for goal_id in item["goals"]
                      if goal_id in goals_seen]
-            observed = [task for task in tasks if task.get("area")]
+            observed = [task for task in tasks
+                        if task.get("area") or task["id"] in indexed]
             goal_waiting = {number for goal in goals for number in goal["waiting_on"]}
             if (any(task.get("area") == "running" for task in observed)
+                    or any(not task.get("area") and task.get("status") == "in_progress"
+                           for task in observed)
                     or any(task.get("area") == "running" and number in goal_waiting
                            for number, task in seen.items())):
                 state = "running"
@@ -358,6 +366,8 @@ def plan_section(snapshot: dict) -> dict:
                   or any(goal["state"] == "closed" for goal in goals)):
                 state = "done"
             elif (any(task.get("reason") for task in observed)
+                  or any(not task.get("area") and task.get("status") == "blocked"
+                         for task in observed)
                   or any(goal["state"] == "paused" or goal.get("gap") for goal in goals)):
                 state = "stuck"
             else:
