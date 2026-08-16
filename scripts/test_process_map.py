@@ -4663,6 +4663,33 @@ class TheBoardShowsThePlan(unittest.TestCase):
         self.assertIsNone(shown["updated_at"])
         self.assertIsNone(shown["reason"])
 
+    def test_a_linked_task_outside_every_thread_uses_the_catalogue_observation(self):
+        outcome = {"title": "Статья", "text": "**Статья (1192).**",
+                   "tasks": [{"id": 1192, "title": "Черновик", "status": "completed"}],
+                   "goals": [], "next": [], "checked": "current plan outcome_links"}
+        snapshot = a_snapshot(plan=a_plan(outcomes=[outcome]))
+        snapshot["task_index"] = [{"id": 1192, "task": "1192-article",
+                                   "title": "Черновик", "status": "completed",
+                                   "updated_at": "2026-08-15T22:42:18+00:00",
+                                   "updated_src": "mtime task.md"}]
+
+        shown = render.build_board(snapshot)["plan"]["outcomes"][0]
+
+        self.assertEqual((shown["state"], shown["updated_at"], shown["updated_src"]),
+                         ("done", "2026-08-15T22:42:18+00:00", "mtime task.md"))
+
+    def test_a_direction_only_snapshot_tolerates_the_missing_catalogue(self):
+        outcome = {"title": "Статья", "text": "**Статья (1192).**",
+                   "tasks": [{"id": 1192, "title": "Черновик", "status": "completed"}],
+                   "goals": [], "next": [], "checked": "current plan outcome_links"}
+        snapshot = a_snapshot(plan=a_plan(outcomes=[outcome]))
+        snapshot["task_index"] = []
+
+        shown = render.build_board(snapshot)["plan"]["outcomes"][0]
+
+        self.assertEqual(shown["state"], "unknown")
+        self.assertIsNone(shown["updated_at"])
+
     def test_a_done_result_does_not_carry_a_stale_jam_reason(self):
         outcome = {"title": "Результат", "text": "**Результат.**",
                    "tasks": [{"id": 1121, "title": "Работа", "status": "completed"}],
