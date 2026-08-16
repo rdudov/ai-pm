@@ -4209,14 +4209,20 @@ class ThePlanOwnsTheQueue(unittest.TestCase):
         self.assertEqual(outcome["next"], [])
         self.assertIn("явной связи", outcome["checked"])
 
-    def test_mentions_in_a_now_line_do_not_change_the_results_state(self):
+    def test_a_now_line_without_an_explicit_task_link_has_no_observation(self):
         outcome = self.projection(a_revision(
             now=["**1121 — результат.** Старые 1152 и 1136 только упомянуты"],
             outcome_links=[]))["outcomes"][0]
-        self.assertEqual([task["id"] for task in outcome["tasks"]], [1121])
+        self.assertEqual(outcome["tasks"], [])
+
+    def test_an_explicit_empty_task_link_does_not_fall_back_to_prose(self):
+        outcome = self.projection(a_revision(
+            now=["**1121 — результат без наблюдаемой задачи.**"],
+            outcome_links=[{"now": 1, "next": [], "tasks": []}]))["outcomes"][0]
+        self.assertEqual(outcome["tasks"], [])
 
     def test_a_broken_explicit_relation_is_refused_not_silently_ignored(self):
-        with self.assertRaises(schema.ContractError):
+        with self.assertRaises(product_memory.ContentError):
             self.projection(a_revision(outcome_links=[{"now": 1, "next": [99]}]))
 
     def test_a_queue_written_one_task_to_a_line_is_read_by_name(self):
@@ -4656,6 +4662,19 @@ class TheBoardShowsThePlan(unittest.TestCase):
         self.assertEqual(shown["state"], "unknown")
         self.assertIsNone(shown["updated_at"])
         self.assertIsNone(shown["reason"])
+
+    def test_a_done_result_does_not_carry_a_stale_jam_reason(self):
+        outcome = {"title": "Результат", "text": "**Результат.**",
+                   "tasks": [{"id": 1121, "title": "Работа", "status": "completed"}],
+                   "goals": [], "next": [], "checked": "current plan"}
+        task = a_task(id=1121, dir="1121-t", status="completed", board={
+            "area": "done", "why": "не пройдено гейтов: 7",
+            "why_src": "verification.md"})
+        board = render.build_board(a_snapshot([task], plan=a_plan(outcomes=[outcome])))
+        shown = board["plan"]["outcomes"][0]
+        self.assertEqual(shown["state"], "done")
+        self.assertIsNone(shown["reason"])
+        self.assertIsNone(shown["reason_src"])
 
     def test_an_explicit_goal_link_supplies_observed_state_time_and_reason(self):
         outcome = {"title": "Продукт А", "text": "**Продукт А — по расписанию.**",

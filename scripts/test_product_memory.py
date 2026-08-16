@@ -167,6 +167,19 @@ def test_plan_publishes_and_prints_explicit_outcome_links(store: Path):
     assert "now 1 → next [1]; tasks [1095]; goals ['0002']" in memory.plan_text(plan)
 
 
+@pytest.mark.parametrize("links", [
+    [{"now": 2, "next": []}],
+    [{"now": 1, "next": [2]}],
+    [{"now": 1, "next": []}, {"now": 1, "next": []}],
+])
+def test_plan_refuses_broken_outcome_links_before_publishing(store: Path, links: list):
+    with pytest.raises(memory.ContentError):
+        memory.publish_plan({"headline": "цель", "now": ["результат"],
+                             "next": ["переход"], "outcome_links": links},
+                            base=store)
+    assert memory.current_plan(store) is None
+
+
 def test_checksums_cover_every_stored_file(store: Path):
     memory.write_record("Решение", "тело", product="demo", base=store)
     memory.attach("payload.bin", b"bytes", product="demo", base=store)

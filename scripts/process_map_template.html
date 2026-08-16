@@ -2590,8 +2590,9 @@ function drawDayPlan(plan) {
     const why = document.createElement("div");
     why.className = "why";
     const reason = String(item.reason || "").replace(/^\s*\*\*.+?\*\*\s*/, "");
-    why.textContent = reason
-      ? (item.state === "stuck" ? "Почему стоит: " : "Что изменилось: ") + human(reason)
+    why.textContent = reason ? "Почему стоит: " + human(reason)
+      : item.state === "done" ? "Завершение подтверждено наблюдаемым статусом"
+      : item.state === "running" ? "Работа подтверждена наблюдаемым статусом"
       : "Причина в наблюдаемом состоянии не названа";
     const next = document.createElement("div");
     next.className = "next";

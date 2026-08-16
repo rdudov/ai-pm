@@ -371,11 +371,11 @@ def plan_section(snapshot: dict) -> dict:
             reason_task = next((task for task in tasks if task.get("reason")), None)
             reason_goal = next((goal for goal in goals
                                 if goal["state"] == "paused" or goal.get("gap")), None)
-            reason = ((reason_task or {}).get("reason")
-                      or ((reason_goal or {}).get("pause") or {}).get("reason")
-                      or (reason_goal or {}).get("gap"))
-            reason_src = ((reason_task or {}).get("reason_src")
-                          or (reason_goal or {}).get("src"))
+            reason = (((reason_task or {}).get("reason")
+                       or ((reason_goal or {}).get("pause") or {}).get("reason")
+                       or (reason_goal or {}).get("gap")) if state == "stuck" else None)
+            reason_src = (((reason_task or {}).get("reason_src")
+                           or (reason_goal or {}).get("src")) if state == "stuck" else None)
             shown.append({**item, "tasks": tasks, "goals": goals, "state": state,
                           "updated_at": (freshest or {}).get("updated_at"),
                           "updated_src": (freshest or {}).get("updated_src"),
