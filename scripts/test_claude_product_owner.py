@@ -172,8 +172,40 @@ class ProductOwnerModelRouterTests(unittest.TestCase):
               self.assertRaisesRegex(RuntimeError, "exec boundary")):
             router.main(["--entry", "print"])
         self.assertIn(
-            "product-owner: route observation unavailable; keeping Claude "
+            "product-owner: route selected; Claude "
             "(codex_weekly_remaining_unavailable:claude_remaining=31%)",
+            stderr.getvalue(),
+        )
+
+    def test_observed_claude_comparison_is_visible_before_exec(self):
+        stderr = StringIO()
+        with (mock.patch("claude_product_owner.codex_budget.latest",
+                         return_value=observed_codex(31)),
+              mock.patch("claude_product_owner.fetch_usage", return_value={
+                  "seven_day": {"utilization": 18},
+              }),
+              mock.patch("claude_product_owner.os.execvpe",
+                         side_effect=RuntimeError("exec boundary")),
+              redirect_stderr(stderr),
+              self.assertRaisesRegex(RuntimeError, "exec boundary")):
+            router.main(["--entry", "print"])
+        self.assertIn(
+            "product-owner: route selected; Claude "
+            "(weekly_remaining:claude=82%,codex=31%)",
+            stderr.getvalue(),
+        )
+
+    def test_unavailable_claude_observation_is_visible_before_exec(self):
+        stderr = StringIO()
+        with (mock.patch("claude_product_owner.fetch_usage",
+                         side_effect=OSError("offline")),
+              mock.patch("claude_product_owner.os.execvpe",
+                         side_effect=RuntimeError("exec boundary")),
+              redirect_stderr(stderr),
+              self.assertRaisesRegex(RuntimeError, "exec boundary")):
+            router.main(["--entry", "print"])
+        self.assertIn(
+            "product-owner: route selected; Claude (usage_unavailable)",
             stderr.getvalue(),
         )
 
