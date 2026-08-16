@@ -105,9 +105,9 @@ MAIL_PYTHON = REPO / ".venv" / "bin" / "python"
 
 
 def route_diagnostics(stderr: str) -> list[str]:
-    """Keep the router's fail-visible line without replaying model stderr."""
+    """Keep the router's selected route without replaying model stderr."""
     return [line for line in stderr.splitlines()
-            if line.startswith("product-owner: route observation unavailable;")]
+            if line.startswith("product-owner: route selected;")]
 
 
 # How often the same standing reminder may be repeated. The tick itself runs

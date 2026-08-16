@@ -3709,14 +3709,19 @@ class TheWakeUpSeesTheQueueMove(unittest.TestCase):
                 "available": True, "reason": None},
         }
 
-    def test_the_tick_forwards_only_the_router_observation_diagnostic(self):
-        diagnostic = (
-            "product-owner: route observation unavailable; keeping Claude "
-            "(codex_weekly_remaining_unavailable:claude_remaining=31%)"
+    def test_the_tick_forwards_only_the_router_route_diagnostic(self):
+        comparison = (
+            "product-owner: route selected; Claude "
+            "(weekly_remaining:claude=82%,codex=31%)"
         )
+        unavailable = "product-owner: route selected; Claude (usage_unavailable)"
         self.assertEqual(
-            tick.route_diagnostics(f"model warning\n{diagnostic}\nother noise\n"),
-            [diagnostic],
+            tick.route_diagnostics(
+                f"model warning\n{comparison}\n"
+                "product-owner: quota check unavailable; keeping Opus (network)\n"
+                f"{unavailable}\nother noise\n"
+            ),
+            [comparison, unavailable],
         )
         source = Path(tick.__file__).read_text()
         self.assertLess(source.index("def route_diagnostics"), source.index("def main"))

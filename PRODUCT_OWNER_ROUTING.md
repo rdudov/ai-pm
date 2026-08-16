@@ -11,10 +11,11 @@ All interactive, timer and mail entrypoints call
   Opus and Fable model-scoped routes, selects Codex even before that comparison.
 - A missing observation is never turned into a percentage. Without a comparable
   weekly remainder the router keeps Opus and names which observation is missing;
-  Claude network/API failures and unknown schemas remain visible as before. The
-  fail-safe reason is emitted before the Claude `exec`: mail keeps it in its
-  existing agent stderr artifact, and the timer forwards that one diagnostic to
-  its service journal without replaying arbitrary model stderr.
+  Claude network/API failures and unknown schemas remain visible. Every selected
+  Claude route emits its reason before `exec`: mail keeps it in its existing
+  agent stderr artifact, and the timer forwards that one diagnostic to its
+  service journal without replaying arbitrary model stderr. This also leaves a
+  durable trace when a higher observed Claude remainder wins the comparison.
 - The Codex side is accepted only from an explicitly 10,080-minute rate-limit
   window whose event timestamp still belongs to its unexpired reset window.
 - The quota endpoint uses Claude Code's short-lived OAuth access token. If that

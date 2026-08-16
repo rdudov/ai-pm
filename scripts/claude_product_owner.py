@@ -587,9 +587,9 @@ def main(argv: list[str] | None = None) -> int:
             f"({error['kind']}: {error['message']})",
             file=sys.stderr,
         )
-    if route.engine == "claude" and "weekly_remaining_unavailable" in route.reason:
+    if route.engine == "claude":
         print(
-            "product-owner: route observation unavailable; keeping Claude "
+            "product-owner: route selected; Claude "
             f"({route.reason})",
             file=sys.stderr,
         )
