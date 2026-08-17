@@ -521,9 +521,13 @@
   #taskrows { width: min(1040px, calc(100% - 36px)); margin: 14px auto 28px;
               border: 1px solid var(--edge); border-radius: 12px; overflow: hidden;
               background: var(--surface); }
-  #taskfilter, #tasksort { border: 1px solid var(--edge); border-radius: 8px;
-                           background: var(--surface); color: var(--ink); padding: 7px 9px;
-                           font: inherit; margin: 8px 8px 0 0; }
+  #taskfilters { display: inline-flex; gap: 5px; align-items: center; flex-wrap: wrap;
+                 margin: 8px 8px 0 0; vertical-align: middle; }
+  #taskfilters button { padding: 6px 9px; }
+  #taskfilters button.on { background: #e2edf7; border-color: #9dbcd8; color: var(--done); }
+  #tasksort { border: 1px solid var(--edge); border-radius: 8px;
+              background: var(--surface); color: var(--ink); padding: 7px 9px;
+              font: inherit; margin: 8px 8px 0 0; }
   .taskrow { display: grid; grid-template-columns: 76px minmax(0, 1fr) 130px 170px;
              gap: 12px; align-items: baseline; padding: 10px 12px;
              border-bottom: 1px solid var(--edge); cursor: pointer; }
@@ -685,8 +689,12 @@
            placeholder="Например, 1054 или списка задач" autocomplete="off">
     <span id="taskcount"></span>
     <div>
-      <label for="taskfilter">Статус</label>
-      <select id="taskfilter"><option value="all">Все статусы</option></select>
+      <span id="taskfilterlabel">Статусы</span>
+      <span id="taskfilters" role="group" aria-labelledby="taskfilterlabel">
+        <button id="taskfilterready" type="button">Можно брать или в работе</button>
+        <button id="taskfilterall" type="button">Все статусы</button>
+        <span id="taskfilter"></span>
+      </span>
       <label for="tasksort">Сортировка</label>
       <select id="tasksort">
         <option value="updated_desc">Сначала изменённые недавно</option>
@@ -2852,26 +2860,42 @@ function openIndexedTask(item) {
   openCard(boardPlate(item.task) || item.card || indexedFallback(item), false, "tasks");
 }
 
+/* An empty set means all statuses. It survives a live redraw because the
+   controls are rebuilt from the fresh catalogue while the person's selection
+   stays here. */
+const taskStatuses = new Set();
+
 function drawTaskIndex() {
   const query = el("tasksearch").value.trim().toLocaleLowerCase("ru-RU");
-  const wantedStatus = el("taskfilter").value;
   const order = el("tasksort").value;
   const number = query.replace(/^#/, "");
   const searchesNumber = number.length > 0 && /^\d+$/.test(number);
   const all = DATA.snapshot.task_index || [];
   const filter = el("taskfilter");
   const statuses = [...new Set(all.map(item => item.status || "").filter(Boolean))].sort();
-  const selected = filter.value;
+  for (const selected of [...taskStatuses]) {
+    if (!statuses.includes(selected)) taskStatuses.delete(selected);
+  }
   filter.textContent = "";
-  for (const value of ["all", ...statuses]) {
-    const option = document.createElement("option");
-    option.value = value;
-    option.textContent = value === "all" ? "Все статусы" : (ru(STATUS_RU, value) || value);
+  for (const value of statuses) {
+    const option = document.createElement("button");
+    option.type = "button";
+    option.textContent = ru(STATUS_RU, value) || value;
+    option.classList.toggle("on", taskStatuses.has(value));
+    option.setAttribute("aria-pressed", taskStatuses.has(value) ? "true" : "false");
+    option.addEventListener("click", () => {
+      if (taskStatuses.has(value)) taskStatuses.delete(value); else taskStatuses.add(value);
+      drawTaskIndex();
+    });
     filter.appendChild(option);
   }
-  filter.value = statuses.includes(selected) ? selected : "all";
-  const activeStatus = statuses.includes(wantedStatus) ? wantedStatus : "all";
-  let shown = all.filter(item => (activeStatus === "all" || item.status === activeStatus)
+  el("taskfilterall").classList.toggle("on", taskStatuses.size === 0);
+  el("taskfilterall").setAttribute("aria-pressed", taskStatuses.size === 0 ? "true" : "false");
+  const ready = taskStatuses.size === 2
+    && taskStatuses.has("planned") && taskStatuses.has("in_progress");
+  el("taskfilterready").classList.toggle("on", ready);
+  el("taskfilterready").setAttribute("aria-pressed", ready ? "true" : "false");
+  let shown = all.filter(item => (!taskStatuses.size || taskStatuses.has(item.status))
     && (!query || (searchesNumber && String(item.id).includes(number))
       || String(item.title).toLocaleLowerCase("ru-RU").includes(query)));
   const moment = item => item.updated_at ? Date.parse(item.updated_at) : -Infinity;
@@ -2911,7 +2935,15 @@ function drawTaskIndex() {
 }
 
 el("tasksearch").addEventListener("input", drawTaskIndex);
-el("taskfilter").addEventListener("change", drawTaskIndex);
+el("taskfilterall").addEventListener("click", () => {
+  taskStatuses.clear();
+  drawTaskIndex();
+});
+el("taskfilterready").addEventListener("click", () => {
+  taskStatuses.clear();
+  for (const status of ["planned", "in_progress"]) taskStatuses.add(status);
+  drawTaskIndex();
+});
 el("tasksort").addEventListener("change", drawTaskIndex);
 
 /* Redraw in place with a fresher document. Live mode used to call

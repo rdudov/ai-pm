@@ -71,6 +71,12 @@ def test_work_line_is_appended_inside_its_own_section(store: Path):
     assert memory.section(text, "Журнал эффекта") == ["2026-08-12 — что-то поставлено"]
 
 
+def test_work_section_prompt_keeps_events_in_history():
+    prompt = memory.SECTION_PROMPTS["В работе"]
+    assert "Только текущие обещания" in prompt
+    assert "события и прежние состояния пишутся в history/" in prompt
+
+
 def test_append_refuses_when_the_section_is_absent(store: Path):
     path = memory.snapshot_path("demo", store)
     path.write_text("# Продукт\n\n## Концепция\nбез раздела\n", encoding="utf-8")
