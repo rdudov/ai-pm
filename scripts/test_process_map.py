@@ -420,6 +420,15 @@ class TaskIndexTab(unittest.TestCase):
         self.assertIn("asButton(row", page)
         self.assertIn("openIndexedTask(item)", page)
 
+    def test_statuses_can_be_combined_and_the_main_pair_is_one_click(self):
+        page = (Path(__file__).parent / "process_map_template.html").read_text()
+        self.assertIn('role="group" aria-labelledby="taskfilterlabel"', page)
+        self.assertIn('id="taskfilterready"', page)
+        self.assertIn('for (const status of ["planned", "in_progress"])', page)
+        self.assertIn("!taskStatuses.size || taskStatuses.has(item.status)", page)
+        self.assertIn('option.setAttribute("aria-pressed"', page)
+        self.assertIn('el("taskfilterready").classList.toggle("on", ready)', page)
+
     def test_the_global_catalogue_does_not_silently_cap_all_tasks(self):
         completed = mock.Mock(returncode=0, stdout="[]")
         with mock.patch.object(state.subprocess, "run", return_value=completed) as run:
