@@ -333,6 +333,12 @@ def refresh_authorization_with_claude() -> None:
     completed = subprocess.run(
         command,
         text=True,
+        # Nothing is asked of this child, and the channel it would otherwise
+        # inherit is the caller's own: a background wake passes its text to us
+        # through stdin, and a `--print` child reads that pipe to the end before
+        # answering `/usage`. Leaving it open cost a whole wake-up — the real
+        # run then met an empty stdin and died with «Input must be provided».
+        stdin=subprocess.DEVNULL,
         capture_output=True,
         cwd=HOME,
         env=os.environ,
