@@ -1,3 +1,5 @@
+import json
+import subprocess
 import unittest
 from unittest import mock
 import urllib.error
@@ -254,6 +256,19 @@ class ProductOwnerModelRouterTests(unittest.TestCase):
         self.assertEqual(observation.authorization_recovery, "claude_cli_zero_turn_usage")
         self.assertEqual(observation.route.engine, "claude")
         self.assertIsNone(observation.error)
+
+    def test_authorization_refresh_never_reads_the_callers_stdin(self):
+        # A background wake hands its text over through stdin. A `--print`
+        # child reads an inherited pipe to the end, and the whole wake is then
+        # lost: the real run meets an empty stdin and dies with «Input must be
+        # provided». This refresh has nothing to say to stdin at all.
+        completed = mock.Mock(returncode=0, stdout=json.dumps(
+            {"is_error": False, "num_turns": 0, "total_cost_usd": 0,
+             "usage": {"input_tokens": 0, "output_tokens": 0}}))
+        with mock.patch("claude_product_owner.subprocess.run",
+                        return_value=completed) as run:
+            router.refresh_authorization_with_claude()
+        self.assertEqual(run.call_args.kwargs["stdin"], subprocess.DEVNULL)
 
     def test_authorization_failure_has_no_fabricated_quota(self):
         unauthorized = urllib.error.HTTPError(
