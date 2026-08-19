@@ -168,6 +168,7 @@ class ProductOwnerModelRouterTests(unittest.TestCase):
               mock.patch("claude_product_owner.fetch_usage", return_value={
                   "seven_day": {"utilization": 69},
               }),
+              mock.patch("claude_product_owner.os.chdir"),
               mock.patch("claude_product_owner.os.execvpe",
                          side_effect=RuntimeError("exec boundary")),
               redirect_stderr(stderr),
@@ -186,6 +187,7 @@ class ProductOwnerModelRouterTests(unittest.TestCase):
               mock.patch("claude_product_owner.fetch_usage", return_value={
                   "seven_day": {"utilization": 18},
               }),
+              mock.patch("claude_product_owner.os.chdir"),
               mock.patch("claude_product_owner.os.execvpe",
                          side_effect=RuntimeError("exec boundary")),
               redirect_stderr(stderr),
@@ -201,6 +203,7 @@ class ProductOwnerModelRouterTests(unittest.TestCase):
         stderr = StringIO()
         with (mock.patch("claude_product_owner.fetch_usage",
                          side_effect=OSError("offline")),
+              mock.patch("claude_product_owner.os.chdir"),
               mock.patch("claude_product_owner.os.execvpe",
                          side_effect=RuntimeError("exec boundary")),
               redirect_stderr(stderr),
@@ -309,6 +312,15 @@ class ProductOwnerModelRouterTests(unittest.TestCase):
         # Where this product owner is installed, not where one server keeps it.
         self.assertEqual(codex[codex.index("-C") + 1], str(router.HOME))
         self.assertEqual(codex[codex.index("--model") + 1], "gpt-5.6-sol")
+
+    def test_claude_exec_starts_in_the_owner_checkout(self):
+        with (mock.patch("claude_product_owner.fetch_usage", return_value={}),
+              mock.patch("claude_product_owner.os.chdir") as chdir,
+              mock.patch("claude_product_owner.os.execvpe",
+                         side_effect=RuntimeError("exec boundary")),
+              self.assertRaisesRegex(RuntimeError, "exec boundary")):
+            router.main(["--entry", "interactive"])
+        chdir.assert_called_once_with(router.HOME)
 
     def test_an_installation_that_names_no_directories_gets_no_flag(self):
         # A fresh clone works in its own checkout: an empty `--add-dir` would be

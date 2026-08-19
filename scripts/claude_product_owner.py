@@ -600,6 +600,7 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
     if route.engine == "claude":
+        os.chdir(HOME)
         os.execvpe(CLAUDE_BIN, command, {**os.environ, "IS_SANDBOX": "1"})
         return 127
 
