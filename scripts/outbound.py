@@ -455,6 +455,11 @@ EXTERNAL_INSTRUCTION = re.compile(r"(?:^|[-_])instruction\.md$", re.IGNORECASE)
 # `blocked` со своей инструкцией в `deliverables/`, и как готовая она не уйдёт.
 ACCEPTED_STATUSES = frozenset({"completed"})
 HANDOFF_HEADING = "Инструкция внешнему исполнителю (собрано при отправке):"
+# Сколько отданных редакций помнит направление. Не размер очереди: это список
+# уже сказанного, по которому дверь отличает «пользователю этого ещё не
+# называли» от «называли». За всю историю каталога таких файлов пять, так что
+# предел здесь — страховка от бесконечного роста файла, а не режим работы.
+KEEP_INSTRUCTIONS = tunable("PRODUCT_OWNER_KEEP_INSTRUCTIONS", 50)
 
 
 def external_instructions(thread: str) -> list[dict]:
@@ -468,6 +473,9 @@ def external_instructions(thread: str) -> list[dict]:
 
     sha256 считается здесь и сейчас, с байтов файла: в памяти плана лежит
     редакция, которую ревью могло переписать после того, как её туда записали.
+    Файл, который виден в каталоге, но не читается, возвращается с `sha256:
+    None` и не выбрасывается молча: «принятой инструкции нет» и «она есть, и мы
+    не можем назвать её цифру» — разные факты, и второй решается не здесь.
     """
     # Импорт внутри функции: оба модуля тянут за собой наблюдение всей доски, а
     # этот читают все четыре направления на каждом тике. `_file_sha256` берётся
@@ -494,42 +502,93 @@ def external_instructions(thread: str) -> list[dict]:
         for path in entries:
             if not path.is_file() or not EXTERNAL_INSTRUCTION.search(path.name):
                 continue
-            digest = _file_sha256(path)
-            if digest is None:
-                # Нечитаемый файл — не повод назвать цифру, которой у нас нет.
-                continue
             found.append({"task": task.get("id"), "path": str(path.resolve()),
-                          "sha256": digest})
+                          "sha256": _file_sha256(path)})
         if found:
             return found
     return []
 
 
-def with_instruction_handoff(thread: str, body: str) -> str:
-    """Письмо, в котором инструкция направления названа путём и цифрой.
+def instructions_said(entry: dict) -> set[str]:
+    """Редакции, которые пользователю уже назвали путём и цифрой."""
+    return {str(item.get("sha256")) for item in entry.get("instructions") or []}
 
-    Дописывает, а не переписывает: текст продакта остаётся его текстом, а
-    самодостаточность письма перестаёт от этого текста зависеть. Уже
-    проставленный автором sha256 второй раз не дублируется.
 
-    Ни один сбой поиска не имеет права стоить письма. Это дополнение к письму, а
-    не условие его отправки: установка без наблюдаемого индекса задач, сломанный
-    `threads.json`, исчезнувший каталог задачи — всё это оставляет письмо ровно
-    таким, каким оно было, и говорит об этом в журнал службы. Молчаливо потерять
-    письмо было бы хуже того дефекта, ради которого написана эта функция.
+def remember_instructions(entry: dict, items: list[dict], now: datetime) -> None:
+    """Записать отданную редакцию туда же, где реестр держит сказанное.
+
+    Только после успешной отправки и только про те байты, которые ушли. Это не
+    новый реестр: `state/outbound.json` ровно для того и существует, чтобы
+    следующий тик знал, что пользователь уже слышал, — до сих пор он знал это
+    про письма, а теперь и про названную редакцию.
     """
+    said = list(entry.get("instructions") or [])
+    known = {str(item.get("sha256")) for item in said}
+    for item in items:
+        digest = str(item.get("sha256"))
+        if digest in known:
+            continue
+        known.add(digest)
+        said.append({"at": now.isoformat(), "task": item.get("task"),
+                     "path": item.get("path"), "sha256": digest})
+    entry["instructions"] = said[-KEEP_INSTRUCTIONS:]
+
+
+def instruction_handoff(thread: str, body: str, entry: dict) -> dict:
+    """Что дверь делает с письмом, пока принятая редакция ещё не названа.
+
+    Событие, а не свойство направления. Ревью первой редакции этой правки
+    показало, чем отличается одно от другого: условие «у направления есть
+    принятая инструкция» истинно бессрочно, поэтому блок приписывался бы и к
+    сводке качества полгода спустя. Наблюдаемое событие здесь одно —
+    **принятая редакция, которую пользователю ещё не называли**; оно кончается
+    в ту минуту, когда письмо с путём и цифрой действительно ушло, и начинается
+    заново, когда ревью переписало файл: другие байты — другой sha256 — другое
+    событие.
+
+    Отдаёт три вещи: текст письма, редакции, которые этим письмом названы (их
+    запишет `remember_instructions`, и только если письмо дошло), и причину
+    удержания, если названа быть не может.
+
+    Про удержание. Сбой наблюдения бывает двух разных родов, и молчаливо
+    приравнивать их нельзя. Если не видно самого направления или системы задач,
+    ничто не утверждает, что handoff вообще идёт: письмо уходит как прежде, а в
+    журнал службы пишется, чего мы не увидели. Но если принятая инструкция
+    видна и **не читается**, то письмо про неё уже несамодостаточно по той же
+    причине, по которой заведена задача, — и оно ждёт в `pending`, а не уходит
+    просьбой найти неназванный файл. Ничего при этом не теряется: удержанное
+    письмо стоит в очереди направления, а нечитаемый файл — состояние, которое
+    чинится на месте.
+    """
+    unchanged = {"body": body, "said": [], "hold": None}
     try:
         found = external_instructions(thread)
     except Exception as error:  # noqa: BLE001
         print(f"продакт: инструкция направления «{thread}» не наблюдается, "
               f"письмо уходит без неё: {error}", file=sys.stderr)
-        return body
+        return unchanged
+    if not found:
+        return unchanged
+    unreadable = [item["path"] for item in found if not item["sha256"]]
+    if unreadable:
+        return {"body": body, "said": [],
+                "hold": "инструкция внешнему исполнителю не читается, "
+                        f"письмо без её sha256 не уходит: {', '.join(unreadable)}"}
+    said = instructions_said(entry)
+    fresh = [item for item in found if item["sha256"] not in said]
+    if not fresh:
+        # Эту редакцию пользователю уже называли. Соседнее письмо направления —
+        # такое же соседнее письмо, как в любом другом направлении.
+        return unchanged
+    # Цифру, которую продакт написал сам, дверь не дублирует, но считает
+    # названной: пользователь получил ровно тот факт, ради которого блок есть.
     lines = [f"- {item['task']} — {item['path']}\n  sha256: {item['sha256']}"
-             for item in found if item["sha256"] not in (body or "")]
+             for item in fresh if item["sha256"] not in (body or "")]
     if not lines:
-        return body
+        return {"body": body, "said": fresh, "hold": None}
     block = "\n".join([HANDOFF_HEADING, *lines])
-    return f"{body.strip()}\n\n{block}" if (body or "").strip() else block
+    text = f"{body.strip()}\n\n{block}" if (body or "").strip() else block
+    return {"body": text, "said": fresh, "hold": None}
 
 
 class Ledger:
@@ -638,10 +697,14 @@ class Ledger:
 
     def thread(self, name: str) -> dict:
         entry = self.data["threads"].setdefault(
-            name, {"letters": [], "pending": [], "marks": None})
+            name, {"letters": [], "pending": [], "marks": None, "instructions": []})
         entry.setdefault("letters", [])
         entry.setdefault("pending", [])
         entry.setdefault("marks", None)
+        # Редакции внешней инструкции, уже названные пользователю. Реестр,
+        # который был написан ещё до этой правки, отвечает на тот же вопрос, что
+        # и раньше: что пользователю уже сказано.
+        entry.setdefault("instructions", [])
         return entry
 
 

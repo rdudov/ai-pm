@@ -655,17 +655,30 @@ def deliver(thread: str, kind: str, subject: str, body: str,
                                    moment, entry, chat)
         delivered = None
         message_id = None
-        if decision["action"] == "send":
+        handoff = None
+        if decision["action"] == "send" and raw_message is None:
             # На отправляемом тексте, а не на составленном: письмо, пролежавшее
             # в `pending` полдня, уходит с sha256 этой минуты, а не той. Порог,
             # склейка и повторность считаны выше и этой строкой не двигаются —
-            # направление без принятой внешней инструкции уходит ровно тем же
-            # текстом, что и раньше. `raw_message` сюда не попадает: там письмо
-            # целиком собрал отправитель, и дописать в него текст здесь значило
-            # бы записать в реестр то, чего не ушло.
-            if raw_message is None:
-                decision = {**decision, "body": outbound.with_instruction_handoff(
-                    thread, decision["body"])}
+            # письмо, которому нечего назвать (принятой инструкции нет или её
+            # уже называли), уходит ровно тем же текстом, что и раньше.
+            # `raw_message` сюда не попадает: там письмо целиком собрал
+            # отправитель, и дописать в него текст здесь значило бы записать в
+            # реестр то, чего не ушло.
+            handoff = outbound.instruction_handoff(thread, decision["body"], entry)
+            if handoff["hold"]:
+                # Принятая инструкция есть, и назвать её цифру нечем. Письмо про
+                # неё ушло бы просьбой найти неназванный файл — тем самым
+                # дефектом, ради которого эта дверь так устроена. Ответ ждёт
+                # своего владельца, остальное ждёт следующего письма; ни то ни
+                # другое не теряется.
+                decision = {**decision,
+                            "action": "fail" if kind in {"reply", "daily"} else "hold",
+                            "reason": handoff["hold"],
+                            "body": decision["raw_body"], "flush": []}
+            else:
+                decision = {**decision, "body": handoff["body"]}
+        if decision["action"] == "send":
             mail_options = {"reply_to_message_id": reply_to_message_id,
                             "attachments": attachments}
             if raw_message is not None:
@@ -692,6 +705,11 @@ def deliver(thread: str, kind: str, subject: str, body: str,
                     decision = {**decision, "action": "hold",
                                 "reason": "отправка не удалась, письмо ждёт следующего",
                                 "body": decision["raw_body"], "flush": []}
+            if delivered and handoff and handoff["said"]:
+                # Названной редакция считается только когда письмо действительно
+                # ушло: удержанное письмо уйдёт позже и назовёт ту редакцию,
+                # которая будет лежать на диске в ту минуту.
+                outbound.remember_instructions(entry, handoff["said"], moment)
         # A reply is owed independently of proactive news and therefore must
         # neither advance nor erase the baseline used by the proactive gate.
         applied_report = None if kind == "reply" else report

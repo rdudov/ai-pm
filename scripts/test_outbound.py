@@ -1035,10 +1035,11 @@ class TheExternalInstructionIsNamedByPath(unittest.TestCase):
                                   return_value={"projects": ["greenfield"]}),
                 mock.patch.object(pms, "thread_tasks", return_value=rows))
 
-    def handoff(self, home: str, tasks: tuple, thread: str, body: str) -> str:
+    def handoff(self, home: str, tasks: tuple, thread: str, body: str,
+                entry: dict | None = None) -> str:
         repo, direction, listing = self.a_direction(home, *tasks)
         with repo, direction, listing:
-            return outbound.with_instruction_handoff(thread, body)
+            return outbound.instruction_handoff(thread, body, entry or {})["body"]
 
     def test_a_ready_instruction_reaches_the_letter_as_path_and_digest(self):
         with tempfile.TemporaryDirectory() as home:
@@ -1145,7 +1146,8 @@ class TheExternalInstructionIsNamedByPath(unittest.TestCase):
             with mock.patch.object(pms, "REPO", Path(home)), \
                     mock.patch.object(thread_state, "load_thread",
                                       side_effect=SystemExit("unknown thread")):
-                text = outbound.with_instruction_handoff("нет такого", "Сбой контура.")
+                text = outbound.instruction_handoff(
+                    "нет такого", "Сбой контура.", {})["body"]
         self.assertEqual(text, "Сбой контура.")
 
     def test_an_unobservable_task_index_costs_the_line_and_not_the_letter(self):
@@ -1154,7 +1156,8 @@ class TheExternalInstructionIsNamedByPath(unittest.TestCase):
         with mock.patch.object(pms, "thread_tasks",
                                side_effect=pms.ContractError("система задач не наблюдается")), \
                 mock.patch.object(thread_state, "load_thread", return_value={}):
-            text = outbound.with_instruction_handoff("deep-research", "Внешний прогон готов.")
+            text = outbound.instruction_handoff(
+                "deep-research", "Внешний прогон готов.", {})["body"]
         self.assertEqual(text, "Внешний прогон готов.")
 
     def test_the_letter_still_goes_when_the_line_cannot_be_built(self):
@@ -1233,10 +1236,127 @@ class TheExternalInstructionIsNamedByPath(unittest.TestCase):
                              raw_message="From: me\r\n\r\nтело".encode())
         self.assertEqual(mailed.call_args.args[1], "Кандидат 1233 принят.")
 
+    def test_a_named_edition_is_not_pushed_into_every_later_letter(self):
+        """Ревью 2026-08-20: «блок дописывается ко всем последующим письмам».
+
+        «У направления есть принятая инструкция» истинно бессрочно, поэтому
+        сводка качества полгода спустя получала бы путь и sha256 1233. Событие —
+        это редакция, которую ещё не называли, и оно кончается вместе с письмом,
+        которое её назвало.
+        """
+        with tempfile.TemporaryDirectory() as home:
+            path = self.a_deliverable(home, 1233, "a100-instruction.md", "редакция 3\n")
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            ledger = Path(home) / "outbound.json"
+            repo, direction, listing = self.a_direction(home, (1233, "completed"))
+            with mock.patch.object(outbound, "LEDGER", ledger), repo, direction, listing, \
+                    mock.patch.object(tick, "send_mail", side_effect=["gmail-1", "gmail-2"]) as mailed:
+                tick.deliver("deep-research", "verdict", "Продакт: Deep Research",
+                             "Внешний прогон готов. Скажите, когда передать.",
+                             a_report(), AT, outbound.no_chat())
+                first = mailed.call_args.args[1]
+                tick.deliver("deep-research", "reply", "Re: сводка качества",
+                             "Опубликована новая сводка качества, вопросов нет.",
+                             a_report(), AT + timedelta(hours=8), outbound.no_chat(),
+                             reply_to_message_id="mail-77")
+                second = mailed.call_args.args[1]
+        self.assertIn(digest, first)
+        self.assertEqual(second, "Опубликована новая сводка качества, вопросов нет.")
+        self.assertNotIn(digest, second)
+        self.assertNotIn(str(path), second)
+
+    def test_a_new_edition_of_the_same_path_is_named_again(self):
+        # Ревью переписало файл по тому же пути: другие байты — другая редакция —
+        # то, чего пользователю ещё не называли.
+        with tempfile.TemporaryDirectory() as home:
+            path = self.a_deliverable(home, 1233, "a100-instruction.md", "редакция 3\n")
+            ledger = Path(home) / "outbound.json"
+            repo, direction, listing = self.a_direction(home, (1233, "completed"))
+            with mock.patch.object(outbound, "LEDGER", ledger), repo, direction, listing, \
+                    mock.patch.object(tick, "send_mail", side_effect=["gmail-1", "gmail-2"]) as mailed:
+                tick.deliver("deep-research", "verdict", "Продакт: Deep Research",
+                             "Внешний прогон готов. Скажите, когда передать.",
+                             a_report(), AT, outbound.no_chat())
+                path.write_text("редакция 4\n", encoding="utf-8")
+                tick.deliver("deep-research", "reply", "Re: Deep Research",
+                             "Инструкцию переписали по итогам ревью.",
+                             a_report(), AT + timedelta(hours=8), outbound.no_chat(),
+                             reply_to_message_id="mail-78")
+                second = mailed.call_args.args[1]
+        self.assertIn(hashlib.sha256("редакция 4\n".encode()).hexdigest(), second)
+        self.assertNotIn(hashlib.sha256("редакция 3\n".encode()).hexdigest(), second)
+
+    def test_a_digest_the_owner_wrote_himself_ends_the_event_too(self):
+        # Пользователь получил ровно тот факт, ради которого блок существует.
+        # Повторять его следующим письмом незачем.
+        with tempfile.TemporaryDirectory() as home:
+            path = self.a_deliverable(home, 1233, "a100-instruction.md", "редакция 3\n")
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            ledger = Path(home) / "outbound.json"
+            repo, direction, listing = self.a_direction(home, (1233, "completed"))
+            with mock.patch.object(outbound, "LEDGER", ledger), repo, direction, listing, \
+                    mock.patch.object(tick, "send_mail", side_effect=["gmail-1", "gmail-2"]) as mailed:
+                tick.deliver("deep-research", "verdict", "Продакт: Deep Research",
+                             f"Инструкция: {path}, sha256 {digest}. Скажите, когда передать.",
+                             a_report(), AT, outbound.no_chat())
+                first = mailed.call_args.args[1]
+                tick.deliver("deep-research", "reply", "Re: Deep Research",
+                             "Сводка качества обновлена.", a_report(),
+                             AT + timedelta(hours=8), outbound.no_chat(),
+                             reply_to_message_id="mail-79")
+                second = mailed.call_args.args[1]
+        self.assertEqual(first.count(digest), 1)
+        self.assertNotIn(outbound.HANDOFF_HEADING, first)
+        self.assertNotIn(digest, second)
+
+    def test_an_unreadable_instruction_holds_the_letter_instead_of_sending_it_bare(self):
+        """Ревью 2026-08-20: «при сбое наблюдения дверь повторяет исходный дефект».
+
+        Принятая инструкция видна и не читается. Письмо про неё — это снова
+        просьба передать неназванный файл, то есть ровно наблюдавшийся инцидент.
+        Оно ждёт в `pending`, а не уходит таким.
+        """
+        with tempfile.TemporaryDirectory() as home:
+            path = self.a_deliverable(home, 1233, "a100-instruction.md", "редакция 3\n")
+            ledger = Path(home) / "outbound.json"
+            repo, direction, listing = self.a_direction(home, (1233, "completed"))
+            with mock.patch.object(outbound, "LEDGER", ledger), repo, direction, listing, \
+                    mock.patch.object(pms, "_file_sha256", return_value=None), \
+                    mock.patch.object(tick, "send_mail", return_value="gmail-1") as mailed:
+                record = tick.deliver("deep-research", "verdict", "Продакт: Deep Research",
+                                      "Внешний прогон готов. Скажите, когда передать.",
+                                      a_report(), AT, outbound.no_chat())
+                with outbound.Ledger(ledger) as book:
+                    held = book.thread("deep-research")["pending"]
+        self.assertEqual(record["action"], "hold")
+        self.assertIn(str(path), record["reason"])
+        mailed.assert_not_called()
+        # Ничего не потеряно: письмо стоит в очереди направления и уйдёт, когда
+        # инструкцию снова можно будет назвать.
+        self.assertEqual(len(held), 1)
+        self.assertIn("Внешний прогон готов", held[0]["body"])
+
+    def test_an_unreadable_instruction_does_not_let_a_reply_go_bare_either(self):
+        with tempfile.TemporaryDirectory() as home:
+            self.a_deliverable(home, 1233, "a100-instruction.md", "редакция 3\n")
+            ledger = Path(home) / "outbound.json"
+            repo, direction, listing = self.a_direction(home, (1233, "completed"))
+            with mock.patch.object(outbound, "LEDGER", ledger), repo, direction, listing, \
+                    mock.patch.object(pms, "_file_sha256", return_value=None), \
+                    mock.patch.object(tick, "send_mail", return_value="gmail-1") as mailed:
+                record = tick.deliver("deep-research", "reply", "Re: Deep Research",
+                                      "Отвечаю: прогон готов, передать можно сейчас.",
+                                      a_report(), AT, outbound.no_chat(),
+                                      reply_to_message_id="mail-80")
+        # Ответ не уходит в общую очередь проактивных писем и не уходит пустым:
+        # это явный отказ для владельца почтовой побудки.
+        self.assertEqual(record["action"], "fail")
+        mailed.assert_not_called()
+
     def test_the_rule_in_the_instructions_names_the_mechanism(self):
         instructions = (Path(tick.__file__).parent.parent / "AGENTS.md").read_text(
             encoding="utf-8")
-        self.assertIn("with_instruction_handoff", instructions)
+        self.assertIn("instruction_handoff", instructions)
 
 
 if __name__ == "__main__":
