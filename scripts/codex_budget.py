@@ -2,9 +2,9 @@
 """Remaining Codex subscription budget, from the CLI's own session records.
 
 Codex writes a `rate_limits` snapshot into every session rollout file. The most
-recent one is the truth about the weekly window; nothing else on this host knows
-it. Exit code is 0 when there is room, 1 when the window is close enough that
-heavy work should not start.
+recent snapshot is an observation of the current weekly window only until its
+reset time; nothing else on this host knows it. Exit code is 0 when there is
+room, 1 when the window is close enough that heavy work should not start.
 """
 from __future__ import annotations
 
@@ -76,6 +76,8 @@ def latest() -> dict | None:
         except OSError:
             continue
         if found:
+            if found["resets_at_epoch"] <= datetime.now(timezone.utc).timestamp():
+                return None
             return found
     return None
 
@@ -89,7 +91,8 @@ def main() -> int:
 
     state = latest()
     if not state:
-        print("бюджет Codex неизвестен: снимков rate_limits в сессиях нет")
+        print("бюджет Codex неизвестен: снимков rate_limits в сессиях нет "
+              "или последнее наблюдение устарело")
         return 0
     state["heavy_work_allowed"] = state["used_percent"] < args.heavy_threshold
     if args.format == "json":
