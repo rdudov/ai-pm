@@ -656,6 +656,16 @@ def deliver(thread: str, kind: str, subject: str, body: str,
         delivered = None
         message_id = None
         if decision["action"] == "send":
+            # На отправляемом тексте, а не на составленном: письмо, пролежавшее
+            # в `pending` полдня, уходит с sha256 этой минуты, а не той. Порог,
+            # склейка и повторность считаны выше и этой строкой не двигаются —
+            # направление без принятой внешней инструкции уходит ровно тем же
+            # текстом, что и раньше. `raw_message` сюда не попадает: там письмо
+            # целиком собрал отправитель, и дописать в него текст здесь значило
+            # бы записать в реестр то, чего не ушло.
+            if raw_message is None:
+                decision = {**decision, "body": outbound.with_instruction_handoff(
+                    thread, decision["body"])}
             mail_options = {"reply_to_message_id": reply_to_message_id,
                             "attachments": attachments}
             if raw_message is not None:
