@@ -131,6 +131,18 @@ MAIL_TIMEOUT = tunable("PRODUCT_OWNER_MAIL_TIMEOUT_SECONDS", 180)
 # Above this share of the weekly Codex window, heavy work does not start — the
 # same threshold `codex_budget.py` prints its verdict against.
 CODEX_HEAVY_PERCENT = tunable("PRODUCT_OWNER_CODEX_HEAVY_PERCENT", 80)
+# Письма, которые при неудачной отправке не уходят в общую очередь проактивных
+# новостей, и что о каждом из них записано. Ответ принадлежит своей побудке,
+# оперативка — своему утру, а письмо о принятой инструкции пересобирается
+# следующим тиком: цифра в нём считается с байтов файла в минуту отправки, и
+# полежавший в очереди текст назвал бы редакцию, которой на диске может уже не
+# быть.
+FAILED_SEND = {
+    "reply": "отправка ответа не удалась; повтор не выполнен",
+    "daily": "отправка оперативки не удалась; следующий утренний тик повторит",
+    "instruction": ("письмо о принятой инструкции не ушло; следующий тик соберёт "
+                    "его заново с текущим sha256"),
+}
 
 
 def process_observation(report: dict) -> dict:
@@ -629,7 +641,8 @@ def deliver(thread: str, kind: str, subject: str, body: str,
             report: dict | None, moment: datetime, chat: dict | None = None,
             *, reply_to_message_id: str | None = None,
             attachments: list[str] | None = None,
-            raw_message: bytes | None = None) -> dict:
+            raw_message: bytes | None = None,
+            names_instructions: list[dict] | None = None) -> dict:
     """The one door mail leaves this contour through.
 
     The push above is unconditional and stays that way: «прогон стартовал»,
@@ -642,6 +655,12 @@ def deliver(thread: str, kind: str, subject: str, body: str,
     worth is that it says what the user was told. A failed reply stays an
     explicit failure for its mail-wake owner instead of entering the proactive
     merge queue.
+
+    `names_instructions` — редакции инструкции внешнему исполнителю, которые это
+    письмо называет путём и полным sha256. Заявлено вызывающим, а не угадано
+    здесь по прозе или по соседству: это единственная связь между готовым файлом
+    и конкретным сообщением, и она в подписи. Названными редакции становятся
+    только после успешной отправки — см. `outbound.instruction_letter`.
     """
     if (kind == "reply") != bool(reply_to_message_id):
         raise ValueError("kind='reply' and reply_to_message_id must be supplied together")
@@ -655,29 +674,13 @@ def deliver(thread: str, kind: str, subject: str, body: str,
                                    moment, entry, chat)
         delivered = None
         message_id = None
-        handoff = None
-        if decision["action"] == "send" and raw_message is None:
-            # На отправляемом тексте, а не на составленном: письмо, пролежавшее
-            # в `pending` полдня, уходит с sha256 этой минуты, а не той. Порог,
-            # склейка и повторность считаны выше и этой строкой не двигаются —
-            # письмо, которому нечего назвать (принятой инструкции нет или её
-            # уже называли), уходит ровно тем же текстом, что и раньше.
-            # `raw_message` сюда не попадает: там письмо целиком собрал
-            # отправитель, и дописать в него текст здесь значило бы записать в
-            # реестр то, чего не ушло.
-            handoff = outbound.instruction_handoff(thread, decision["body"], entry)
-            if handoff["hold"]:
-                # Принятая инструкция есть, и назвать её цифру нечем. Письмо про
-                # неё ушло бы просьбой найти неназванный файл — тем самым
-                # дефектом, ради которого эта дверь так устроена. Ответ ждёт
-                # своего владельца, остальное ждёт следующего письма; ни то ни
-                # другое не теряется.
-                decision = {**decision,
-                            "action": "fail" if kind in {"reply", "daily"} else "hold",
-                            "reason": handoff["hold"],
-                            "body": decision["raw_body"], "flush": []}
-            else:
-                decision = {**decision, "body": handoff["body"]}
+        if names_instructions and not outbound.unnamed_instructions(
+                entry, names_instructions):
+            # Пока это письмо собиралось, редакцию назвал другой тик того же
+            # направления: реестр читается под тем же замком, под которым
+            # пишется, и решает он, а не наблюдение минутной давности.
+            decision = {**decision, "action": "drop", "flush": [],
+                        "reason": "эту редакцию пользователю уже называли"}
         if decision["action"] == "send":
             mail_options = {"reply_to_message_id": reply_to_message_id,
                             "attachments": attachments}
@@ -687,15 +690,15 @@ def deliver(thread: str, kind: str, subject: str, body: str,
             delivered = bool(send_result)
             message_id = send_result if isinstance(send_result, str) else None
             if not delivered:
-                if kind in {"reply", "daily"}:
+                if kind in FAILED_SEND:
                     # A reply may not ride out later as proactive news. Keep the
                     # failure explicit for the mail-wake owner to handle; putting
                     # it in generic pending would violate the very reply boundary
-                    # this kind establishes.
+                    # this kind establishes. The morning letter and the letter
+                    # about an accepted instruction are owed to their own moment
+                    # in the same way — see `FAILED_SEND`.
                     decision = {**decision, "action": "fail",
-                                "reason": ("отправка ответа не удалась; повтор не выполнен"
-                                           if kind == "reply" else
-                                           "отправка оперативки не удалась; следующий утренний тик повторит"),
+                                "reason": FAILED_SEND[kind],
                                 "body": decision["raw_body"], "flush": []}
                 else:
                     # Held as it was written, not as it was merged: what
@@ -705,14 +708,17 @@ def deliver(thread: str, kind: str, subject: str, body: str,
                     decision = {**decision, "action": "hold",
                                 "reason": "отправка не удалась, письмо ждёт следующего",
                                 "body": decision["raw_body"], "flush": []}
-            if delivered and handoff and handoff["said"]:
+            if delivered and names_instructions:
                 # Названной редакция считается только когда письмо действительно
-                # ушло: удержанное письмо уйдёт позже и назовёт ту редакцию,
-                # которая будет лежать на диске в ту минуту.
-                outbound.remember_instructions(entry, handoff["said"], moment)
+                # ушло: несостоявшееся письмо соберут заново на следующем тике, с
+                # той редакцией, которая будет лежать на диске в ту минуту.
+                outbound.remember_instructions(entry, names_instructions, moment)
         # A reply is owed independently of proactive news and therefore must
-        # neither advance nor erase the baseline used by the proactive gate.
-        applied_report = None if kind == "reply" else report
+        # neither advance nor erase the baseline used by the proactive gate. The
+        # door's own letter about an accepted instruction is owed the same way:
+        # it says nothing about the direction's news, and moving the baseline
+        # with it would silence the owner's letter about that very acceptance.
+        applied_report = None if kind in {"reply", "instruction"} else report
         outbound.apply(entry, decision, subject, moment, applied_report, kind)
         record = {"at": moment.isoformat(), "thread": thread, "kind": kind,
                   "subject": subject, "action": decision["action"],
@@ -1156,7 +1162,25 @@ def main() -> int:
 
     state_path.write_text(json.dumps(record(None, not woke), ensure_ascii=False, indent=2))
 
+    # Письмо о принятой инструкции внешнему исполнителю. Здесь, а не внутри
+    # разбуженного продакта: оно целиком собрано из наблюдения, поэтому не зависит
+    # ни от того, что продакт написал, ни от того, будили ли его вообще. Уходит
+    # один раз на редакцию — `deliver` под замком реестра проверяет, не назвал ли
+    # её уже соседний тик, — и своим письмом, поэтому чужие письма направления
+    # остаются ровно такими, какими были.
+    mail = []
+    letter = outbound.instruction_letter(args.thread)
+    if letter is not None:
+        mail.append(deliver(
+            args.thread, "instruction",
+            f"Продакт: {report['title']} — путь к принятой инструкции для внешнего исполнителя",
+            letter["body"], report, moment, names_instructions=letter["names"]))
+
     if not woke:
+        if mail:
+            final = record(None, True)
+            final["mail"] = mail
+            state_path.write_text(json.dumps(final, ensure_ascii=False, indent=2))
         return verdict
 
     # Same trust level as the user's own full session: the directories this
@@ -1203,7 +1227,6 @@ def main() -> int:
     goal_check = goal_session.post_check(
         args.thread, goals["objects"], (after or {}).get("live", []), message, moment)
 
-    mail = []
     if message and message != "SILENT":
         notify(f"[{report['title']}]\n{message}")
         mail.append(deliver(args.thread, "verdict", f"Продакт: {report['title']}",
