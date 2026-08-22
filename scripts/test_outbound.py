@@ -597,6 +597,38 @@ class AChoiceRequestIsAQuestion(unittest.TestCase):
                            outbound.no_chat())
         self.assertIn("ВОПРОС: да|нет", text)
 
+    def test_the_saved_1238_event_requires_a_self_contained_choice(self):
+        report = a_report(
+            title="Deep Research",
+            ready_to_start=[{
+                "id": 1238,
+                "title": "Объяснить отсутствие прироста качества",
+                "status": "completed",
+                "summary": "88 разрешимых открытий потеряны в 31 из 108 случаев",
+            }],
+        )
+        text = tick.prompt(
+            report,
+            ["1238 принята; resolver не изменён и ждёт выбора пользователя"],
+            [], [], outbound.no_chat(),
+        )
+        for required in (
+            "Над чем работаем", "исходная потребность", "что именно проверено",
+            "ключевые наблюдения", "рекомендация", "реальная альтернатива",
+            "что произойдёт при каждом", "что пока не изменилось", "существенный риск",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, text)
+        self.assertNotIn("Верни короткий текст", text)
+        self.assertIn("Не выдумывай", text)
+        self.assertIn("примеры из общих правил не являются текущим состоянием", text)
+        self.assertIn("не синтезируй сочетание вариантов", text)
+
+    def test_the_same_contract_keeps_non_questions_concise_and_silent_available(self):
+        text = tick.verdict_block()
+        self.assertIn("обычный вердикт остаётся коротким", text)
+        self.assertIn("ровно словом `SILENT`", text)
+
 
 class ThePlanReachesTheBackgroundOwner(unittest.TestCase):
     """«Решение в CLI управляет фоновым тиком.»

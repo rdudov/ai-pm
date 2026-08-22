@@ -473,6 +473,17 @@ class OneConversation(unittest.TestCase):
         # забыл правило, ошибается ровно там, где режим и заводился.
         self.assertIn("Молчание третьим исходом не является", delta)
         self.assertIn("Молчание третьим исходом не является", opening)
+        for required in ("Над чем работаем", "что именно проверено",
+                         "реальная альтернатива", "что произойдёт при каждом"):
+            with self.subTest(required=required):
+                self.assertIn(required, delta)
+                self.assertIn(required, opening)
+        self.assertNotIn("верни короткий текст", delta.lower())
+        self.assertIn("обычный вердикт остаётся коротким", delta)
+        self.assertIn("ровно словом `SILENT`", delta)
+        self.assertIn("Не выдумывай", delta)
+        self.assertIn("примеры из общих правил не являются текущим состоянием", delta)
+        self.assertIn("не синтезируй сочетание вариантов", delta)
 
     def test_the_record_says_which_turn_rebuilt_the_context(self):
         session.MIN_TURN_GAP_SECONDS = 0
