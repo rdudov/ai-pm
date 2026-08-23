@@ -2327,12 +2327,19 @@ function goalsNode(goals) {
         .title = "наблюдено: " + goal.pause.src;
     }
     for (const item of goal.correctives) {
-      /* Accepted is shown, not dropped: a closed repair is exactly the point at
+      /* Closed is shown, not dropped: a closed repair is exactly the point at
          which the chain used to stop, and the next line says what comes after
-         it. */
-      foldable(rest, item.accepted ? "done" : "line", "корректирующая " + item.task +
-        (item.accepted ? " принята" : " в работе") + ": " + human(item.effect))
-        .title = "возврат к основной задаче: " + item.return_criterion;
+         it. Приёмка и снятие — разные надписи: написать «принята» над снятым
+         ремонтом значило бы вернуть ту самую неправду, ради ухода от которой
+         снятие и появилось. */
+      const settled = item.settled;
+      const said = !settled ? " в работе"
+        : (settled.kind === "accepted" ? " принята" : " снята");
+      foldable(rest, settled ? "done" : "line",
+        "корректирующая " + item.task + said + ": " + human(item.effect))
+        .title = (settled && settled.kind === "retired"
+          ? "снята: " + settled.reason + "\nнаблюдено: " + settled.src + "\n" : "")
+          + "возврат к основной задаче: " + item.return_criterion;
     }
     if (goal.next_transition) {
       foldable(rest, "line", "следующий переход: " + human(goal.next_transition));

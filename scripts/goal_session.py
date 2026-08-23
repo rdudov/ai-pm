@@ -303,10 +303,22 @@ def observation(thread: str) -> dict:
         "goal_state": {str(goal["id"]): {
             "state": goal.get("state"), "control": goal.get("control"),
             "gap": goal.get("gap"), "waiting_on": goal.get("waiting_on", []),
-            "correctives": {str(item["task"]): bool(item["accepted"])
+            "correctives": {str(item["task"]): (item["settled"] or {}).get("kind", "")
                             for item in goal.get("correctives", [])},
         } for goal in panel},
     }
+
+
+def _settled_kind(value) -> str:
+    """Чем закрыт ремонт в снимке — с поправкой на снимок, снятый до обновления.
+
+    Тогда здесь лежало булево «принята», и сравнение его с видом закрытия
+    объявило бы приёмку заново на первом же наблюдении после обновления: ход
+    модели, потраченный на новость, которой не было.
+    """
+    if value is True:
+        return "accepted"
+    return value or ""
 
 
 def changes(previous: dict | None, current: dict) -> list[str]:
@@ -343,9 +355,13 @@ def changes(previous: dict | None, current: dict) -> list[str]:
             said.append(f"цель {goal_id}: контроль {state.get('control')}")
         if was.get("gap") != state.get("gap"):
             said.append(f"цель {goal_id}: ближайший разрыв изменился")
-        for task, accepted in state.get("correctives", {}).items():
-            if was.get("correctives", {}).get(task) != accepted and accepted:
-                said.append(f"цель {goal_id}: корректирующая задача {task} принята")
+        for task, settled in state.get("correctives", {}).items():
+            settled = _settled_kind(settled)
+            if _settled_kind(was.get("correctives", {}).get(task)) != settled and settled:
+                # Снятие меняет решение ровно так же, как приёмка: ремонт больше
+                # не держит основную работу, и её можно возвращать.
+                said.append(f"цель {goal_id}: корректирующая задача {task} "
+                            + ("принята" if settled == "accepted" else "снята"))
     for goal_id in sorted(set(before) - set(after)):
         said.append(f"цель {goal_id} закрыта или ушла из направления")
     return said
@@ -506,6 +522,10 @@ def _rules_block() -> str:
   возвращается в работу (`product_goal.py accept`, затем `resume`), а цель
   закрывается только живой проверкой исходного сценария через фактически
   установленный продукт;
+- ремонт, который сам себя не доставил — эффект пришёл с другой принятой задачей
+  или он отменён в системе задач, — снимается `product_goal.py retire --task N
+  --reason ... --src ...`, а не приёмкой: приёмка утверждает доставку. Снятый
+  ремонт основную работу не держит;
 - запуск ребёнка в режиме записи по нашему коду в нашем репозитории разрешения
   не требует; единственный физический ограничитель — занятое рабочее дерево;
 - не читай транскрипты детей: только артефакты задач и наблюдаемое состояние;
