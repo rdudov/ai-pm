@@ -1437,7 +1437,11 @@ function cardBody(p) {
       row(dl, "Доставлено", hand.delivered ? "да" : "нет", hand.delivered_src);
     }
     if (d.delivery) {
-      row(dl, "Сообщений", d.delivery.count, d.delivery.src);
+      /* Сообщения и отказы — два разных числа, и стоят они рядом: пока «Сообщений»
+         считалось по всем квитанциям, отказ прибавлялся к отправленному, и
+         карточка этой самой задачи показывала шесть сообщений при пяти ушедших. */
+      row(dl, "Сообщений", d.delivery.sent, d.delivery.src);
+      row(dl, "Отказов", d.delivery.refused, d.delivery.src);
       row(dl, "Последнее", stamp(d.delivery.last_at), d.delivery.src);
       row(dl, "По событию", d.delivery.last_kind, d.delivery.src);
       // Что прогон пытался сказать человеку и не смог, и почему. Стоит рядом со
