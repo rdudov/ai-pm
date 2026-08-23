@@ -151,16 +151,27 @@ SENTENCE = re.compile(r"[^.!?\n]+[.!?]?")
 # «Cursor.» and «cursor», «runtime-правило» and «runtime» are the same thing
 # named twice. See `same_question` for why this is what a repeat is measured in.
 NAMED = re.compile(r"[a-zA-Z][a-zA-Z0-9]{2,}|\b\d{3,4}\b")
+# Разметка, которой составитель иногда выделяет служебную строку: `**ПОВОД:
+# готово**`, `**ВОПРОС:** нет`, `## НОВОЕ: …`. Письмо пишет языковая модель, и
+# 23 августа 2026 два живых письма из двадцати девяти пришли с жирными маркерами
+# (`live-evidence/measure_markers.py` задачи 1260). Просьба в промпте писать
+# строку голой уже стоит и уже не выполняется, а от того, увидела дверь эти
+# строки или нет, зависят три её решения: считать ли письмо вопросом, назван ли
+# новый факт и какой у письма повод. Поэтому разметка вокруг строки
+# пропускается здесь, а не остаётся ещё одной просьбой к модели.
+MARKUP = r"[\s*_#]*"
 # Чем письмо называет новый факт, из-за которого уже заданный вопрос уходит
 # второй раз. Отдельной строкой и по своему имени — как `ПОВОД` и `ВОПРОС`:
 # составитель обязан назвать новизну явно, а не спрятать её в пересказе.
-NEW_FACT_LINE = re.compile(r"^\s*НОВОЕ\s*:\s*(\S.*)$", re.MULTILINE)
+NEW_FACT_LINE = re.compile(rf"^{MARKUP}НОВОЕ{MARKUP}:{MARKUP}(\S.*?){MARKUP}$",
+                           re.MULTILINE)
 # The one line the woken owner may use to name why it is writing. Two of its
 # four values are acted on and they are the two that cannot make the contour
 # quieter than the user asked: `вопрос` adds a letter that nothing else may
 # hold, and `механика` removes one the threshold below would refuse anyway.
-REASON_LINE = re.compile(r"^\s*ПОВОД\s*:\s*(вопрос|польза|готово|механика)\s*$",
-                         re.IGNORECASE | re.MULTILINE)
+REASON_LINE = re.compile(
+    rf"^{MARKUP}ПОВОД{MARKUP}:{MARKUP}(вопрос|польза|готово|механика){MARKUP}$",
+    re.IGNORECASE | re.MULTILINE)
 # The structured answer to «спрашиваешь ли ты тут пользователя», separate from
 # the reason above and carried by the one who composes the letter. Separate
 # because `ПОВОД` is a single choice of four and its other three values were
@@ -168,7 +179,7 @@ REASON_LINE = re.compile(r"^\s*ПОВОД\s*:\s*(вопрос|польза|го�
 # `ПОВОД: механика` over «Пожалуйста, выберите: запускать задачу 861 сейчас или
 # после ревью.» being dropped below the threshold. Only `да` is acted on. `нет`
 # is recorded and deliberately powerless — see `asks_user`.
-QUESTION_LINE = re.compile(r"^\s*ВОПРОС\s*:\s*(да|нет)\s*$",
+QUESTION_LINE = re.compile(rf"^{MARKUP}ВОПРОС{MARKUP}:{MARKUP}(да|нет){MARKUP}$",
                            re.IGNORECASE | re.MULTILINE)
 # A request for the user's choice, read from the text and owing nothing to the
 # label above. Punctuation alone was the whole of this check until 2026-08-09,

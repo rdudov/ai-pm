@@ -258,6 +258,23 @@ class TheSameQuestionIsNotAskedTwice(unittest.TestCase):
                                    entry, outbound.no_chat())
         self.assertEqual(decision["action"], "send")
 
+    def test_a_new_fact_written_in_bold_still_releases_the_reminder(self):
+        # У строки `НОВОЕ:` запасного источника нет: не увидела дверь строку —
+        # напоминание с настоящим новым фактом молча не уходит. На настоящих
+        # байтах 09:40 жирная строка давала `drop` и «нового факта письмо не
+        # называет» (`live-evidence/markers-before.txt` задачи 1260).
+        entry = self.sent(ASKED_AT_0840, AT)
+        reminder = ASKED_AT_0940.replace(
+            "## Над чем работаем",
+            "## Над чем работаем\n\n**НОВОЕ: живая проба установки у стороннего "
+            "стенда показала, что pyproject публикует пакет с чужим owner.**", 1)
+        decision = outbound.decide("process", "verdict", "Продакт: Процессный контур",
+                                   reminder, a_report(), AT + timedelta(hours=1),
+                                   entry, outbound.no_chat())
+        self.assertEqual(decision["action"], "send")
+        self.assertNotIn("**", outbound.new_fact(
+            reminder, entry["letters"][-1]["fingerprint"]))
+
     def test_a_reminder_that_names_nothing_new_is_still_a_repeat(self):
         # The composer is a language model, so the `НОВОЕ:` line is checked
         # rather than believed: it has to name something the sent question did
@@ -799,6 +816,21 @@ class AChoiceRequestIsAQuestion(unittest.TestCase):
                                    a_report(), AT, an_entry(marks=marks()),
                                    outbound.no_chat())
         self.assertEqual(decision["action"], "send")
+
+    def test_a_marker_written_in_bold_still_declares_the_question(self):
+        # Живое наблюдение 23 августа 2026: два письма из двадцати девяти пришли
+        # со строками `**ПОВОД: …**` и `**ВОПРОС: …**`, и дверь не видела ни
+        # одной из них. Оба тех письма оказались не вопросами, но потерять так
+        # можно именно вопрос: `ВОПРОС: да` — это тот источник, который ставили
+        # ради письма, чей текст вопросом не читается.
+        for body in ("**ПОВОД: вопрос**\n**ВОПРОС: да**\nПорядок работ по 861 "
+                     "стоит поменять.",
+                     "**ПОВОД:** вопрос\n**ВОПРОС:** да\nПорядок работ по 861 "
+                     "стоит поменять."):
+            with self.subTest(body=body.splitlines()[0]):
+                self.assertEqual(outbound.declared_reason(body), "вопрос")
+                self.assertTrue(outbound.declared_question(body))
+                self.assertTrue(outbound.asks_user(body))
 
     def test_a_declared_no_cannot_silence_a_question_in_the_text(self):
         # The composer is a language model and it does mislabel — that is the
