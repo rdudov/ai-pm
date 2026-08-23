@@ -30,7 +30,14 @@ owner of the four rules that came out of that complaint:
 4. **Ничего не потерять.** A letter that asks the user something, or a reply to
    the user's incoming letter, is never held, deduplicated or held back by the
    threshold. The producer identifies a reply explicitly with `kind="reply"`;
-   this module never guesses it from prose.
+   this module never guesses it from prose. The user narrowed this on
+   2026-08-23, after the same choice was put to them twice inside an hour: «можно
+   напомнить вопрос, если новое письмо содержит какие-то новые факты, но вот так
+   2 раза писать про одно и то же смысла нет». So the *first* question on a
+   matter still outranks everything here, and the second asking of that same
+   question goes out only when the letter names a fact the first one did not —
+   see `repeated_question`. Nothing is lost by that: the question the user has
+   not answered is still in their mailbox, on the push and on the board.
 
 The mirror of sent mail deliberately keeps no body (`gmail_client.
 record_sent_message`), so «то же самое по содержанию» cannot be answered from
@@ -78,6 +85,16 @@ CHAT_LOOKBACK_SECONDS = tunable("PRODUCT_OWNER_CHAT_LOOKBACK_SECONDS", 12 * 3600
 # as said. Word pairs rather than words: the conversations run to hundreds of
 # kilobytes, and against a blob that size single Russian words match everything.
 SAME_CONTENT_PERCENT = tunable("PRODUCT_OWNER_SAME_CONTENT_PERCENT", 60)
+# Share of the things a question names that the already-sent question named too,
+# for it to be the same question asked again. Its own knob and not
+# `SAME_CONTENT_PERCENT`, because it is measured in a different unit — see
+# `same_question` for the unit, and for the numbers the default came from.
+SAME_QUESTION_PERCENT = tunable("PRODUCT_OWNER_SAME_QUESTION_PERCENT", 60)
+# Below this many named things a share is not a measurement. Not a policy dial
+# but the floor of the measure itself: a question naming one task number matches
+# every other question about that task at 100%. The pair this came from names
+# eighteen and twenty-one.
+ENOUGH_NAMED = 6
 # How many past letters are kept per direction, for the repeat test and for the
 # «что пользователь уже слышал» block of the wake-up prompt.
 KEEP_LETTERS = tunable("PRODUCT_OWNER_KEEP_LETTERS", 20)
@@ -119,6 +136,16 @@ MACHINE_PREAMBLES = (
 WORD = re.compile(r"[а-яёa-z0-9]{3,}")
 TASK_ID = re.compile(r"\b(\d{3,4})\b")
 SENTENCE = re.compile(r"[^.!?\n]+[.!?]?")
+# The things a letter names: task numbers and the Latin names of the tools,
+# files, fields and products it is about — `dev-pipeline`, `README`, `metadata`,
+# `runtime`, `1257`. Punctuation and hyphens are not part of a name here, so
+# «Cursor.» and «cursor», «runtime-правило» and «runtime» are the same thing
+# named twice. See `same_question` for why this is what a repeat is measured in.
+NAMED = re.compile(r"[a-zA-Z][a-zA-Z0-9]{2,}|\b\d{3,4}\b")
+# Чем письмо называет новый факт, из-за которого уже заданный вопрос уходит
+# второй раз. Отдельной строкой и по своему имени — как `ПОВОД` и `ВОПРОС`:
+# составитель обязан назвать новизну явно, а не спрятать её в пересказе.
+NEW_FACT_LINE = re.compile(r"^\s*НОВОЕ\s*:\s*(\S.*)$", re.MULTILINE)
 # The one line the woken owner may use to name why it is writing. Two of its
 # four values are acted on and they are the two that cannot make the contour
 # quieter than the user asked: `вопрос` adds a letter that nothing else may
@@ -184,10 +211,24 @@ def overlap_percent(part: set[str], whole: set[str]) -> int:
     return round(100 * len(part & whole) / len(part))
 
 
+def named_things(text: str) -> set[str]:
+    """Tools, files, fields and task numbers a text names, lower-cased."""
+    found = set()
+    for token in NAMED.findall(text or ""):
+        token = token.lower()
+        if token.isdigit():
+            number = int(token)
+            if not 100 <= number <= 9999 or 1900 <= number <= 2100:
+                continue
+        found.add(token)
+    return found
+
+
 def fingerprint(subject: str, body: str) -> dict:
-    """What a letter is about, in the two signals sameness is judged on."""
+    """What a letter is about, in the three signals sameness is judged on."""
     text = f"{subject}\n{body}"
-    return {"tasks": sorted(task_ids(text)), "pairs": sorted(pairs(text))}
+    return {"tasks": sorted(task_ids(text)), "pairs": sorted(pairs(text)),
+            "names": sorted(named_things(text))}
 
 
 def same_matter(candidate: dict, previous: dict) -> bool:
@@ -204,6 +245,102 @@ def same_matter(candidate: dict, previous: dict) -> bool:
         return False
     return overlap_percent(set(candidate["pairs"]),
                            set(previous["pairs"])) >= SAME_CONTENT_PERCENT
+
+
+def same_question(candidate: dict, previous: dict) -> int:
+    """How much of what a question names the already-sent question named too.
+
+    The unit is the things named, not words and not word pairs, and the reason is
+    the pair of letters the user complained about on 2026-08-23: Gmail
+    `1a02dc9438edb490` at 08:40 UTC and `1a02e006586680d8` at 09:40 UTC asked the
+    same choice about the same three files in different words. Measured on those
+    exact bytes (`live-evidence/` of task 1260):
+
+        word pairs, as `same_matter` measures      18%   — reads as a new matter
+        words                                      33%   — control letters 10-16%
+        five-letter stems                          43%   — control letters 42%
+        things named, as measured here             71%   — control letters 19-38%
+
+    A retelling keeps what it is about and changes the prose around it, so the
+    prose is what has to be left out of the measure. `overlap_percent` answers
+    «сколько из названного здесь уже называли», which is the asymmetric question
+    worth asking: a shorter second letter about the same three files is fully
+    contained in the first one and is still the same question.
+
+    A letter that names too little is 0% and therefore never a repeat. Two names
+    in common are not «тот же вопрос» — they are two letters of one direction,
+    and «Запускать 1257 сейчас?» followed by «1257 упала, чинить или откатить?»
+    would otherwise measure 100% and lose the second question. The real pair
+    names eighteen and twenty-one things, so the floor costs it nothing, and
+    «нечем измерить» is decided in favour of the question.
+    """
+    names = set(candidate.get("names") or [])
+    if len(names) < ENOUGH_NAMED:
+        return 0
+    return overlap_percent(names, set(previous.get("names") or []))
+
+
+def new_fact(body: str, previous: dict) -> str | None:
+    """The new fact this letter claims, when the claim survives being checked.
+
+    The user allowed exactly one reason to ask again: «можно напомнить вопрос,
+    если новое письмо содержит какие-то новые факты». Whoever composes the letter
+    is the only one who can know that, and the composer is a language model, so
+    the claim is not taken on its word — the same asymmetry `asks_user` already
+    lives by. It has to be *said* in a `НОВОЕ:` line, and the line itself has to
+    be new: most of its words may not already be in the question that went out.
+    «Напоминаю, что metadata и README всё ещё называют только Codex» is the sent
+    letter with a new heading and does not pass; «прогон 1257 упал на живой
+    проверке» is four words that letter never contained and does.
+
+    Words rather than named things, because a genuinely new fact is often about
+    a thing already named — the run that failed, the file that turned out
+    unreadable — and the sameness of what a letter is *about* is measured a
+    function earlier, not here. The share is `SAME_CONTENT_PERCENT`, the one this
+    module already uses for «это уже проговорено».
+
+    What this cannot do is tell a truthful novelty from an invented one. What it
+    can do, and does, is refuse a repeat that claims no novelty at all — which is
+    what both letters of 2026-08-23 were.
+    """
+    claim = NEW_FACT_LINE.search(body or "")
+    if claim is None:
+        return None
+    spoken = set(words(claim.group(1)))
+    if not spoken:
+        return None
+    known = {word for pair in (previous.get("pairs") or []) for word in pair.split()}
+    if overlap_percent(spoken, known) >= SAME_CONTENT_PERCENT:
+        return None
+    return claim.group(1).strip()
+
+
+def repeated_question(entry: dict, candidate: dict, body: str) -> tuple[dict, int] | None:
+    """The question already in front of the user that this one asks again.
+
+    Newest first, over the letters kept for this direction rather than over the
+    coalescing window: «повторённый вопрос перестаёт быть вопросом и становится
+    шумом» is the user's own rule about the question itself, not about an hour of
+    it. `KEEP_LETTERS` bounds how far back that reaches.
+
+    Only letters that were themselves questions count. A verdict about the same
+    matter may not swallow a question — that half of the 2026-08-09 rule is
+    unchanged, and only the second asking of the same question is new.
+    """
+    for letter in reversed(entry["letters"]):
+        if not letter.get("asks_user"):
+            continue
+        previous = letter.get("fingerprint") or {}
+        if not previous.get("names"):
+            # Written before this measure existed, or naming nothing measurable.
+            continue
+        percent = same_question(candidate, previous)
+        if percent < SAME_QUESTION_PERCENT:
+            continue
+        if new_fact(body, previous):
+            return None
+        return letter, percent
+    return None
 
 
 def declared_question(body: str) -> bool | None:
@@ -801,6 +938,16 @@ def decide(thread: str, kind: str, subject: str, body: str, report: dict,
         return {"action": "send", "reason": ALWAYS[kind], "body": body,
                 "raw_body": body, "fingerprint": candidate, "flush": []}
     if asks_user(body):
+        repeat = repeated_question(entry, candidate, body)
+        if repeat is not None:
+            letter, percent = repeat
+            return {"action": "drop",
+                    "reason": f"этот вопрос уже задан письмом {letter['at'][:16]} "
+                              f"«{letter['subject']}»: {percent}% названного в нём "
+                              f"же, нового факта письмо не называет. Вопрос "
+                              f"остаётся открытым в том письме, в пуше и на табло",
+                    "body": body, "raw_body": body,
+                    "fingerprint": candidate, "flush": []}
         merged = merged_body(body, pending)
         return {"action": "send", "reason": "вопрос пользователю доходит всегда",
                 "body": merged, "raw_body": body,
@@ -889,7 +1036,12 @@ def apply(entry: dict, decision: dict, subject: str, now: datetime, report: dict
         "at": now.isoformat(), "subject": subject, "kind": kind,
         "excerpt": decision["body"].strip()[:400],
         "reason": decision["reason"],
+        # Whether this letter put a question in front of the user, written down
+        # at the moment it went: the excerpt is cut to 400 characters and the
+        # choice is usually below that cut, so the next tick cannot re-read it.
+        "asks_user": asks_user(decision.get("raw_body") or decision["body"]),
         "fingerprint": {"tasks": decision["fingerprint"]["tasks"],
-                        "pairs": decision["fingerprint"]["pairs"][:400]},
+                        "pairs": decision["fingerprint"]["pairs"][:400],
+                        "names": decision["fingerprint"]["names"]},
     })
     entry["letters"] = entry["letters"][-KEEP_LETTERS:]

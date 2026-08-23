@@ -499,7 +499,11 @@ class OneConversation(unittest.TestCase):
                 self.assertIn(required, delta)
                 self.assertIn(required, opening)
         self.assertNotIn("верни короткий текст", delta.lower())
-        self.assertIn("обычный вердикт остаётся коротким", delta)
+        # С 2026-08-23 контракт письма один для всех писем: команда «обычный
+        # вердикт остаётся коротким» была вторым, встречным приказом и ушла —
+        # см. `thread_tick.verdict_block`. Молчание осталось ровно там же.
+        self.assertNotIn("обычный вердикт остаётся коротким", delta)
+        self.assertIn("любое письмо самодостаточно", delta)
         self.assertIn("ровно словом `SILENT`", delta)
         self.assertIn("Не выдумывай", delta)
         self.assertIn("примеры из общих правил не являются текущим состоянием", delta)

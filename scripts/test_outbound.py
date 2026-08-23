@@ -83,6 +83,9 @@ def a_letter(body: str, at: datetime, subject: str = "Продакт: Проце
              kind: str = "verdict") -> dict:
     return {"at": at.isoformat(), "subject": subject, "kind": kind,
             "excerpt": body[:400], "reason": "тест",
+            # Written down at the moment a letter goes, because the excerpt is
+            # cut to 400 characters and the choice usually falls below the cut.
+            "asks_user": outbound.asks_user(body),
             "fingerprint": outbound.fingerprint(subject, body)}
 
 
@@ -103,12 +106,18 @@ class QuestionIsNeverLost(unittest.TestCase):
         self.assertIn("вопрос", decision["reason"])
 
     def test_a_question_is_not_coalesced_into_the_letter_before_it(self):
+        # A letter that was not itself a question may not hold one back, however
+        # much of the same matter it covered. This is the half of the 2026-08-09
+        # rule the user did not narrow: the *first* question on a matter still
+        # outranks the threshold, the conversation and coalescing.
         body = "Запускать 861 сейчас или после 856?"
+        told = "Задача 861 прошла ревью, 856 ждёт своего круга."
         entry = an_entry(marks=marks(),
-                         letters=[a_letter(body, AT - timedelta(minutes=5))])
+                         letters=[a_letter(told, AT - timedelta(minutes=5))])
         decision = outbound.decide("process", "verdict", "Продакт: контур", body,
                                    a_report(), AT, entry, outbound.no_chat())
         self.assertEqual(decision["action"], "send")
+        self.assertIn("вопрос", decision["reason"])
 
     def test_a_question_survives_having_been_discussed_in_chat(self):
         body = "Запускать 861 сейчас или после 856?"
@@ -137,6 +146,218 @@ class QuestionIsNeverLost(unittest.TestCase):
         self.assertEqual(decision["action"], "send")
         self.assertIn("прогон 830 завершился", decision["body"])
         self.assertIn("Накопилось с прошлого письма", decision["body"])
+
+
+# The two letters the user called «2 письма про codex-centered практически
+# идентичного содержания», verbatim as they were sent on 2026-08-23 — Gmail
+# `1a02dc9438edb490` at 08:40 UTC and `1a02e006586680d8` at 09:40 UTC. They are
+# the same choice about the same three files, retold in other words an hour
+# apart, and they are here rather than paraphrased because a measure of sameness
+# is worth only the real pair it was checked against.
+ASKED_AT_0840 = """\
+ПОВОД: вопрос
+ВОПРОС: да
+
+## Над чем работаем
+
+Делаем dev-pipeline действительно универсальным для Codex, Claude Code и Cursor.
+
+Проверено: GitHub-описание и package docstring уже исправлены, но независимый review нашёл три остатка:
+
+- metadata пакета всё ещё называет только Codex и Claude;
+- первые абзацы README описывают работу как Codex-only;
+- общая исполняемая инструкция называет владельца любой сессии `Codex owner`, включая Claude и Cursor.
+
+Рекомендую исправить все три места сейчас в той же минимальной правке. Цена — изменение ещё одной runtime-строки и её повторная независимая проверка; срок по артефактам неизвестен.
+
+Выберите:
+
+1. **Исправить runtime-инструкцию тоже.** Тогда Codex обновит metadata, README и эту строку, после чего Claude повторно проверит весь результат.
+2. **Исправить только публичное описание.** Тогда metadata и README станут универсальными, но известное противоречие в инструкции останется отдельным долгом.
+
+Пока ответ не получен, код не меняется. Из-за незакрытых гейтов этого результата также не может стартовать следующая правка review lifecycle.
+
+Риск/долг: общий многорепозиторный review ещё не прошёл обязательные живые пробы, а основной путь независимой проверки и полного письма для каждой задачи остаётся `GAP/BLOCKED`.
+"""
+
+ASKED_AT_0940 = """\
+ПОВОД: вопрос
+ВОПРОС: да
+
+## Над чем работаем
+
+Делаем dev-pipeline действительно универсальным для Codex, Claude Code и Cursor — не только в описании GitHub, но во всех местах, которые определяют представление и поведение продукта.
+
+Свежий независимый Claude-review вернул результат на доработку:
+
+- GitHub description и package docstring уже исправлены;
+- package metadata всё ещё называет только Codex и Claude;
+- две строки первого экрана README остаются Codex-only;
+- общее runtime-правило называет владельца Claude или Cursor словами `Codex owner`.
+
+Metadata и README точно входят в минимальную правку. Нужен ваш выбор только по исполняемому runtime-правилу.
+
+Моя рекомендация — исправить его сейчас в том же кандидате. Это даст единое нейтральное правило всем трём runtime без нового механизма.
+
+Выберите:
+
+1. **Исправить runtime-правило сейчас.** Codex-автор согласует metadata, README и одну строку существующего правила; затем Claude повторно проверит весь точный кандидат.
+2. **Оставить runtime-правило отдельной работой.** Сейчас исправятся только metadata и README; Claude и Cursor пока продолжат получать инструкцию, называющую их Codex-владельцем, а позже понадобится отдельный кандидат и ещё один review.
+
+До ответа код не менялся. Зависимые процессные работы не запущены: одна удерживается незакрытой этой правкой, другая — отдельным непроверенным write-scope Deep Research.
+
+Риск/долг: свежий reviewer не смог независимо открыть живую страницу GitHub из своей сетевой среды; правильное описание подтверждено прежней квитанцией автора, но не повторным внешним чтением reviewer.
+"""
+
+
+class TheSameQuestionIsNotAskedTwice(unittest.TestCase):
+    """«Зачем слать один и тот же вопрос?» — пользователь, 2026-08-23.
+
+    The narrowing of the rule above, and the only one: the first question on a
+    matter still goes out against everything, and the second asking of it goes
+    out only when the letter names a fact the first one did not.
+    """
+
+    def sent(self, body: str, at: datetime) -> dict:
+        """The 08:40 question as the production ledger writes it down."""
+        entry = an_entry(marks=marks())
+        subject = "Продакт: Процессный контур"
+        decision = outbound.decide("process", "verdict", subject, body,
+                                   a_report(), at, entry, outbound.no_chat())
+        self.assertEqual(decision["action"], "send")
+        outbound.apply(entry, decision, subject, at, a_report(), "verdict")
+        return entry
+
+    def test_the_same_choice_retold_an_hour_later_is_not_a_second_letter(self):
+        entry = self.sent(ASKED_AT_0840, AT)
+        decision = outbound.decide("process", "verdict", "Продакт: Процессный контур",
+                                   ASKED_AT_0940, a_report(), AT + timedelta(hours=1),
+                                   entry, outbound.no_chat())
+        self.assertEqual(decision["action"], "drop")
+        self.assertIn("этот вопрос уже задан письмом", decision["reason"])
+
+    def test_the_measure_catches_the_retelling_the_older_one_could_not(self):
+        # The number, on that exact pair. `same_matter` reads 18% of word pairs
+        # and calls it new matter; what is named is 71% the same.
+        first = outbound.fingerprint("Продакт: Процессный контур", ASKED_AT_0840)
+        second = outbound.fingerprint("Продакт: Процессный контур", ASKED_AT_0940)
+        self.assertLess(outbound.overlap_percent(set(second["pairs"]),
+                                                 set(first["pairs"])), 30)
+        self.assertGreaterEqual(outbound.same_question(second, first),
+                                outbound.SAME_QUESTION_PERCENT)
+
+    def test_a_reminder_carrying_a_new_fact_still_goes_out(self):
+        entry = self.sent(ASKED_AT_0840, AT)
+        reminder = ASKED_AT_0940.replace(
+            "## Над чем работаем",
+            "## Над чем работаем\n\nНОВОЕ: живая проба установки у стороннего "
+            "стенда показала, что pyproject публикует пакет с чужим owner.", 1)
+        decision = outbound.decide("process", "verdict", "Продакт: Процессный контур",
+                                   reminder, a_report(), AT + timedelta(hours=1),
+                                   entry, outbound.no_chat())
+        self.assertEqual(decision["action"], "send")
+
+    def test_a_reminder_that_names_nothing_new_is_still_a_repeat(self):
+        # The composer is a language model, so the `НОВОЕ:` line is checked
+        # rather than believed: it has to name something the sent question did
+        # not name. Retelling the same three files under a new heading is not it.
+        entry = self.sent(ASKED_AT_0840, AT)
+        reminder = ASKED_AT_0940.replace(
+            "## Над чем работаем",
+            "## Над чем работаем\n\nНОВОЕ: напоминаю, что metadata и README всё "
+            "ещё называют только Codex.", 1)
+        decision = outbound.decide("process", "verdict", "Продакт: Процессный контур",
+                                   reminder, a_report(), AT + timedelta(hours=1),
+                                   entry, outbound.no_chat())
+        self.assertEqual(decision["action"], "drop")
+
+    def test_a_different_question_of_the_same_direction_is_not_a_repeat(self):
+        entry = self.sent(ASKED_AT_0840, AT)
+        decision = outbound.decide(
+            "process", "verdict", "Продакт: Процессный контур",
+            "ПОВОД: вопрос\nВОПРОС: да\n\n## Над чем работаем\n\n"
+            "1251 — исследование Deep Research, ждёт запуска.\n\n"
+            "Запускать 1251 сейчас или после того, как освободится дерево?",
+            a_report(), AT + timedelta(hours=1), entry, outbound.no_chat())
+        self.assertEqual(decision["action"], "send")
+
+    def test_a_new_fact_about_a_thing_already_named_still_releases_the_letter(self):
+        # The failure of a run everybody already knows the number of is new, and
+        # naming it uses no new name. Novelty is measured in the words of the
+        # claim, not in what it is about.
+        entry = self.sent(ASKED_AT_0840, AT)
+        reminder = ASKED_AT_0940.replace(
+            "## Над чем работаем",
+            "## Над чем работаем\n\nНОВОЕ: сборка упала на живой проверке "
+            "стороннего стенда, пока ответа не было.", 1)
+        decision = outbound.decide("process", "verdict", "Продакт: Процессный контур",
+                                   reminder, a_report(), AT + timedelta(hours=1),
+                                   entry, outbound.no_chat())
+        self.assertEqual(decision["action"], "send")
+
+    def test_one_task_number_in_common_is_not_the_same_question(self):
+        # «Запускать 1257 сейчас?» и «1257 упала, чинить или откатить?» называют
+        # ровно одно и то же — номер задачи — и совпадают на 100%. Мера, у
+        # которой нет основания, вопроса не глушит.
+        entry = self.sent("Запускать 1257 сейчас или после ревью?", AT)
+        decision = outbound.decide("process", "verdict", "Продакт: контур",
+                                   "1257 упала на живой проверке. Чинить сейчас "
+                                   "или откатить?", a_report(),
+                                   AT + timedelta(hours=1), entry, outbound.no_chat())
+        self.assertEqual(decision["action"], "send")
+
+    def test_a_question_that_names_nothing_measurable_is_never_a_repeat(self):
+        # «Нечем измерить» may not silence a question: a letter with no task
+        # number and no named tool is 0% and goes out.
+        entry = self.sent("Запускать сейчас или подождать?", AT)
+        decision = outbound.decide("process", "verdict", "Продакт: контур",
+                                   "Начинать сейчас или позже?", a_report(),
+                                   AT + timedelta(hours=1), entry, outbound.no_chat())
+        self.assertEqual(decision["action"], "send")
+
+    def test_the_letter_that_was_not_a_question_does_not_hold_one_back(self):
+        told = ("ПОВОД: польза\nВОПРОС: нет\n\n## Над чем работаем\n\n"
+                "Делаем dev-pipeline универсальным для Codex, Claude Code и "
+                "Cursor.\n\nGitHub description и package docstring уже "
+                "исправлены; metadata, README и общее runtime-правило пока "
+                "называют только Codex.")
+        entry = an_entry(marks=marks(), letters=[a_letter(told, AT)])
+        self.assertFalse(entry["letters"][0]["asks_user"])
+        decision = outbound.decide("process", "verdict", "Продакт: Процессный контур",
+                                   ASKED_AT_0940, a_report(), AT + timedelta(hours=1),
+                                   entry, outbound.no_chat())
+        self.assertEqual(decision["action"], "send")
+
+    def test_a_ledger_written_before_this_measure_existed_silences_nothing(self):
+        # `state/outbound.json` on disk predates both new fields. An entry
+        # without them is «неизвестно, был ли это вопрос», and unknown may not
+        # be read as «был», or the upgrade itself would swallow a question.
+        old = {"at": AT.isoformat(), "subject": "Продакт: Процессный контур",
+               "kind": "verdict", "excerpt": ASKED_AT_0840[:400], "reason": "тест",
+               "fingerprint": {"tasks": [], "pairs": sorted(outbound.pairs(
+                   ASKED_AT_0840))}}
+        entry = an_entry(marks=marks(), letters=[old])
+        decision = outbound.decide("process", "verdict", "Продакт: Процессный контур",
+                                   ASKED_AT_0940, a_report(), AT + timedelta(hours=1),
+                                   entry, outbound.no_chat())
+        self.assertEqual(decision["action"], "send")
+
+    def test_the_repeat_is_recorded_and_the_standing_question_is_not_erased(self):
+        # A question that does not go out may not disappear quietly: the ledger
+        # keeps the letter that asked it, the gateway journal keeps the refusal
+        # with its number, and nothing is added to `pending` to ride out later
+        # as a second copy.
+        entry = self.sent(ASKED_AT_0840, AT)
+        at = AT + timedelta(hours=1)
+        decision = outbound.decide("process", "verdict", "Продакт: Процессный контур",
+                                   ASKED_AT_0940, a_report(), at, entry,
+                                   outbound.no_chat())
+        outbound.apply(entry, decision, "Продакт: Процессный контур", at,
+                       a_report(), "verdict")
+        self.assertEqual(entry["pending"], [])
+        self.assertEqual(len(entry["letters"]), 1)
+        self.assertTrue(entry["letters"][0]["asks_user"])
+        self.assertIn("71%", decision["reason"])
 
 
 class ReplyIsNeverLost(unittest.TestCase):
@@ -559,8 +780,9 @@ class AChoiceRequestIsAQuestion(unittest.TestCase):
 
     def test_a_choice_request_is_not_coalesced_into_the_letter_before_it(self):
         body = self.a_choice()
+        told = "ПОВОД: механика\nЗадача 861 прошла ревью и ждёт своего круга."
         entry = an_entry(marks=marks(),
-                         letters=[a_letter(body, AT - timedelta(minutes=5))])
+                         letters=[a_letter(told, AT - timedelta(minutes=5))])
         decision = outbound.decide("process", "verdict", "Продакт: контур", body,
                                    a_report(), AT, entry, outbound.no_chat())
         self.assertEqual(decision["action"], "send")
@@ -624,9 +846,20 @@ class AChoiceRequestIsAQuestion(unittest.TestCase):
         self.assertIn("примеры из общих правил не являются текущим состоянием", text)
         self.assertIn("не синтезируй сочетание вариантов", text)
 
-    def test_the_same_contract_keeps_non_questions_concise_and_silent_available(self):
+    def test_the_same_contract_asks_every_letter_to_stand_on_its_own(self):
+        # Until 2026-08-23 this block asked a question to be self-contained and
+        # told an ordinary verdict to stay short, and the short one won: the
+        # verdict of 07:20 UTC that day had no heading, no task number and eight
+        # untranslated internal terms. The fork is what the user's «надо системно
+        # исправить проблему непонятных писем» removed; `SILENT` is not part of
+        # it and stays exactly as it was.
         text = tick.verdict_block()
-        self.assertIn("обычный вердикт остаётся коротким", text)
+        self.assertNotIn("обычный вердикт остаётся коротким", text)
+        self.assertIn("любое письмо самодостаточно", text)
+        self.assertIn("Над чем работаем", text)
+        self.assertIn("номер задачи", text)
+        self.assertIn("ни одного внутреннего термина без расшифровки", text)
+        self.assertIn("разворачивай предложением", text)
         self.assertIn("ровно словом `SILENT`", text)
 
 
@@ -1031,7 +1264,10 @@ class TheTickUsesTheGate(unittest.TestCase):
         text = tick.prompt(a_report(), ["прогон 830 завершился"], [], said, chat)
         self.assertIn("Что пользователь уже слышал", text)
         self.assertIn("ревью 861 ушло на Codex", text)
-        self.assertIn("Пиши только разницу", text)
+        self.assertIn("Новостью может быть только то, чего в этом списке нет", text)
+        # …and the anti-repeat rule may not turn back into «пиши покороче»: the
+        # heading and the plain-words explanation are owed in every letter.
+        self.assertIn("не пересказ новости, а то, без чего", text)
         self.assertIn("ПОВОД:", text)
 
     def test_a_direction_that_said_nothing_yet_gets_no_empty_heading(self):

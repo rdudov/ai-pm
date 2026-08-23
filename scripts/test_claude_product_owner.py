@@ -371,6 +371,31 @@ class ProductOwnerModelRouterTests(unittest.TestCase):
             router.main(["--entry", "interactive"])
         chdir.assert_called_once_with(router.HOME)
 
+    def test_the_codex_route_notice_is_a_diagnostic_and_not_part_of_the_letter(self):
+        """«Ровно `SILENT` остаётся молчанием» — 2026-08-23.
+
+        On the print path stdout is the letter. Until this day the router put its
+        Russian routing notice there, so every Codex-routed letter opened with
+        it, and a wake-up that answered exactly `SILENT` produced a two-line
+        letter that `thread_tick` no longer recognized as silence: the word
+        itself was mailed to the user at 11:35 UTC as Gmail `1a02e69d25468fe1`.
+        """
+        out, err = StringIO(), StringIO()
+        answer = subprocess.CompletedProcess([], 0, stdout="SILENT\n", stderr="")
+        with (mock.patch("claude_product_owner.codex_budget.latest",
+                         return_value=observed_codex(81)),
+              mock.patch("claude_product_owner.fetch_usage", return_value={
+                  "seven_day": {"utilization": 82},
+              }),
+              mock.patch("claude_product_owner.sys.stdin") as stdin,
+              mock.patch("claude_product_owner.subprocess.run", return_value=answer),
+              redirect_stdout(out), redirect_stderr(err)):
+            stdin.read.return_value = "проснись"
+            router.main(["--entry", "print"])
+        self.assertEqual(out.getvalue().strip(), "SILENT")
+        self.assertIn("product-owner: route selected; Codex", err.getvalue())
+        self.assertIn("продолжаю через Codex", err.getvalue())
+
     def test_an_installation_that_names_no_directories_gets_no_flag(self):
         # A fresh clone works in its own checkout: an empty `--add-dir` would be
         # a broken command line, and a default shelf would be somebody else's.
