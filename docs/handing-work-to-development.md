@@ -13,7 +13,7 @@
 cd "$(python3 -c 'import sys; sys.path.insert(0, "scripts"); import product_memory; print(product_memory.tasks_repo())')"
 .venv/bin/python skills/task-creator/scripts/tasks_index.py add "Заголовок" "Суть" слаг [--project ...]
 .venv/bin/python skills/task-runner/scripts/task_runner.py start tasks/<id>-<слаг> \
-  --repo <репозиторий>
+  --repo <репозиторий> [--repo <ещё-репозиторий> ...]
 ```
 
 Это штатный профиль основного исполнителя: семейство наследуется от продакта,
