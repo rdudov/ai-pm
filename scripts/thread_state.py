@@ -23,7 +23,8 @@ renaming and grouping, no second judgement. In particular:
   wrote itself;
 * «требует внимания» now includes work that carried on outside a dead owner —
   the case that cost three and a half hours on 757 and was invisible to both
-  observers before.
+  observers before — and a task whose run tried to tell the person something and
+  could not, which is how nine days of refused pushes stayed invisible.
 
 The output shape is the one `thread_tick.py` has always consumed, field for
 field, because the tick is a caller of this module and not its subject.
@@ -193,8 +194,17 @@ def build(name: str) -> dict:
             live.append(entry)
         abandoned = bool(state) and state["abandoned_run"] and task["status"] not in CLOSED_TASK_STATUSES
         outside = bool(state) and state["work_outside_owner"]
+        # Something the run tried to tell the person and could not, with nothing
+        # delivered since. Status is deliberately not part of this: the nine days
+        # of 2026-08-13 were invisible precisely because every one of the 41
+        # affected tasks finished cleanly, so a rule that only looks at open work
+        # would have missed the whole of it (task 1255). The observer decides
+        # what still counts as current; this adapter only projects.
+        silent = (task["detail"].get("delivery") or {}).get("unresolved")
+        if silent and silent.get("current"):
+            entry["undelivered_notification"] = silent
         if (task["status"] in {"blocked", "in_progress"} or abandoned or outside
-                or stale_open):
+                or stale_open or "undelivered_notification" in entry):
             attention.append(entry)
     return {
         "thread": name,

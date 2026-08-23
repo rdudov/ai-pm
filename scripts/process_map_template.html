@@ -1440,6 +1440,17 @@ function cardBody(p) {
       row(dl, "Сообщений", d.delivery.count, d.delivery.src);
       row(dl, "Последнее", stamp(d.delivery.last_at), d.delivery.src);
       row(dl, "По событию", d.delivery.last_kind, d.delivery.src);
+      // Что прогон пытался сказать человеку и не смог, и почему. Стоит рядом со
+      // счётчиком отправленного, потому что без этой строки счётчик читается
+      // как «сообщения идут»: девять суток отказов прошли именно так.
+      const silent = d.delivery.unresolved;
+      if (silent) {
+        row(dl, "Не доставлено",
+            (silent.notification || "уведомление") + " · " + stamp(silent.at)
+              + (silent.current ? "" : " · давнее"),
+            silent.src);
+        if (silent.reason) row(dl, "Почему", silent.reason, silent.src);
+      }
     }
     if (dl.children.length) { s.appendChild(dl); filled = true; }
     if (hand && !hand.delivered) {
