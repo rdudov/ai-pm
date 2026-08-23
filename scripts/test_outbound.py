@@ -419,18 +419,87 @@ class TheSameQuestionIsNotAskedTwice(unittest.TestCase):
         self.assertEqual(kept[-1]["excerpt"],
                          f"Прогон {outbound.KEEP_LETTERS + 4} закончился.")
 
-    def test_a_ledger_written_before_this_measure_existed_silences_nothing(self):
-        # `state/outbound.json` on disk predates both new fields. An entry
-        # without them is «неизвестно, был ли это вопрос», and unknown may not
-        # be read as «был», or the upgrade itself would swallow a question.
-        old = {"at": AT.isoformat(), "subject": "Продакт: Процессный контур",
-               "kind": "verdict", "excerpt": ASKED_AT_0840[:400], "reason": "тест",
+    def a_row_of_the_installed_ledger(self, **fields) -> dict:
+        """Строка ровно того вида, что лежит в боевом `state/outbound.json`.
+
+        Восемьдесят из восьмидесяти девяти строк на 2026-08-24 написаны кодом
+        старше полей `asks_user` и `names`: у них есть `at`, `subject`, `kind`,
+        `excerpt`, `reason` и отпечаток из `tasks` и `pairs`.
+        """
+        row = {"at": AT.isoformat(), "subject": "Продакт: Процессный контур",
+               "kind": "verdict", "excerpt": ASKED_AT_0840[:400],
+               "reason": outbound.QUESTION_REASON,
                "fingerprint": {"tasks": [], "pairs": sorted(outbound.pairs(
-                   ASKED_AT_0840))}}
-        entry = an_entry(marks=marks(), letters=[old])
+                   f"Продакт: Процессный контур\n{ASKED_AT_0840}"))}}
+        row.update(fields)
+        return row
+
+    def test_a_question_asked_before_the_field_existed_still_stops_its_repeat(self):
+        # Жалоба пользователя началась с двух строк, которых новое поле не
+        # застало. Читать их как «не вопрос» значит не защитить ровно те
+        # вопросы, ради которых правка делалась. Каждого прежнего признака
+        # хватает по отдельности, поэтому проверяются оба.
+        by_reason = self.a_row_of_the_installed_ledger(
+            excerpt="Продолжаю работу по процессному контуру.")
+        by_excerpt = self.a_row_of_the_installed_ledger(reason="изменилась польза")
+        for row in (by_reason, by_excerpt):
+            with self.subTest(reason=row["reason"]):
+                self.assertNotIn("asks_user", row)
+                self.assertNotIn("names", row["fingerprint"])
+                entry = an_entry(marks=marks(), letters=[row])
+                decision = outbound.decide(
+                    "process", "verdict", "Продакт: Процессный контур",
+                    ASKED_AT_0940, a_report(), AT + timedelta(hours=1), entry,
+                    outbound.no_chat())
+                self.assertEqual(decision["action"], "drop")
+                self.assertIn("этот вопрос уже задан письмом", decision["reason"])
+                self.assertIn("названного", decision["reason"])
+
+    def test_an_old_row_that_shows_no_question_silences_nothing(self):
+        # Обратная половина: прежний признак должен быть, а не подразумеваться.
+        # Строка обычного вердикта вопросом не становится, иначе сама правка
+        # проглотила бы вопрос — тот же запрет, что и у `same_matter`.
+        told = ("## Над чем работаем\n\nДелаем dev-pipeline универсальным для "
+                "Codex, Claude Code и Cursor.\n\nGitHub description и package "
+                "docstring исправлены; metadata, README и общее runtime-правило "
+                "пока называют только Codex.")
+        row = self.a_row_of_the_installed_ledger(
+            excerpt=told, reason="изменилась польза",
+            fingerprint={"tasks": [], "pairs": sorted(outbound.pairs(told))})
+        entry = an_entry(marks=marks(), letters=[row])
+        self.assertFalse(outbound.was_question(row))
         decision = outbound.decide("process", "verdict", "Продакт: Процессный контур",
                                    ASKED_AT_0940, a_report(), AT + timedelta(hours=1),
                                    entry, outbound.no_chat())
+        self.assertEqual(decision["action"], "send")
+
+    def test_an_old_question_row_outlives_the_kept_tail_too(self):
+        # Срок памяти и узнавание прежней строки — две разные вещи, и обе нужны:
+        # узнанный вопрос, вытесненный хвостом, сравнивать не с чем.
+        row = self.a_row_of_the_installed_ledger()
+        entry = an_entry(marks=marks(), letters=[row])
+        for index in range(outbound.KEEP_LETTERS + 5):
+            outbound.apply(entry, {"action": "send", "reason": "обычное письмо",
+                                   "body": f"Прогон {index} закончился.", "flush": [],
+                                   "fingerprint": outbound.fingerprint("s", str(index))},
+                           "Продакт: Процессный контур",
+                           AT + timedelta(minutes=20 * (index + 1)), a_report(),
+                           "verdict")
+        self.assertEqual(len(entry["letters"]), outbound.KEEP_LETTERS + 1)
+        self.assertIs(entry["letters"][0], row)
+        decision = outbound.decide("process", "verdict", "Продакт: Процессный контур",
+                                   ASKED_AT_0940, a_report(), AT + timedelta(days=1),
+                                   entry, outbound.no_chat())
+        self.assertEqual(decision["action"], "drop")
+
+    def test_an_old_question_row_still_lets_a_new_fact_through(self):
+        # Вторая половина слова пользователя действует и на прежней строке:
+        # напоминание с настоящим новым фактом уходит.
+        entry = an_entry(marks=marks(), letters=[self.a_row_of_the_installed_ledger()])
+        decision = outbound.decide(
+            "process", "verdict", "Продакт: Процессный контур",
+            "НОВОЕ: прогон 1257 упал на живой проверке.\n\n" + ASKED_AT_0940,
+            a_report(), AT + timedelta(hours=1), entry, outbound.no_chat())
         self.assertEqual(decision["action"], "send")
 
     def test_the_repeat_is_recorded_and_the_standing_question_is_not_erased(self):

@@ -134,6 +134,11 @@ ALWAYS = {
     "instruction": "путь к принятой инструкции внешнему исполнителю доходит всегда",
 }
 
+# Причина, с которой уходит письмо-вопрос. Названа здесь, потому что её читают
+# двое: `decide` пишет её в реестр, а `was_question` узнаёт по ней вопрос в
+# строке, записанной кодом старше поля `asks_user`.
+QUESTION_REASON = "вопрос пользователю доходит всегда"
+
 # Prompts written by a machine, not typed by the user. A session that has a user
 # turn matching none of these had a human in it, and only such a session counts
 # as «проговорили в чате».
@@ -281,6 +286,33 @@ def spoken_words(letter: dict) -> set[str]:
     return {word for pair in (letter.get("pairs") or []) for word in pair.split()}
 
 
+def named_in(letter: dict) -> set[str]:
+    """Что письмо назвало: из его отпечатка, а у старой строки — из её же слов.
+
+    Поле `names` появилось в отпечатке 2026-08-23. У строки, записанной раньше,
+    оно пустое, и мера в названном давала против неё ровно 0% — то есть любой
+    повтор прежнего вопроса читался как новый вопрос. Это не решение о политике,
+    а разница в том, что успел записать реестр.
+
+    Восстанавливаем из того, что записано. Пары слов у такой строки есть,
+    `spoken_words` уже достаёт из них слова, а латинские имена и номера задач в
+    словах остаются — `named_things` находит их там так же, как в тексте письма.
+    Замер на боевой строке 08:40 (`live-evidence/measure_recovered_names.py`
+    задачи 1260): пересчёт с полного текста письма даёт 18 названных, возврат из
+    пар — те же 18 плюс `gpt` и `sol` из служебной первой строки. Доля повтора
+    09:40 одинакова в обоих случаях, 71%; 35 неродственных живых писем того же
+    дня дают от 0% до 19%, ни одного на пороге.
+
+    Восстановление неполно там, где пары обрезаны четырьмястами: тогда часть
+    названного не вернётся. Направление этой неполноты то же, что у
+    `spoken_words`: доля может только упасть, то есть вопрос может только уйти.
+    """
+    recorded = set(letter.get("names") or [])
+    if recorded:
+        return recorded
+    return named_things(" ".join(spoken_words(letter)))
+
+
 def same_question(candidate: dict, previous: dict) -> tuple[int, str]:
     """How much of this question the already-sent question had, and in what unit.
 
@@ -331,9 +363,9 @@ def same_question(candidate: dict, previous: dict) -> tuple[int, str]:
     """
     if set(candidate.get("tasks") or []) - set(previous.get("tasks") or []):
         return 0, "названного"
-    names = set(candidate.get("names") or [])
+    names = named_in(candidate)
     if len(names) >= ENOUGH_NAMED:
-        return overlap_percent(names, set(previous.get("names") or [])), "названного"
+        return overlap_percent(names, named_in(previous)), "названного"
     return overlap_percent(spoken_words(candidate), spoken_words(previous)), "сказанного"
 
 
@@ -371,6 +403,35 @@ def new_fact(body: str, previous: dict) -> str | None:
     return claim.group(1).strip()
 
 
+def was_question(letter: dict) -> bool:
+    """Ставило ли это уже отправленное письмо вопрос перед пользователем.
+
+    Поле `asks_user` записывается с 2026-08-23 и решает само за себя: его считали
+    с полного текста письма в момент отправки, а это самый точный источник.
+
+    У строки, записанной кодом старше этого поля, спрашиваем то, что в ней есть.
+    Реестр живёт долго — на 2026-08-24 в нём 89 строк, и 80 из них старше поля,
+    включая обе строки 08:40 и 09:40, с которых началась жалоба пользователя.
+    Считать их «не вопросами» значит не защитить от повтора ровно те вопросы,
+    ради которых правка делалась.
+
+    Прежних признаков два, и хватает любого. Причина `QUESTION_REASON` — её
+    пишет только ветка вопроса в `decide`. Обрезанный до 400 символов `excerpt`,
+    прочитанный тем же `asks_user`, которым читается свежее письмо. Замер на
+    боевом реестре (`live-evidence/legacy-rows-signals.txt` задачи 1260): из 80
+    старых строк причина узнаёт 28, excerpt — 28, вместе 30. Расходятся они
+    четырежды, и оба раза по делу. Два письма-ответа спрашивали пользователя,
+    но ушли с причиной ответа, — их узнаёт excerpt. У двух вопросов сам вопрос
+    оказался ниже обрезки в 400 символов, — их узнаёт причина. Сегодняшний
+    `apply` записал бы `asks_user=true` всем четырём.
+    """
+    if "asks_user" in letter:
+        return bool(letter["asks_user"])
+    if (letter.get("reason") or "").strip() == QUESTION_REASON:
+        return True
+    return asks_user(letter.get("excerpt") or "")
+
+
 def repeated_question(entry: dict, candidate: dict,
                       body: str) -> tuple[dict, int, str] | None:
     """The question already in front of the user that this one asks again.
@@ -386,7 +447,7 @@ def repeated_question(entry: dict, candidate: dict,
     unchanged, and only the second asking of the same question is new.
     """
     for letter in reversed(entry["letters"]):
-        if not letter.get("asks_user"):
+        if not was_question(letter):
             continue
         previous = letter.get("fingerprint") or {}
         if not previous.get("names") and not previous.get("pairs"):
@@ -961,7 +1022,7 @@ def kept_letters(letters: list[dict]) -> list[dict]:
     """
     if len(letters) <= KEEP_LETTERS:
         return letters
-    older = [letter for letter in letters[:-KEEP_LETTERS] if letter.get("asks_user")]
+    older = [letter for letter in letters[:-KEEP_LETTERS] if was_question(letter)]
     return older + letters[-KEEP_LETTERS:]
 
 
@@ -1037,7 +1098,7 @@ def decide(thread: str, kind: str, subject: str, body: str, report: dict,
                     "body": body, "raw_body": body,
                     "fingerprint": candidate, "flush": []}
         merged = merged_body(body, pending)
-        return {"action": "send", "reason": "вопрос пользователю доходит всегда",
+        return {"action": "send", "reason": QUESTION_REASON,
                 "body": merged, "raw_body": body,
                 "fingerprint": fingerprint(subject, merged), "flush": pending}
 
