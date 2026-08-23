@@ -90,10 +90,11 @@ CHAT_LOOKBACK_SECONDS = tunable("PRODUCT_OWNER_CHAT_LOOKBACK_SECONDS", 12 * 3600
 # as said. Word pairs rather than words: the conversations run to hundreds of
 # kilobytes, and against a blob that size single Russian words match everything.
 SAME_CONTENT_PERCENT = tunable("PRODUCT_OWNER_SAME_CONTENT_PERCENT", 60)
-# Share of the things a question names that the already-sent question named too,
-# for it to be the same question asked again. Its own knob and not
-# `SAME_CONTENT_PERCENT`, because it is measured in a different unit — see
-# `same_question` for the unit, and for the numbers the default came from.
+# Share of a question that the already-sent question had too, for it to be the
+# same question asked again. Its own knob and not `SAME_CONTENT_PERCENT`, because
+# it answers a different question about a different unit — see `same_question`
+# for both units, and for the numbers the default came from. One knob for both:
+# 60% separates a repeat from a new question in each of them.
 SAME_QUESTION_PERCENT = tunable("PRODUCT_OWNER_SAME_QUESTION_PERCENT", 60)
 # From this many named things on, a repeat is measured in what the question
 # names. Not a policy dial and not a floor below which nothing is compared: it is
