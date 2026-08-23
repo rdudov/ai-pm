@@ -645,11 +645,11 @@ def deliver(thread: str, kind: str, subject: str, body: str,
             names_instructions: list[dict] | None = None) -> dict:
     """The one door mail leaves this contour through.
 
-    The push above is unconditional and stays that way: «прогон стартовал»,
-    «прогон закончился», «репозиторий двинулся» are news the user asked to keep
-    seeing, and what they asked to stop is a *letter* about each of them. So the
-    gate is on this side only, and everything it turns away is still on the push
-    and on the board.
+    The gate is on this side only, and everything it turns away is still on the
+    board and in the gateway journal. «Прогон стартовал», «прогон закончился»,
+    «репозиторий двинулся» were also pushed to the user's Telegram until
+    2026-08-23, when they asked for the product reports there to stop; the push
+    above now carries a broken contour and nothing else.
 
     A failed proactive send is held, not recorded as sent: the ledger's whole
     worth is that it says what the user was told. A failed reply stays an
@@ -739,6 +739,23 @@ def deliver(thread: str, kind: str, subject: str, body: str,
 
 
 def notify(text: str) -> None:
+    """Сообщение о сбое контура в личный Telegram владельца установки.
+
+    Только о сбое. Отчёт, вердикт, вопрос и сообщение контроля цели сюда не
+    попадают: 23 августа 2026 пользователь написал «Я не просил присылать отчёты
+    по задачам в телеграм, только в почту. Отбивки от dev-pipeline пусть
+    приходят, но отчёты — нет». До этого дня каждый продуктовый текст уходил и
+    письмом, и пушем — 111 сообщений за пятнадцать часов, при том что почтовая
+    дверь их считанные единицы и пропускала.
+
+    Что видит пользователь теперь: продуктовый текст — письмом по правилам
+    почтовой двери, а то, что дверь отбросила порогом или повтором, — на
+    табло и в журнале шлюза. Здесь остаются два случая, и оба означают, что
+    контур сломан и сам о себе рассказать не сможет: разошедшийся контракт с
+    task_runner и не отработавшее пробуждение. Отбивки dev-pipeline о фоновых
+    прогонах приходят своим транспортом из companion-agent, эта правка их не
+    касается.
+    """
     if send_bot_message is None:
         return
     try:
@@ -906,7 +923,7 @@ def heard_block(said: list[dict], chat: dict) -> str:
 
 Новостью может быть только то, чего в этом списке нет: пересказ уже сказанного
 письмом не идёт, он будет отброшен как повтор, и пользователь увидит вместо него
-пуш. Если новости нет — SILENT. Это не разрешение писать непонятно: шапка «над
+табло. Если новости нет — SILENT. Это не разрешение писать непонятно: шапка «над
 чем работаем» и объяснение предмета — не пересказ новости, а то, без чего
 новость нельзя понять, и они нужны в каждом письме.
 
@@ -1008,7 +1025,7 @@ def verdict_block() -> str:
   `ВОПРОС: да|нет`. `вопрос` означает, что нужен выбор пользователя, и такое
   письмо доходит всегда, пока это не повтор уже заданного. `польза` —
   изменилось, что пользователь может; `готово` — закончилась заказанная работа;
-  `механика` — прогон или движение репозитория, которые идут пушем и на табло.
+  `механика` — прогон или движение репозитория, которые видны на табло.
   Просьба выбрать, даже кончающаяся точкой, требует `ВОПРОС: да`."""
 
 
@@ -1298,7 +1315,6 @@ def main() -> int:
         args.thread, goals["objects"], (after or {}).get("live", []), message, moment)
 
     if message and message != "SILENT":
-        notify(f"[{report['title']}]\n{message}")
         mail.append(deliver(args.thread, "verdict", f"Продакт: {report['title']}",
                             message, report, moment, chat))
     elif idle and not (after or {}).get("live"):
@@ -1309,7 +1325,6 @@ def main() -> int:
         told = (f"[{report['title']}] простоя не сняли: живых прогонов нет, "
                 f"к запуску {startable(report)}.\n\nПочему, по наблюдению:\n"
                 + "\n".join(f"- {item['text']}" for item in reasons))
-        notify(told)
         mail.append(deliver(
             args.thread, "idle",
             f"Продакт: «{report['title']}» ничего не запустил при непустой очереди",
