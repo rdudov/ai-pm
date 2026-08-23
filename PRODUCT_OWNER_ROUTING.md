@@ -3,12 +3,16 @@
 All interactive, timer and mail entrypoints call
 `scripts/claude_product_owner.py`; none pins a background model beside it.
 
-- `claude-pm` compares the observed shared seven-day Claude remainder with the
-  latest observed seven-day Codex remainder and selects the family with more
-  room. Within Claude, Opus remains the default and Fable is selected only when
-  the published Opus-specific remainder is below five percent.
-- An observed exhausted shared Claude limit, or observed exhaustion of both
-  Opus and Fable model-scoped routes, selects Codex even before that comparison.
+- `claude-pm` explicitly selects Claude for its manual interactive session.
+- `codex-pm` explicitly selects Codex for its manual interactive session.
+- Manual and background Claude routes use the same model policy: Opus remains
+  the default; Fable is selected only when the published Opus-specific remainder
+  is below five percent and Fable is not observed exhausted.
+- Background and unforced `--entry print` callers keep the shared limit-aware selection:
+  the observed shared seven-day Claude remainder is compared with the latest observed
+  seven-day Codex remainder. For these unforced routes, an observed exhausted shared
+  Claude limit, or observed exhaustion of both Opus and Fable model-scoped routes,
+  selects Codex even before that comparison.
 - A missing observation is never turned into a percentage. Without a comparable
   weekly remainder the router keeps Opus and names which observation is missing;
   Claude network/API failures and unknown schemas remain visible. Every selected
