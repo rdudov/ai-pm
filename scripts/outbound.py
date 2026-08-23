@@ -104,8 +104,10 @@ SAME_QUESTION_PERCENT = tunable("PRODUCT_OWNER_SAME_QUESTION_PERCENT", 60)
 # `same_question` for both units and the numbers each was chosen on. The pair
 # this came from names eighteen and twenty-one things.
 ENOUGH_NAMED = 6
-# How many past letters are kept per direction, for the repeat test and for the
-# «что пользователь уже слышал» block of the wake-up prompt.
+# How many past letters are kept per direction for «что пользователь уже слышал»
+# — the wake-up prompt block, coalescing and the idle cadence. All three ask what
+# was sent *recently*, so a count is the right bound for them. It is not the
+# bound for the repeat test: a question outlives this window, see `kept_letters`.
 KEEP_LETTERS = tunable("PRODUCT_OWNER_KEEP_LETTERS", 20)
 # How often standing idle may be put in a letter. Two statements of the user
 # meet here and neither may be dropped: asked why nothing was being done
@@ -376,7 +378,8 @@ def repeated_question(entry: dict, candidate: dict,
     Newest first, over the letters kept for this direction rather than over the
     coalescing window: «повторённый вопрос перестаёт быть вопросом и становится
     шумом» is the user's own rule about the question itself, not about an hour of
-    it. `KEEP_LETTERS` bounds how far back that reaches.
+    it. Nothing bounds how far back this reaches — `kept_letters` keeps every
+    question a direction ever sent, for exactly this reason.
 
     Only letters that were themselves questions count. A verdict about the same
     matter may not swallow a question — that half of the 2026-08-09 rule is
@@ -932,6 +935,36 @@ class Ledger:
         return entry
 
 
+def kept_letters(letters: list[dict]) -> list[dict]:
+    """The history the next tick may read: the recent letters, and every question.
+
+    Two different memories share this one list, and until 2026-08-23 one bound
+    served both. «Что пользователь уже слышал» is about the last few letters:
+    the wake-up prompt block, coalescing and the idle cadence all ask about a
+    recent stretch, and `KEEP_LETTERS` is their bound. `repeated_question` asks
+    something with no horizon in it. The user said the same question must not
+    come twice and named the one thing that lets it come again — a new fact —
+    without putting any expiry beside it.
+
+    Measured on the real pair before this changed (`live-evidence/horizon-before.txt`
+    of task 1260): with the 08:40 question still in the list the 09:40 repeat is
+    dropped at 71%, and with twenty letters in between it is sent, because the
+    trim had removed the only copy of the question the measure compares against.
+    The same journal says the process direction sent twenty letters in as little
+    as 18.8 hours, so the question was forgotten inside a day.
+
+    The cost is that question rows accumulate. That is what they are for, and it
+    is small in the unit that matters: the ledger holds about 8 KB per letter,
+    and the fourteen observed days carried 108 questions across five directions —
+    about 65 KB a day of memory that may not be thrown away. Everything else
+    still leaves the list on schedule.
+    """
+    if len(letters) <= KEEP_LETTERS:
+        return letters
+    older = [letter for letter in letters[:-KEEP_LETTERS] if letter.get("asks_user")]
+    return older + letters[-KEEP_LETTERS:]
+
+
 def recent_letters(entry: dict, now: datetime) -> list[dict]:
     fresh = []
     for letter in entry["letters"]:
@@ -1099,4 +1132,4 @@ def apply(entry: dict, decision: dict, subject: str, now: datetime, report: dict
                         "pairs": decision["fingerprint"]["pairs"][:400],
                         "names": decision["fingerprint"]["names"]},
     })
-    entry["letters"] = entry["letters"][-KEEP_LETTERS:]
+    entry["letters"] = kept_letters(entry["letters"])
