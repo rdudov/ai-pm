@@ -862,6 +862,20 @@ class AChoiceRequestIsAQuestion(unittest.TestCase):
         self.assertIn("разворачивай предложением", text)
         self.assertIn("ровно словом `SILENT`", text)
 
+    def test_the_contract_asks_for_plain_engineering_russian(self):
+        # 2026-08-23, четвёртое подряд замечание о языке: «мне реально сложно
+        # читать, что ты пишешь… я трачу больше времени и быстрее устаю».
+        # Запрет стоит там же, где остальной контракт письма, а не только в
+        # AGENTS.md: правило, которого нет в промпте, модель не выполняет.
+        text = tick.verdict_block()
+        self.assertIn("простым инженерным русским", text)
+        self.assertIn("Активный залог", text)
+        self.assertIn("прямой порядок слов", text)
+        for banned in ("вводных оборотов", "сказуемое в конец",
+                       "отглагольным", "метафорой"):
+            with self.subTest(banned=banned):
+                self.assertIn(banned, text)
+
 
 class ThePlanReachesTheBackgroundOwner(unittest.TestCase):
     """«Решение в CLI управляет фоновым тиком.»
