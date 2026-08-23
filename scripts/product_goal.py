@@ -33,6 +33,9 @@ is what a new session may or may not follow:
   back to the main task;
 * accepting a corrective task never closes the goal — it returns the main task to
   work, which is exactly the step the first live chain would otherwise stop at;
+* a repair that did not deliver itself is taken off the list by its own word —
+  `retire`, with the reason and what observed it — because acceptance claims a
+  delivery and must keep requiring an observed `completed`;
 * a goal closes only on a live check of the actually installed product, named
   together with what observed it. A commit, a test, a green review and a
   `completed` status are refused as closing evidence.
@@ -48,6 +51,7 @@ Usage:
     product_goal.py pause <id> --reason <...> --src <чем наблюдено>
     product_goal.py corrective <id> --task <N> --effect <...> --return-criterion <...>
     product_goal.py accept <id> --task <N> --src <чем наблюдено>
+    product_goal.py retire <id> --task <N> --reason <...> --src <чем наблюдено>
     product_goal.py resume <id> [--gap <...>] [--next <...>]
     product_goal.py close <id> --live-check <...> --src <чем наблюдено>
 """
@@ -79,6 +83,13 @@ LOCK = ".goals.lock"
 
 ACTIVE, PAUSED, CLOSED = "active", "paused", "closed"
 NORMAL, REINFORCED = "normal", "reinforced"
+
+# Two honest ways a repair stops holding the main task, and they are not the
+# same statement: `accepted` says the repair was delivered and the task is
+# observed `completed`, `retired` says it was taken off the list without
+# delivering itself — its effect came with another accepted task, or it is
+# cancelled in the task system.
+ACCEPTED, RETIRED = "accepted", "retired"
 
 # The user's own list of deviations, and nothing wider. Each one is a reason to
 # turn on control, never a reason to stop repairing: «два круга — порог контроля,
@@ -353,24 +364,91 @@ def add_corrective(goal_id: str, task: int, effect: str,
         return _save(goal, "corrective", {"task": int(task)})
 
 
+def settlement(item: dict) -> dict | None:
+    """Чем эта корректирующая запись закрыта — приёмкой, снятием или ничем.
+
+    One place knows both ways, because «держит ли этот ремонт основную работу» is
+    one question and a reader who has to check two keys to answer it is how a
+    retired repair ends up shown as accepted.
+    """
+    for kind in (ACCEPTED, RETIRED):
+        record = item.get(kind)
+        if record:
+            return {"kind": kind, **record}
+    return None
+
+
+def pending(goal: dict) -> list[int]:
+    """Корректирующие задачи, которые всё ещё держат основную работу."""
+    return [item["task"] for item in goal.get("correctives", [])
+            if not settlement(item)]
+
+
+def _corrective(goal: dict, task: int) -> dict:
+    for item in goal["correctives"]:
+        if item["task"] == int(task):
+            return item
+    raise GoalError(f"у цели {goal['id']} нет корректирующей задачи {task}")
+
+
 def accept_corrective(goal_id: str, task: int, src: str) -> dict:
     """Accept a repair — and say plainly that the goal is not closed by it."""
     if not str(src).strip():
         raise GoalError("приёмка называется тем, чем она наблюдена")
     with _Lock():
         goal = load(goal_id)
-        for item in goal["correctives"]:
-            if item["task"] == int(task):
-                break
-        else:
-            raise GoalError(f"у цели {goal_id} нет корректирующей задачи {task}")
+        item = _corrective(goal, task)
+        if item.get(RETIRED):
+            raise GoalError(
+                f"корректирующая задача {task} снята с цели {goal_id} "
+                f"({item[RETIRED]['reason']}): приёмкой её задним числом не заменяют")
         status = task_status(int(task))
         if status != "completed":
             raise GoalError(
                 f"корректирующая задача {task} не принята: её статус наблюдается как "
                 f"{status or 'неизвестный'}, а не completed")
-        item["accepted"] = {"at": now(), "src": str(src).strip()}
+        item[ACCEPTED] = {"at": now(), "src": str(src).strip()}
         return _save(goal, "accept_corrective", {"task": int(task)})
+
+
+def retire_corrective(goal_id: str, task: int, reason: str, src: str) -> dict:
+    """Снять ремонт, который сам себя не доставил: поглощён другой работой или отменён.
+
+    Приёмка требует наблюдаемого `completed`, и требует правильно: она
+    утверждает, что ремонт доставлен. Но ремонт бывает исчерпан иначе — его
+    пользовательский эффект пришёл с другой принятой задачей, или он отменён в
+    системе задач. Такая запись честно не `completed`, и приёмка ей была бы
+    записанной неправдой; а без всякого выхода она запирает возврат основной
+    работы навсегда, по бухгалтерии, а не по продукту.
+
+    Поэтому у снятия своё слово и своя запись. Ничего на диске не утверждает
+    «этот ремонт исчерпан» само: это суждение продакта — ровно как «ручной
+    обход» и «расхождение версий», — поэтому оно называется причиной (чем именно
+    доставлен эффект или где записана отмена) и тем, чем эта причина наблюдена,
+    и без любой из двух половин не записывается. Снятие не заменяет приёмку:
+    наблюдаемо завершённый ремонт снять нельзя, его принимают.
+    """
+    if not str(reason).strip() or not str(src).strip():
+        raise GoalError("корректирующая задача снимается с причиной — чем именно "
+                        "доставлен её эффект или где записана отмена — и с тем, "
+                        "чем эта причина наблюдена")
+    with _Lock():
+        goal = load(goal_id)
+        item = _corrective(goal, task)
+        settled = settlement(item)
+        if settled:
+            raise GoalError(
+                f"корректирующая задача {task} у цели {goal_id} уже "
+                + ("принята" if settled["kind"] == ACCEPTED else "снята"))
+        status = task_status(int(task))
+        if status == "completed":
+            raise GoalError(
+                f"корректирующая задача {task} наблюдается завершённой: такую "
+                f"принимают (`accept`), а не снимают")
+        item[RETIRED] = {"at": now(), "reason": str(reason).strip(),
+                         "src": str(src).strip(), "task_status": status}
+        return _save(goal, "retire_corrective",
+                     {"task": int(task), "reason": item[RETIRED]["reason"]})
 
 
 def resume(goal_id: str, gap: str | None = None,
@@ -380,11 +458,12 @@ def resume(goal_id: str, gap: str | None = None,
         goal = load(goal_id)
         if goal["state"] == CLOSED:
             raise GoalError("цель закрыта: возвращать нечего")
-        pending = [item["task"] for item in goal["correctives"] if not item["accepted"]]
-        if pending:
+        holding = pending(goal)
+        if holding:
             raise GoalError(
-                "нельзя вернуть основную работу: не приняты корректирующие задачи "
-                + ", ".join(str(number) for number in pending))
+                "нельзя вернуть основную работу: не приняты и не сняты "
+                "корректирующие задачи "
+                + ", ".join(str(number) for number in holding))
         goal["state"] = ACTIVE
         goal["pause"] = None
         if gap is not None:
@@ -411,10 +490,10 @@ def close(goal_id: str, live_check: str, src: str) -> dict:
             raise GoalError(f"цель {goal_id} уже закрыта")
         if goal["state"] == PAUSED:
             raise GoalError("цель на паузе: сначала верните основную задачу в работу")
-        pending = [item["task"] for item in goal["correctives"] if not item["accepted"]]
-        if pending:
-            raise GoalError("не приняты корректирующие задачи "
-                            + ", ".join(str(number) for number in pending))
+        holding = pending(goal)
+        if holding:
+            raise GoalError("не приняты и не сняты корректирующие задачи "
+                            + ", ".join(str(number) for number in holding))
         status = task_status(goal["main_task"])
         if status != "completed":
             raise GoalError(
@@ -548,8 +627,7 @@ def live_tasks(goal: dict) -> list[int]:
     would take the whole board down over one unreadable file.
     """
     if goal.get("state") == PAUSED:
-        return [item["task"] for item in goal.get("correctives", [])
-                if not item.get("accepted")]
+        return pending(goal)
     return [goal["main_task"]] if goal.get("main_task") is not None else []
 
 
@@ -562,7 +640,7 @@ def projection(goal: dict) -> dict:
     """
     correctives = [{"task": item["task"], "effect": item["effect"],
                     "return_criterion": item["return_criterion"],
-                    "accepted": bool(item["accepted"])}
+                    "settled": settlement(item)}
                    for item in goal.get("correctives", [])]
     return {
         "id": goal.get("id"),
@@ -582,6 +660,20 @@ def projection(goal: dict) -> dict:
         "updated_at": goal.get("updated_at"),
         "src": f"долговечная запись цели {goal.get('id')} в {root()}",
     }
+
+
+def mark(item: dict) -> str:
+    """Как называется состояние одного ремонта, одинаково везде, где его читают.
+
+    Снятая запись не бывает написана словом «принята»: неправда в этой строке —
+    ровно то, из-за чего снятие вообще понадобилось.
+    """
+    settled = settlement(item)
+    if settled is None:
+        return "в работе"
+    if settled["kind"] == ACCEPTED:
+        return "принята"
+    return f"снята: {settled['reason']}"
 
 
 def panel(thread: str | None = None) -> list[dict]:
@@ -627,7 +719,7 @@ def block(thread: str) -> str:
             f"  основная задача: {goal.get('main_task') or 'не названа'}\n"
             + "".join(
                 f"  корректирующая задача {item['task']} "
-                f"({'принята' if item['accepted'] else 'в работе'}): {item['effect']}; "
+                f"({mark(item)}): {item['effect']}; "
                 f"возврат к основной: {item['return_criterion']}\n"
                 for item in goal.get("correctives", []))
             + (f"  пауза: {goal['pause']['reason']} [{goal['pause']['src']}]\n"
@@ -644,8 +736,12 @@ def block(thread: str) -> str:
 не закрывает: после её приёмки основная задача возвращается в работу
 (`product_goal.py accept` и затем `resume`), и цель закрывается только живой
 проверкой исходного сценария через фактически установленный продукт
-(`product_goal.py close --live-check ... --src ...`). Код продуктов продакт
-руками не правит: работа уходит обычным путём задач.
+(`product_goal.py close --live-check ... --src ...`). Ремонт, который сам себя не
+доставил — его эффект пришёл с другой принятой задачей или он отменён в системе
+задач, — снимается словом снятия, а не приёмкой: `product_goal.py retire <id>
+--task N --reason "чем именно доставлен эффект или где записана отмена" --src
+"чем это наблюдено"`; после этого он основную работу не держит. Код продуктов
+продакт руками не правит: работа уходит обычным путём задач.
 """
 
 
@@ -666,9 +762,11 @@ def _print(goal: dict, as_json: bool) -> None:
     print(f"  основная задача: {goal['main_task']} (статус "
           f"{task_status(goal['main_task']) or 'неизвестен'})")
     for item in goal.get("correctives", []):
-        mark = "принята" if item["accepted"] else "в работе"
-        print(f"  корректирующая {item['task']} [{mark}]: {item['effect']}")
+        print(f"  корректирующая {item['task']} [{mark(item)}]: {item['effect']}")
         print(f"      возврат к основной: {item['return_criterion']}")
+        settled = settlement(item)
+        if settled and settled["kind"] == RETIRED:
+            print(f"      наблюдено: {settled['src']}")
     if goal.get("pause"):
         print(f"  пауза: {goal['pause']['reason']} ({goal['pause']['src']})")
     print(f"  ближайший разрыв: {goal.get('gap') or 'не назван'}")
@@ -734,6 +832,14 @@ def main() -> int:
     accept.add_argument("id")
     accept.add_argument("--task", required=True, type=int)
     accept.add_argument("--src", required=True)
+
+    retire = sub.add_parser("retire", help="снять корректирующую задачу, "
+                                           "поглощённую другой работой или отменённую")
+    retire.add_argument("id")
+    retire.add_argument("--task", required=True, type=int)
+    retire.add_argument("--reason", required=True,
+                        help="чем именно доставлен её эффект или где записана отмена")
+    retire.add_argument("--src", required=True)
 
     resuming = sub.add_parser("resume", help="вернуть основную задачу в работу")
     resuming.add_argument("id")
@@ -802,6 +908,12 @@ def main() -> int:
             _print(goal, False)
             print("корректирующая задача принята; цель этим не закрыта — "
                   "верните основную задачу в работу командой resume")
+            return 0
+        if args.command == "retire":
+            goal = retire_corrective(args.id, args.task, args.reason, args.src)
+            _print(goal, False)
+            print("корректирующая задача снята и основную работу больше не держит; "
+                  "приёмкой это не считается — доставки этой задачей не было")
             return 0
         if args.command == "resume":
             _print(resume(args.id, args.gap, args.next_transition), False)

@@ -397,6 +397,13 @@ class Rendering(unittest.TestCase):
         for forbidden in ("http://", "https://", "XMLHttpRequest", "src=\"//"):
             self.assertNotIn(forbidden, html.replace('lang="ru"', ""))
 
+    def test_a_retired_repair_is_not_printed_as_an_accepted_one(self):
+        """Снятый ремонт доставлен не был, и доска не говорит, что был."""
+        page = (Path(__file__).parent / "process_map_template.html").read_text()
+        self.assertIn('settled.kind === "accepted" ? " принята" : " снята"', page)
+        self.assertIn('"снята: " + settled.reason', page)
+        self.assertIn('"\\nнаблюдено: " + settled.src', page)
+
 
 class TaskIndexTab(unittest.TestCase):
     def test_the_index_carries_lookup_fields_and_no_directory_detail(self):

@@ -56,7 +56,7 @@ def look(live: list[int] | None = None, blocked: list[int] | None = None,
         "goal_state": {str(item["id"]): {
             "state": item["state"], "control": item["control"], "gap": item["gap"],
             "waiting_on": item["waiting_on"],
-            "correctives": {str(c["task"]): bool(c["accepted"])
+            "correctives": {str(c["task"]): (c["settled"] or {}).get("kind", "")
                             for c in item["correctives"]}} for item in panel},
     }
 
@@ -331,15 +331,35 @@ class SignificantChange(unittest.TestCase):
         said = session.changes(look(panel=[goal(state="paused")]), look())
         self.assertIn("цель 0001: paused → active", said)
 
+    def corrective(self, settled: dict | None) -> dict:
+        item = goal()
+        item["correctives"] = [{"task": 1126, "effect": "e", "return_criterion": "r",
+                                "settled": settled}]
+        return item
+
     def test_an_accepted_repair_is_a_change(self):
-        repaired = goal()
-        repaired["correctives"] = [{"task": 1126, "effect": "e", "return_criterion": "r",
-                                    "accepted": True}]
-        pending = goal()
-        pending["correctives"] = [{"task": 1126, "effect": "e", "return_criterion": "r",
-                                   "accepted": False}]
-        said = session.changes(look(panel=[pending]), look(panel=[repaired]))
+        said = session.changes(
+            look(panel=[self.corrective(None)]),
+            look(panel=[self.corrective({"kind": "accepted", "at": "2026-08-23T00:00:00+00:00",
+                                         "src": "живой прогон"})]))
         self.assertIn("цель 0001: корректирующая задача 1126 принята", said)
+
+    def test_a_snapshot_written_before_the_upgrade_does_not_re_announce_a_repair(self):
+        """Булево «принята» из прежнего снимка — не новость, а прежний формат."""
+        accepted = self.corrective({"kind": "accepted", "at": "2026-08-23T00:00:00+00:00",
+                                    "src": "живой прогон"})
+        old = look(panel=[accepted])
+        old["goal_state"]["0001"]["correctives"] = {"1126": True}
+        self.assertEqual(session.changes(old, look(panel=[accepted])), [])
+
+    def test_a_retired_repair_is_a_change_too_and_is_not_called_accepted(self):
+        """Снятие возвращает основную работу так же, как приёмка: ход нужен."""
+        said = session.changes(
+            look(panel=[self.corrective(None)]),
+            look(panel=[self.corrective({"kind": "retired", "at": "2026-08-23T00:00:00+00:00",
+                                         "reason": "эффект доставлен 1245",
+                                         "src": "task.md задачи 1241"})]))
+        self.assertIn("цель 0001: корректирующая задача 1126 снята", said)
 
     def test_a_new_commit_in_the_directions_tree_is_a_change(self):
         said = session.changes(look(heads={"/path/to/task-agent": "aaa"}),
