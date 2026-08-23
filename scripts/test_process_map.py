@@ -5689,8 +5689,8 @@ class ARefusedNotificationIsAnObservation(unittest.TestCase):
 
     def a_silent_task(self, current: bool, status: str = "completed") -> dict:
         return a_task(id=1142, dir="1142-t", status=status, detail={"delivery": {
-            "count": 3, "last_at": "2026-08-13T20:50:48+00:00",
-            "last_kind": "notification_delivery_unresolved",
+            "sent": 2, "refused": 1, "last_at": "2026-08-13T20:44:11+00:00",
+            "last_kind": "standard_run_started",
             "src": "dev-pipeline/notification-receipts.jsonl",
             "unresolved": {"notification": "standard_run_started",
                            "at": "2026-08-13T20:50:48+00:00",
@@ -5714,6 +5714,44 @@ class ARefusedNotificationIsAnObservation(unittest.TestCase):
         page = a_page()
         self.assertIn("d.delivery.unresolved", page)
         self.assertIn('"Не доставлено"', page)
+
+    def test_the_card_counts_messages_and_not_receipts(self):
+        now = datetime.now(timezone.utc)
+        task = self.journal(self.sent(now - timedelta(minutes=10)),
+                            self.refusal(now - timedelta(minutes=5)),
+                            self.sent(now))
+        observed = state.delivery(task)
+        self.assertEqual(observed["sent"], 2)
+        self.assertEqual(observed["refused"], 1)
+
+    def test_a_refusal_is_not_counted_as_a_message_even_when_it_is_the_only_row(self):
+        observed = state.delivery(self.journal(self.refusal(datetime.now(timezone.utc))))
+        self.assertEqual(observed["sent"], 0)
+        self.assertEqual(observed["refused"], 1)
+        self.assertIsNone(observed["last_at"])
+
+    def test_the_last_one_is_the_last_message_and_not_the_last_line(self):
+        now = datetime.now(timezone.utc)
+        went = now - timedelta(minutes=5)
+        observed = state.delivery(self.journal(self.sent(went), self.refusal(now)))
+        self.assertEqual(observed["last_at"], went.isoformat())
+        self.assertEqual(observed["last_kind"], "standard_run_completed")
+
+    def test_a_claim_written_before_the_transport_is_not_a_refusal(self):
+        now = datetime.now(timezone.utc)
+        observed = state.delivery(self.journal(
+            {"event_id": "e-claim", "kind": "document_delivery_started",
+             "message_id": None, "recorded_at": now.isoformat(),
+             "schema_version": "1.0"},
+            self.sent(now)))
+        self.assertEqual(observed["sent"], 1)
+        self.assertNotIn("refused", observed)
+
+    def test_the_page_reads_the_message_count_and_not_the_receipt_count(self):
+        page = a_page()
+        self.assertIn("d.delivery.sent", page)
+        self.assertIn('"Отказов"', page)
+        self.assertNotIn("d.delivery.count", page)
 
     def test_outgoing_traffic_counts_messages_and_not_receipts(self):
         # «Одна квитанция на каждое отправленное сообщение» is what the channel

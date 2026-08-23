@@ -640,15 +640,30 @@ def delivery(task_dir: Path) -> dict | None:
     counting messages as if they had gone out (task 1255). A refusal counts as
     outstanding while nothing succeeded after it, so the observation closes
     itself as soon as the next message does get through.
+
+    «Counting messages as if they had gone out» was also literally true of this
+    function: it counted journal lines. A receipt is written when the sender
+    claims a message, when it goes and when it does not, so lines and messages
+    are different numbers — six and five on task 1255's own journal, and 1739
+    against 1565 across the repository. The card says «Сообщений», so the number
+    is messages: a receipt carrying an identifier the person's client can show.
+    Refusals keep their own number next to it instead of hiding inside it, and
+    `last_*` describes the last message rather than the last line, because
+    «Последнее» under a refusal read as «сообщение ушло тогда-то».
     """
     path = task_dir / "dev-pipeline" / "notification-receipts.jsonl"
     rows = _json_lines(path)
     if not rows:
         return None
-    last = rows[-1]
-    observation = {"count": len(rows), "last_at": last.get("recorded_at"),
+    sent = [row for row in rows if row.get("message_id")]
+    last = sent[-1] if sent else {}
+    observation = {"sent": len(sent), "last_at": last.get("recorded_at"),
                    "last_kind": last.get("kind"),
-                   "src": "dev-pipeline/notification-receipts.jsonl"}
+                   "src": "dev-pipeline/notification-receipts.jsonl: квитанции с "
+                          "идентификатором сообщения"}
+    refused = sum(1 for row in rows if row.get("kind") in UNDELIVERED_RECEIPTS)
+    if refused:
+        observation["refused"] = refused
     unresolved = None
     for row in rows:
         if row.get("kind") == DELIVERY_UNRESOLVED_KIND:
@@ -734,6 +749,16 @@ LIFECYCLE_RECEIPTS = frozenset({
 # reached the person. It carries `reason`, which since task 1255 names the cause
 # rather than only the fact.
 DELIVERY_UNRESOLVED_KIND = "notification_delivery_unresolved"
+
+# Every receipt that records something the person did not get: the refused
+# notification above and the two the document sender writes. They are counted,
+# never added to the messages, and a kind missing here only goes uncounted —
+# nothing is called delivered because of it, because delivery is decided by the
+# message identifier and not by this set.
+UNDELIVERED_RECEIPTS = frozenset({
+    DELIVERY_UNRESOLVED_KIND,
+    "document_delivery_refused", "document_delivery_unresolved",
+})
 
 # How long such a refusal stays something to look at. The product owner watches
 # current state: a refusal from nine days ago on a closed task is history, and
