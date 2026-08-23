@@ -631,17 +631,54 @@ def delivery(task_dir: Path) -> dict | None:
     """What actually left for a person, from the receipts the sender wrote.
 
     A report left on disk counts as undelivered, so the card has to say whether
-    anything went out and when the last thing did. One receipt per message
-    actually sent — the tail of the journal, not its whole length in memory.
+    anything went out and when the last thing did.
+
+    And whether anything the run tried to say never arrived. That was the one
+    thing this journal knew and nobody read: for nine days from 2026-08-13 the
+    transport could not import its own module, 41 tasks recorded the refusal,
+    and it stayed prose inside each task's `trace.md` while the board went on
+    counting messages as if they had gone out (task 1255). A refusal counts as
+    outstanding while nothing succeeded after it, so the observation closes
+    itself as soon as the next message does get through.
     """
     path = task_dir / "dev-pipeline" / "notification-receipts.jsonl"
-    count = count_lines(path)
-    if not count:
+    rows = _json_lines(path)
+    if not rows:
         return None
-    last = last_json_line(path)
-    return {"count": count, "last_at": last.get("recorded_at"),
-            "last_kind": last.get("kind"),
-            "src": "dev-pipeline/notification-receipts.jsonl"}
+    last = rows[-1]
+    observation = {"count": len(rows), "last_at": last.get("recorded_at"),
+                   "last_kind": last.get("kind"),
+                   "src": "dev-pipeline/notification-receipts.jsonl"}
+    unresolved = None
+    for row in rows:
+        if row.get("kind") == DELIVERY_UNRESOLVED_KIND:
+            unresolved = row
+        elif row.get("message_id"):
+            unresolved = None
+    if unresolved:
+        observation["unresolved"] = {
+            "notification": unresolved.get("notification_kind"),
+            "at": unresolved.get("recorded_at"),
+            "reason": unresolved.get("reason"),
+            "current": _recent(unresolved.get("recorded_at"),
+                               DELIVERY_UNRESOLVED_SECONDS),
+            "src": "dev-pipeline/notification-receipts.jsonl: последняя квитанция "
+                   f"{DELIVERY_UNRESOLVED_KIND}, после которой ничего не ушло",
+        }
+    return observation
+
+
+def _recent(at: str | None, seconds: int) -> bool:
+    """Whether a recorded moment is inside a window ending now."""
+    if not at:
+        return False
+    try:
+        moment = datetime.fromisoformat(at)
+    except ValueError:
+        return False
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - moment).total_seconds() <= seconds
 
 
 # ---------------------------------------------------------------------------
@@ -659,19 +696,52 @@ def delivery(task_dir: Path) -> dict | None:
 # reading a single document: a finished task, a file made for a person, and no
 # receipt that the person got it.
 
-# What the run's own notifications say. Every receipt in the whole repository is
-# one of these — 117 `attempt_started`, 73 `attempt_completed`, 41
-# `attempt_completed_rejected`, 2 `attempt_failed` — so «квитанция есть» has
-# never once meant «документ доставлен». A kind outside this set is about
-# something other than the life of the run and is taken as delivery evidence,
-# because refusing to believe an unknown receipt would be inventing an alarm.
+# What the run's own notifications say, so «квитанция есть» never means
+# «документ доставлен». A kind outside this set is about something other than
+# the life of the run and is taken as delivery evidence, because refusing to
+# believe an unknown receipt would be inventing an alarm.
+#
+# That bias is only safe while the set actually holds every lifecycle kind the
+# sender writes, and it stopped doing so. This list was measured once and never
+# again; counted over the journals on 2026-08-23 it was missing seven kinds, two
+# of them the largest in the whole repository — 522 `standard_run_started` and
+# 168 `notification_delivery_unresolved`. A missing kind does not merely go
+# unnamed: `handoff` read a start-of-run push carrying a message identifier as
+# proof that a person has this task's document, so 783's hole reopened silently
+# under the very receipts that say nothing about a document (task 1255).
+#
+# The counterpart set is closed and owned elsewhere: `pipeline_delivery.py`
+# writes `document_delivery_started`, `document_delivered`,
+# `document_delivery_refused` and `document_delivery_unresolved`, and those four
+# are the only receipts that are about a document at all.
 LIFECYCLE_RECEIPTS = frozenset({
     "attempt_started", "attempt_completed", "attempt_completed_rejected",
     "attempt_failed", "run_started", "run_completed", "run_failed",
     "process_started", "native_session_discovered", "checkpoint_completed",
     "increment_completed", "increment_ready_for_review", "review_started",
     "review_completed", "blocked_on_user_decision",
+    # An ordinary run's own two edges, and the launcher's refusal to start or
+    # to close one. Added by companion task 1142 and never seen here until now.
+    "standard_run_started", "standard_run_completed", "pipeline_stopped",
+    # The review phases of a task number, from the same sender.
+    "review_rework_required", "review_waiting", "review_refused",
+    # A notification the transport could not deliver. It is a fact about the
+    # run's own voice, not about a document — see `DELIVERY_UNRESOLVED_KIND`.
+    "notification_delivery_unresolved",
 })
+
+# The receipt the sender writes when a notification about the run itself never
+# reached the person. It carries `reason`, which since task 1255 names the cause
+# rather than only the fact.
+DELIVERY_UNRESOLVED_KIND = "notification_delivery_unresolved"
+
+# How long such a refusal stays something to look at. The product owner watches
+# current state: a refusal from nine days ago on a closed task is history, and
+# putting all 44 of them on the attention list would bury the live work under
+# it. Wider than a night, so a refusal at 02:00 is still there at the morning
+# wake-up, and it clears itself the moment the transport starts working again.
+DELIVERY_UNRESOLVED_SECONDS = tunable(
+    "PRODUCT_OWNER_DELIVERY_UNRESOLVED_SECONDS", 36 * 3600)
 
 # The manifest lists the deliverables; it is not itself a document for a person.
 NOT_A_DOCUMENT = {"manifest.json"}
@@ -2035,8 +2105,16 @@ def thread_channels(tasks: list[dict], is_owner: bool) -> list[dict]:
     that owns the contour rather than being spread over four panels by a
     connection nothing on disk supports.
     """
-    telegram = sum(count_lines(REPO / "tasks" / task["dir"] / "dev-pipeline" /
-                               "notification-receipts.jsonl") for task in tasks)
+    # A receipt is written whether or not the message went, so counting lines
+    # counted the 168 refusals of task 1255 as outgoing traffic. What the
+    # sentence above promises is messages actually sent, and that is the receipt
+    # carrying a message identifier.
+    telegram = sum(
+        1
+        for task in tasks
+        for row in _json_lines(REPO / "tasks" / task["dir"] / "dev-pipeline" /
+                               "notification-receipts.jsonl")
+        if row.get("message_id"))
     channels = [{"channel": "telegram", "direction": "out", "count": telegram}]
     if is_owner:
         for direction, box in (("in", "inbox"), ("out", "sent")):

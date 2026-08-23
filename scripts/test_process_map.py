@@ -5582,5 +5582,153 @@ class TheFirstScreenAnswersFourQuestions(unittest.TestCase):
         self.assertIn('"всего задач в каталоге: " + all.length', page)
 
 
+class ARefusedNotificationIsAnObservation(unittest.TestCase):
+    """Task 1255: nine days of pushes that never reached the user.
+
+    From 2026-08-13T20:50:48Z the transport could not import `aiogram`, and it
+    wrote `notification_delivery_unresolved` 168 times across 41 tasks. Every
+    one of those tasks finished cleanly, so nothing about their status said
+    anything was wrong, and the reason lived only in each task's own `trace.md`.
+    The board counted the receipts and the wake-up looked past them.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.task = Path(self.tmp.name)
+        self.addCleanup(self.tmp.cleanup)
+        self.pipeline = self.task / "dev-pipeline"
+        self.pipeline.mkdir()
+
+    def journal(self, *rows: dict) -> Path:
+        (self.pipeline / "notification-receipts.jsonl").write_text(
+            "".join(json.dumps(row) + "\n" for row in rows))
+        return self.task
+
+    def refusal(self, at: datetime, **over) -> dict:
+        row = {"event_id": "e-ref", "kind": "notification_delivery_unresolved",
+               "notification_kind": "standard_run_started", "message_id": None,
+               "reason": "notification transport raised before its outcome was "
+                         "recorded: ModuleNotFoundError: No module named 'aiogram'",
+               "recorded_at": at.isoformat(), "schema_version": "1.0"}
+        row.update(over)
+        return row
+
+    def sent(self, at: datetime, **over) -> dict:
+        row = {"event_id": "e-ok", "kind": "standard_run_completed",
+               "message_id": 22004, "recorded_at": at.isoformat(),
+               "schema_version": "1.0"}
+        row.update(over)
+        return row
+
+    def test_a_refusal_is_named_with_its_cause_and_not_only_counted(self):
+        now = datetime.now(timezone.utc)
+        silent = state.delivery(self.journal(self.refusal(now)))["unresolved"]
+        self.assertEqual(silent["notification"], "standard_run_started")
+        self.assertIn("No module named 'aiogram'", silent["reason"])
+        self.assertTrue(silent["current"])
+        self.assertTrue(silent["src"].strip())
+
+    def test_a_message_that_did_get_through_afterwards_closes_it(self):
+        # The observation has to be able to end by itself, or the board keeps
+        # ringing about a transport that was repaired days ago.
+        now = datetime.now(timezone.utc)
+        task = self.journal(self.refusal(now - timedelta(minutes=5)), self.sent(now))
+        self.assertNotIn("unresolved", state.delivery(task))
+
+    def test_a_later_refusal_reopens_it(self):
+        now = datetime.now(timezone.utc)
+        task = self.journal(self.refusal(now - timedelta(hours=2)),
+                            self.sent(now - timedelta(hours=1)),
+                            self.refusal(now, notification_kind="standard_run_completed"))
+        self.assertEqual(state.delivery(task)["unresolved"]["notification"],
+                         "standard_run_completed")
+
+    def test_an_old_refusal_is_kept_but_no_longer_current(self):
+        # Nine days on a closed task is history. It stays readable on the card
+        # and stops competing with live work for the attention list.
+        old = datetime.now(timezone.utc) - timedelta(
+            seconds=state.DELIVERY_UNRESOLVED_SECONDS + 60)
+        self.assertFalse(state.delivery(self.journal(self.refusal(old)))["unresolved"]["current"])
+
+    def test_a_lifecycle_push_is_not_evidence_that_a_document_arrived(self):
+        """The hole 1142 opened here by adding kinds this observer never learnt.
+
+        `standard_run_started` carries a real message id, names no document and
+        was outside `LIFECYCLE_RECEIPTS`, so `handoff` read it as an
+        uncorrelatable delivery receipt and called the task delivered.
+        """
+        box = self.task / "deliverables"
+        box.mkdir()
+        (box / "report.html").write_text("x" * 4096)
+        self.journal({"event_id": "e1", "kind": "standard_run_started",
+                      "message_id": 22002, "recorded_at": "2026-08-22T23:21:13+00:00",
+                      "schema_version": "1.0"})
+        self.assertFalse(state.handoff(self.task)["delivered"])
+        self.assertEqual(state.delivery_receipts(self.task), [])
+
+    def test_every_kind_the_sender_writes_is_known_to_be_about_the_run(self):
+        # Measured, not remembered: the last time this set was written down by
+        # hand it went two years' worth of receipts out of date.
+        for kind in ("standard_run_started", "standard_run_completed",
+                     "pipeline_stopped", "notification_delivery_unresolved",
+                     "review_rework_required", "review_waiting", "review_refused"):
+            self.assertIn(kind, state.LIFECYCLE_RECEIPTS)
+        for kind in ("document_delivery_started", "document_delivered",
+                     "document_delivery_refused", "document_delivery_unresolved"):
+            self.assertNotIn(kind, state.LIFECYCLE_RECEIPTS)
+
+    def report(self, *tasks):
+        observed = {"threads": [{"title": "Процессный контур", "products": [],
+                                 "tasks": list(tasks), "repos": [], "task_count": len(tasks)}],
+                    "owners_awake": []}
+        with (mock.patch.object(thread, "load_thread", return_value={"repos": []}),
+              mock.patch.object(thread.observer, "build", return_value=observed),
+              mock.patch.object(thread, "process_inventory", return_value=[]),
+              mock.patch.object(thread.observer, "write_owner_observations")):
+            return thread.build("process")
+
+    def a_silent_task(self, current: bool, status: str = "completed") -> dict:
+        return a_task(id=1142, dir="1142-t", status=status, detail={"delivery": {
+            "count": 3, "last_at": "2026-08-13T20:50:48+00:00",
+            "last_kind": "notification_delivery_unresolved",
+            "src": "dev-pipeline/notification-receipts.jsonl",
+            "unresolved": {"notification": "standard_run_started",
+                           "at": "2026-08-13T20:50:48+00:00",
+                           "reason": "ModuleNotFoundError: No module named 'aiogram'",
+                           "current": current, "src": "квитанция"}}})
+
+    def test_the_wake_up_is_told_about_a_finished_task_that_never_spoke(self):
+        # 1142's own goal was «человек видит старт и конец обычного прогона»,
+        # and it is `completed`: a rule that only looks at open work sees none
+        # of the nine days.
+        report = self.report(self.a_silent_task(current=True))
+        self.assertEqual([task["id"] for task in report["needs_attention"]], [1142])
+        self.assertIn("aiogram",
+                      report["needs_attention"][0]["undelivered_notification"]["reason"])
+
+    def test_an_old_refusal_does_not_stand_in_the_attention_list(self):
+        report = self.report(self.a_silent_task(current=False))
+        self.assertEqual(report["needs_attention"], [])
+
+    def test_the_card_shows_what_never_reached_the_person(self):
+        page = a_page()
+        self.assertIn("d.delivery.unresolved", page)
+        self.assertIn('"Не доставлено"', page)
+
+    def test_outgoing_traffic_counts_messages_and_not_receipts(self):
+        # «Одна квитанция на каждое отправленное сообщение» is what the channel
+        # count promises; a refusal writes a receipt too, and 168 of them were
+        # being reported as messages the contour had sent.
+        repo = self.task / "repo"
+        pipeline = repo / "tasks" / "001-t" / "dev-pipeline"
+        pipeline.mkdir(parents=True)
+        now = datetime.now(timezone.utc)
+        (pipeline / "notification-receipts.jsonl").write_text(
+            json.dumps(self.refusal(now)) + "\n" + json.dumps(self.sent(now)) + "\n")
+        with mock.patch.object(state, "REPO", repo):
+            channels = state.thread_channels([{"dir": "001-t"}], is_owner=False)
+        self.assertEqual(channels, [{"channel": "telegram", "direction": "out", "count": 1}])
+
+
 if __name__ == "__main__":
     unittest.main()
