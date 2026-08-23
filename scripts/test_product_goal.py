@@ -27,12 +27,16 @@ import product_goal as goals
 import thread_tick as tick
 
 
+def set_status(root: Path, task_id: int, status: str) -> None:
+    (root / "tasks" / f"{task_id}-demo" / "task.md").write_text(
+        f'---\nid: {task_id}\nslug: "{task_id}-demo"\nstatus: "{status}"\n---\n# demo\n')
+
+
 def task_tree(root: Path, task_id: int, status: str, trace: str = "",
               rounds: list[dict] | None = None) -> Path:
     directory = root / "tasks" / f"{task_id}-demo"
     directory.mkdir(parents=True)
-    (directory / "task.md").write_text(
-        f'---\nid: {task_id}\nslug: "{task_id}-demo"\nstatus: "{status}"\n---\n# demo\n')
+    set_status(root, task_id, status)
     if trace:
         (directory / "trace.md").write_text(trace)
     if rounds is not None:
@@ -133,6 +137,90 @@ class GoalStore(unittest.TestCase):
         goals.add_corrective(goal["id"], 101, "эффект", "критерий")
         with self.assertRaises(goals.GoalError):
             goals.resume(goal["id"])
+
+    # -- a repair that did not deliver itself ----------------------------------
+
+    def paused_with(self, task_id: int, status: str) -> dict:
+        task_tree(self.root / "repo", 100, "blocked")
+        task_tree(self.root / "repo", task_id, status)
+        goal = self.opened()
+        goals.pause(goal["id"], "причина", "источник")
+        goals.add_corrective(goal["id"], task_id, "эффект", "критерий")
+        return goal
+
+    def test_a_repair_is_not_taken_off_the_list_without_a_reason_or_an_observation(self):
+        """Ровно то, что отличает снятие от тихого забывания."""
+        goal = self.paused_with(101, "cancelled")
+        with self.assertRaises(goals.GoalError):
+            goals.retire_corrective(goal["id"], 101, "  ", "task.md задачи 101")
+        with self.assertRaises(goals.GoalError):
+            goals.retire_corrective(goal["id"], 101, "отменена", "  ")
+        self.assertEqual(goals.pending(goals.load(goal["id"])), [101])
+
+    def test_a_superseded_repair_stops_holding_the_main_task(self):
+        """Задача честно не completed, и цель всё равно возвращается в работу."""
+        goal = self.paused_with(101, "blocked")
+        retired = goals.retire_corrective(
+            goal["id"], 101, "эффект доставлен принятой 102",
+            "task.md задачи 102 в статусе completed")
+        item = retired["correctives"][0]
+        self.assertIsNone(item["accepted"])
+        self.assertEqual(item["retired"]["reason"], "эффект доставлен принятой 102")
+        self.assertEqual(item["retired"]["task_status"], "blocked")
+        self.assertEqual(goals.settlement(item)["kind"], goals.RETIRED)
+        self.assertEqual(goals.pending(retired), [])
+        resumed = goals.resume(goal["id"])
+        self.assertEqual(resumed["state"], goals.ACTIVE)
+        self.assertEqual(goals.live_tasks(resumed), [100])
+
+    def test_a_cancelled_repair_is_retired_on_what_the_task_system_records(self):
+        goal = self.paused_with(101, "cancelled")
+        retired = goals.retire_corrective(
+            goal["id"], 101, "отменена как поглощённая чистой пересборкой",
+            "task.md задачи 101: status cancelled, status_detail superseded_by_clean_rebuild")
+        self.assertEqual(retired["correctives"][0]["retired"]["task_status"], "cancelled")
+        self.assertEqual(goals.pending(retired), [])
+
+    def test_retiring_is_not_a_cheaper_acceptance(self):
+        """Наблюдаемо завершённый ремонт принимают, а не снимают."""
+        goal = self.paused_with(101, "completed")
+        task_tree(self.root / "repo", 103, "blocked")
+        goals.add_corrective(goal["id"], 103, "эффект", "критерий")
+        with self.assertRaises(goals.GoalError):
+            goals.retire_corrective(goal["id"], 101, "поглощена", "наблюдение")
+        goals.accept_corrective(goal["id"], 101, "живой прогон 101")
+        # And the other way round: an acceptance never overwrites a retirement,
+        # even once the retired task does reach `completed` on its own.
+        goals.retire_corrective(goal["id"], 103, "поглощена принятой 101", "task.md 101")
+        set_status(self.root / "repo", 103, "completed")
+        with self.assertRaisesRegex(goals.GoalError, "снята"):
+            goals.accept_corrective(goal["id"], 103, "живой прогон 103")
+
+    def test_a_repair_is_taken_off_the_list_once(self):
+        goal = self.paused_with(101, "blocked")
+        goals.retire_corrective(goal["id"], 101, "поглощена принятой 102", "task.md 102")
+        with self.assertRaises(goals.GoalError):
+            goals.retire_corrective(goal["id"], 101, "ещё раз", "то же наблюдение")
+        with self.assertRaises(goals.GoalError):
+            goals.retire_corrective(goal["id"], 999, "нет такой", "наблюдение")
+
+    def test_a_retired_repair_is_shown_as_retired_and_never_as_accepted(self):
+        goal = self.paused_with(101, "blocked")
+        goals.retire_corrective(goal["id"], 101, "эффект доставлен принятой 102",
+                                "task.md задачи 102")
+        projected = goals.panel("process")[0]
+        schema.validate_goal(projected, "цель")
+        settled = projected["correctives"][0]["settled"]
+        self.assertEqual(settled["kind"], goals.RETIRED)
+        self.assertEqual(projected["waiting_on"], [])
+        block = goals.block("process")
+        self.assertIn("снята: эффект доставлен принятой 102", block)
+        self.assertNotIn("101 (принята)", block)
+        # And the board refuses a retirement shown without its reason or source.
+        broken = {**projected, "correctives": [
+            {**projected["correctives"][0], "settled": {**settled, "reason": " "}}]}
+        with self.assertRaises(schema.ContractError):
+            schema.validate_goal(broken, "цель")
 
     # -- closing ---------------------------------------------------------------
 

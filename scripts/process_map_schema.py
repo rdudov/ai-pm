@@ -115,6 +115,12 @@ GOAL_FIELDS = ("id", "state", "control", "outcome", "observable", "main_task",
                "correctives", "gap", "next_transition", "pause", "signals",
                "waiting_on", "updated_at", "src")
 GOAL_STATES = ("active", "paused", "closed")
+# How a corrective task stopped holding the main task, and the two are different
+# statements: `accepted` is a delivered repair observed `completed`, `retired` is
+# one taken off the list without delivering itself. The board prints them
+# differently because writing «принята» over a retired repair is the untruth the
+# retirement exists to avoid.
+GOAL_SETTLEMENTS = ("accepted", "retired")
 # Two kinds of attention, and the second one is turned on by an observed
 # deviation rather than chosen. Normal work never gets it.
 GOAL_CONTROLS = ("normal", "reinforced")
@@ -559,7 +565,7 @@ def validate_goal(goal: dict, where: str) -> dict:
         if not str(signal["src"] or "").strip():
             raise ContractError(f"{where}: признак назван, но не сказано, чем наблюдён")
     for corrective in goal["correctives"]:
-        _require(corrective, ("task", "effect", "return_criterion", "accepted"),
+        _require(corrective, ("task", "effect", "return_criterion", "settled"),
                  f"{where}: корректирующая задача")
         # Both halves or neither: «заведём ремонт» without the observable
         # criterion for coming back is how a chain stops at the closed repair.
@@ -567,7 +573,29 @@ def validate_goal(goal: dict, where: str) -> dict:
             raise ContractError(
                 f"{where}: корректирующая задача без пользовательского эффекта "
                 "или без критерия возврата к основной задаче")
+        _validate_settlement(corrective["settled"], f"{where}: корректирующая задача")
     return goal
+
+
+def _validate_settlement(settled, where: str) -> None:
+    """Ремонт, снятый с основной работы, называет чем — и по чему это видно.
+
+    Same rule as every caption on this board: shown and not saying what observed
+    it is refused. A retirement carries one thing more than an acceptance — the
+    reason it was taken off the list — because nothing on disk states that by
+    itself, and a reason nobody wrote is how «снята» becomes «замолчана».
+    """
+    if settled is None:
+        return
+    if not isinstance(settled, dict):
+        raise ContractError(f"{where}: ожидался объект с тем, чем ремонт закрыт")
+    _require(settled, ("kind", "at", "src"), where)
+    if settled["kind"] not in GOAL_SETTLEMENTS:
+        raise ContractError(f"{where}: ремонт закрыт способом {settled['kind']!r}")
+    if not str(settled["src"] or "").strip():
+        raise ContractError(f"{where}: ремонт закрыт, но не сказано, чем это наблюдено")
+    if settled["kind"] == "retired" and not str(settled.get("reason") or "").strip():
+        raise ContractError(f"{where}: ремонт снят, но не названа причина")
 
 
 def validate_plan_entry(entry: dict, where: str, kind: bool = False) -> dict:
