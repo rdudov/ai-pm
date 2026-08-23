@@ -626,7 +626,17 @@ def main(argv: list[str] | None = None) -> int:
     )
     if completed.stderr:
         print(completed.stderr, file=sys.stderr, end="")
-    print(notice)
+    # Which engine answered is a diagnostic, and on this path stdout is not a
+    # console — it is the letter. Until 2026-08-23 this line was printed there,
+    # so every Codex-routed letter opened with «Продакт: у Codex больше
+    # наблюдаемый остаток недельного окна…», and a wake-up that answered exactly
+    # `SILENT` became a two-line letter that was no longer `SILENT`: the user was
+    # mailed the word itself at 11:35 UTC that day (Gmail `message-id`).
+    # The interactive branch above already treats this line as a diagnostic; here
+    # it is given the shape `thread_tick.route_diagnostics` keeps, so the route
+    # stays visible in the unit's own journal instead of in the mail.
+    print(f"product-owner: route selected; Codex ({route.reason}) — {notice}",
+          file=sys.stderr)
     if completed.stdout:
         print(completed.stdout, end="" if completed.stdout.endswith("\n") else "\n")
     return completed.returncode
