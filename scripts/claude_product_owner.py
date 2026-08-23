@@ -237,10 +237,7 @@ def select_route(
     if opus_exhausted and fable_exhausted:
         return Route("codex", CODEX_MODEL, "observed_opus_and_fable_limits_exhausted")
 
-    opus_remaining = 100.0 - opus_used if opus_used is not None else None
-    claude_model = (FABLE_MODEL if opus_remaining is not None
-                    and opus_remaining < threshold and not fable_exhausted
-                    else OPUS_MODEL)
+    claude_model = select_model(usage, threshold)[0]
     claude_remaining = claude_weekly_remaining(usage)
     codex_remaining = codex_weekly_remaining(codex)
     if claude_remaining is None:
@@ -261,12 +258,14 @@ def select_route(
 def select_model(
     usage: dict[str, Any], threshold: float = OPUS_REMAINING_THRESHOLD
 ) -> tuple[str, str]:
-    """Backward-compatible Claude model view for existing callers and tests."""
+    """Choose a usable Claude model from observed model-scoped limits."""
     percentages = opus_used_percentages(usage)
     if not percentages:
         return OPUS_MODEL, "no_opus_specific_limit"
     remaining = 100.0 - max(percentages)
-    if remaining < threshold:
+    fable = model_used_percentages(usage, "fable")
+    fable_exhausted = bool(fable) and max(fable) >= 100.0
+    if remaining < threshold and not fable_exhausted:
         return FABLE_MODEL, f"opus_remaining={remaining:g}%"
     return OPUS_MODEL, f"opus_remaining={remaining:g}%"
 
@@ -529,6 +528,7 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument("--show-command", action="store_true", help="print the selected argv without executing it")
     parser.add_argument("--entry", choices=("interactive", "print"))
     parser.add_argument("--force-codex", action="store_true")
+    parser.add_argument("--force-claude", action="store_true")
     args, extra = parser.parse_known_args(argv)
     if extra and extra[0] == "--":
         extra = extra[1:]
@@ -538,6 +538,10 @@ def main(argv: list[str] | None = None) -> int:
     error = observation.error
     if args.force_codex:
         route = Route("codex", CODEX_MODEL, "explicit_codex_pm_command")
+    elif args.force_claude:
+        route = Route(
+            "claude", select_model(usage or {})[0], "explicit_claude_pm_command"
+        )
     if args.select:
         print(route.model)
         return 0

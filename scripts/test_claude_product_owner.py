@@ -3,7 +3,7 @@ import subprocess
 import unittest
 from unittest import mock
 import urllib.error
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timezone
 from io import StringIO
 
@@ -112,6 +112,55 @@ class ProductOwnerModelRouterTests(unittest.TestCase):
             "codex", CODEX_MODEL, "weekly_remaining:claude=31%,codex=81%"
         ))
         self.assertEqual(claude_weekly_remaining(usage), 31.0)
+
+    def test_manual_claude_binding_reuses_model_selection(self):
+        def shown(usage: dict, argv: list[str]) -> list[str]:
+            output = StringIO()
+            diagnostic_argv = list(argv)
+            if "--" in diagnostic_argv:
+                diagnostic_argv.insert(diagnostic_argv.index("--"), "--show-command")
+            else:
+                diagnostic_argv.append("--show-command")
+            with (mock.patch("claude_product_owner.fetch_usage", return_value=usage),
+                  mock.patch("claude_product_owner.codex_budget.latest",
+                             return_value=observed_codex(90)),
+                  redirect_stdout(output)):
+                self.assertEqual(router.main(diagnostic_argv), 0)
+            return json.loads(output.getvalue())
+
+        unforced = shown(
+            {"seven_day": {"utilization": 90}},
+            ["--entry", "interactive"],
+        )
+        forced_opus = shown(
+            {"seven_day": {"utilization": 90}},
+            ["--entry", "interactive", "--force-claude", "--", "probe"],
+        )
+        forced_fable = shown(
+            {
+                "seven_day": {"utilization": 60},
+                "seven_day_opus": {"utilization": 100},
+            },
+            ["--entry", "interactive", "--force-claude", "--", "probe"],
+        )
+        forced_opus_when_fable_exhausted = shown(
+            {
+                "seven_day": {"utilization": 60},
+                "seven_day_opus": {"utilization": 97},
+                "seven_day_fable": {"utilization": 100},
+            },
+            ["--entry", "interactive", "--force-claude", "--", "probe"],
+        )
+
+        self.assertEqual(unforced[0], router.CODEX_BIN)
+        self.assertEqual(forced_opus[0], router.CLAUDE_BIN)
+        self.assertEqual(forced_opus[1:3], ["--model", router.OPUS_MODEL])
+        self.assertTrue(forced_opus[-1].endswith("Первый запрос пользователя: probe"))
+        self.assertEqual(forced_fable[1:3], ["--model", router.FABLE_MODEL])
+        self.assertEqual(
+            forced_opus_when_fable_exhausted[1:3],
+            ["--model", router.OPUS_MODEL],
+        )
 
     def test_larger_observed_claude_remainder_selects_claude(self):
         route = select_route(
