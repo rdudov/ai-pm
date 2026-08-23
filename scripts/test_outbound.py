@@ -382,6 +382,43 @@ class TheSameQuestionIsNotAskedTwice(unittest.TestCase):
                                    entry, outbound.no_chat())
         self.assertEqual(decision["action"], "send")
 
+    def test_a_day_of_other_letters_does_not_make_the_repeat_new_again(self):
+        # Пользователь не ставил вопросу срока годности, а до 2026-08-24 срок был:
+        # `apply` резал историю до `KEEP_LETTERS`, и повтор, разделённый двадцатью
+        # письмами, уходил вторым письмом. По журналу двери процессное направление
+        # набирает двадцать писем за 18.8 ч (`live-evidence/horizon-before.txt`).
+        entry = self.sent(ASKED_AT_0840, AT)
+        for index in range(outbound.KEEP_LETTERS + 5):
+            outbound.apply(entry, {"action": "send", "reason": "обычное письмо",
+                                   "body": f"Прогон {index} закончился.", "flush": [],
+                                   "fingerprint": outbound.fingerprint("s", str(index))},
+                           "Продакт: Процессный контур",
+                           AT + timedelta(minutes=20 * (index + 1)), a_report(),
+                           "verdict")
+        decision = outbound.decide("process", "verdict", "Продакт: Процессный контур",
+                                   ASKED_AT_0940, a_report(), AT + timedelta(days=1),
+                                   entry, outbound.no_chat())
+        self.assertEqual(decision["action"], "drop")
+        self.assertIn("этот вопрос уже задан письмом", decision["reason"])
+
+    def test_the_kept_tail_still_forgets_everything_that_asked_nothing(self):
+        # Обратная половина: помнить дольше положено вопросу, а не всей почте.
+        # «Что пользователь уже слышал» остаётся окном последних писем.
+        entry = self.sent(ASKED_AT_0840, AT)
+        for index in range(outbound.KEEP_LETTERS + 5):
+            outbound.apply(entry, {"action": "send", "reason": "обычное письмо",
+                                   "body": f"Прогон {index} закончился.", "flush": [],
+                                   "fingerprint": outbound.fingerprint("s", str(index))},
+                           "Продакт: Процессный контур",
+                           AT + timedelta(minutes=20 * (index + 1)), a_report(),
+                           "verdict")
+        kept = entry["letters"]
+        self.assertEqual(len(kept), outbound.KEEP_LETTERS + 1)
+        self.assertEqual([letter["asks_user"] for letter in kept].count(True), 1)
+        self.assertTrue(kept[0]["asks_user"])
+        self.assertEqual(kept[-1]["excerpt"],
+                         f"Прогон {outbound.KEEP_LETTERS + 4} закончился.")
+
     def test_a_ledger_written_before_this_measure_existed_silences_nothing(self):
         # `state/outbound.json` on disk predates both new fields. An entry
         # without them is «неизвестно, был ли это вопрос», and unknown may not
