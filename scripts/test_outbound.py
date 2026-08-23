@@ -243,8 +243,9 @@ class TheSameQuestionIsNotAskedTwice(unittest.TestCase):
         second = outbound.fingerprint("Продакт: Процессный контур", ASKED_AT_0940)
         self.assertLess(outbound.overlap_percent(set(second["pairs"]),
                                                  set(first["pairs"])), 30)
-        self.assertGreaterEqual(outbound.same_question(second, first),
-                                outbound.SAME_QUESTION_PERCENT)
+        percent, unit = outbound.same_question(second, first)
+        self.assertGreaterEqual(percent, outbound.SAME_QUESTION_PERCENT)
+        self.assertEqual(unit, "названного")
 
     def test_a_reminder_carrying_a_new_fact_still_goes_out(self):
         entry = self.sent(ASKED_AT_0840, AT)
@@ -297,8 +298,8 @@ class TheSameQuestionIsNotAskedTwice(unittest.TestCase):
 
     def test_one_task_number_in_common_is_not_the_same_question(self):
         # «Запускать 1257 сейчас?» и «1257 упала, чинить или откатить?» называют
-        # ровно одно и то же — номер задачи — и совпадают на 100%. Мера, у
-        # которой нет основания, вопроса не глушит.
+        # ровно одно и то же — номер задачи — и по названному совпадают на 100%.
+        # Такой вопрос меряется словами, и по ним это 50%: второй вопрос уходит.
         entry = self.sent("Запускать 1257 сейчас или после ревью?", AT)
         decision = outbound.decide("process", "verdict", "Продакт: контур",
                                    "1257 упала на живой проверке. Чинить сейчас "
@@ -306,13 +307,49 @@ class TheSameQuestionIsNotAskedTwice(unittest.TestCase):
                                    AT + timedelta(hours=1), entry, outbound.no_chat())
         self.assertEqual(decision["action"], "send")
 
-    def test_a_question_that_names_nothing_measurable_is_never_a_repeat(self):
-        # «Нечем измерить» may not silence a question: a letter with no task
-        # number and no named tool is 0% and goes out.
+    def test_a_short_question_asked_again_in_the_same_words_is_a_repeat(self):
+        # Дословный повтор короткого вопроса — тот самый случай, который до
+        # 2026-08-23 уходил вторым письмом без сравнения: у такого письма меньше
+        # шести названных вещей, и мера возвращала 0 не считая.
         entry = self.sent("Запускать сейчас или подождать?", AT)
         decision = outbound.decide("process", "verdict", "Продакт: контур",
-                                   "Начинать сейчас или позже?", a_report(),
+                                   "Запускать сейчас или подождать?", a_report(),
                                    AT + timedelta(hours=1), entry, outbound.no_chat())
+        self.assertEqual(decision["action"], "drop")
+        self.assertIn("сказанного", decision["reason"])
+
+    def test_a_short_question_retold_about_the_same_choice_is_a_repeat(self):
+        # Приёмочное условие пользователя: мера обязана ловить пересказ, а не
+        # только дословный повтор. Тот же выбор другими словами — 67% сказанного.
+        entry = self.sent("Запускать сейчас или подождать?", AT)
+        for retelling in ("Подождать или всё-таки запускать сейчас?",
+                          "Начинать сейчас или позже?"):
+            with self.subTest(retelling=retelling):
+                decision = outbound.decide("process", "verdict", "Продакт: контур",
+                                           retelling, a_report(),
+                                           AT + timedelta(hours=1), entry,
+                                           outbound.no_chat())
+                self.assertEqual(decision["action"], "drop")
+
+    def test_a_short_question_about_another_task_is_not_a_repeat(self):
+        # Соседнее правило `same_matter`: письмо, назвавшее задачу, которой в
+        # прошлом письме не было, — новый предмет при любой доле совпадения.
+        # Без него «Запускать 1259?» тонет в «Запускать 1257 сейчас?» на 75%.
+        entry = self.sent("Запускать 1257 сейчас или после ревью?", AT)
+        decision = outbound.decide("process", "verdict", "Продакт: контур",
+                                   "Запускать 1259?", a_report(),
+                                   AT + timedelta(hours=1), entry, outbound.no_chat())
+        self.assertEqual(decision["action"], "send")
+
+    def test_a_short_reminder_with_a_new_fact_still_goes_out(self):
+        # Вторая половина правила пользователя действует и на коротком вопросе:
+        # повтор с настоящим новым фактом уходит и называет, что нового.
+        entry = self.sent("Запускать сейчас или подождать?", AT)
+        decision = outbound.decide("process", "verdict", "Продакт: контур",
+                                   "НОВОЕ: очередь встала, свободных исполнителей "
+                                   "нет.\n\nЗапускать сейчас или подождать?",
+                                   a_report(), AT + timedelta(hours=1), entry,
+                                   outbound.no_chat())
         self.assertEqual(decision["action"], "send")
 
     def test_the_letter_that_was_not_a_question_does_not_hold_one_back(self):
@@ -668,7 +705,7 @@ class StandingIdle(unittest.TestCase):
                                    "живых прогонов нет, к запуску 9",
                                    a_report(), AT, entry, outbound.no_chat())
         self.assertEqual(decision["action"], "drop")
-        self.assertIn("пуше и на табло", decision["reason"])
+        self.assertIn("остаётся на табло", decision["reason"])
 
     def test_a_verdict_letter_does_not_reset_the_idle_interval(self):
         entry = an_entry(marks=marks(), letters=[
@@ -1162,15 +1199,56 @@ class TheTickUsesTheGate(unittest.TestCase):
                          reply_to_message_id="gmail-incoming-1")
 
     def test_the_push_is_not_gated(self):
-        # What the gate turns away must still reach the user somewhere.
+        # Сбой контура не проходит порог отправки: его пуш решается здесь, а не
+        # правилами о новостях. Что дверь отбросила порогом или повтором, видно
+        # на табло и в журнале шлюза.
         source = Path(tick.__file__).read_text(encoding="utf-8")
         self.assertNotIn("outbound", source[source.index("def notify("):
-                                            source.index("def runner_contract_alarm(")])
+                                            source.index("def require_notification_profile(")])
 
     def test_the_push_reuses_the_server_owned_bot_transport(self):
         with mock.patch.object(tick, "send_bot_message") as send:
             tick.notify("status")
         send.assert_called_once_with("status")
+
+    def test_a_standing_goal_left_without_an_outcome_is_not_pushed(self):
+        # «Я не просил присылать отчёты по задачам в телеграм, только в почту» —
+        # пользователь, 23 августа 2026. Сообщение контроля цели он назвал прямо;
+        # оно остаётся в снимке направления и в ненулевом коде выхода тика.
+        import goal_session
+
+        goal = {"id": 1, "waiting_on": [861], "outcome": "о", "gap": "g"}
+        with mock.patch.object(tick, "send_bot_message") as send:
+            checked = goal_session.post_check("process", [goal], [], "SILENT", AT)
+        send.assert_not_called()
+        self.assertFalse(checked["resolved"])
+        self.assertIn("told", checked)
+
+    def test_only_a_broken_contour_is_pushed_at_all(self):
+        # Продуктовый текст уходит одной почтовой дверью. В Telegram остаются два
+        # случая, и оба означают, что контур сломан и сам о себе не расскажет:
+        # разошедшийся контракт с task_runner и не отработавшее пробуждение.
+        # Отбивки dev-pipeline о фоновых прогонах живут в task-system и этой
+        # проверки не касаются.
+        import ast
+
+        callers = []
+        for path in sorted(Path(tick.__file__).parent.glob("*.py")):
+            if path.name.startswith("test_"):
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                for call in ast.walk(node):
+                    if not isinstance(call, ast.Call):
+                        continue
+                    name = call.func.attr if isinstance(call.func, ast.Attribute) else \
+                        getattr(call.func, "id", None)
+                    if name == "notify":
+                        callers.append((path.name, node.name))
+        self.assertEqual(sorted(callers), [("thread_tick.py", "main"),
+                                           ("thread_tick.py", "runner_contract_alarm")])
 
     def test_notification_profile_preflight_uses_server_owner(self):
         with mock.patch.object(

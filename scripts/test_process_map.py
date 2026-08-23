@@ -4005,17 +4005,18 @@ class TheWakeUpSeesTheQueueMove(unittest.TestCase):
         The verdict channel is the only one the user reads, and `SILENT` is a
         legitimate answer for a wake-up with nothing to report — but not for one
         woken *because* the direction is standing still. Then the observed
-        reasons go out on the same two channels the verdict does.
+        reasons go out on the same channel the verdict does.
 
-        Since 861 the mail half of that goes through `outbound.decide` like every
-        other letter, so what is asserted here is that the branch still speaks on
-        both channels — the push unconditionally, the letter through the gate as
-        its own kind. How often such a letter may repeat belongs to
-        `test_outbound.StandingIdle`, not here.
+        Since 861 that goes through `outbound.decide` like every other letter, so
+        what is asserted here is that the branch still speaks — the letter
+        through the gate as its own kind, and the reasons in it. How often such a
+        letter may repeat belongs to `test_outbound.StandingIdle`, not here. The
+        push half is gone since 2026-08-23: the user asked for product reports to
+        stop arriving in Telegram, and the letter is the channel that remains.
         """
         source = Path(tick.__file__).read_text()
         branch = source[source.index('elif idle and not (after or {}).get("live")'):]
-        self.assertIn("notify(told)", branch)
+        self.assertNotIn("notify(", branch)
         self.assertIn('deliver(', branch)
         self.assertIn('"idle"', branch)
         self.assertIn("for item in reasons", branch)

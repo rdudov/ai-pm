@@ -404,9 +404,12 @@ class StandingGoalOutcome(unittest.TestCase):
         checked = session.post_check("process", [goal()], [1126], "SILENT", self.moment())
         self.assertFalse(checked["resolved"])
         self.assertEqual(checked["goals"], ["0001"])
-        self.assertEqual(len(self.told), 1)
-        self.assertIn("ни живого прогона", self.told[0])
+        self.assertIn("ни живого прогона", checked["told"])
         self.assertEqual(self.mail, [])
+        # Ни письма, ни пуша: с 23 августа 2026 отчёт продакта в Telegram не
+        # уходит. Отказ виден в снимке направления, который читает табло, и в
+        # ненулевом коде выхода тика — см. тест ниже.
+        self.assertEqual(self.told, [])
 
     def test_an_empty_answer_is_refused_like_silence(self):
         checked = session.post_check("process", [goal()], [], "   ", self.moment())
