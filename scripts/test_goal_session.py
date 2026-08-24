@@ -406,10 +406,12 @@ class StandingGoalOutcome(unittest.TestCase):
         self.assertEqual(checked["goals"], ["0001"])
         self.assertIn("ни живого прогона", checked["told"])
         self.assertEqual(self.mail, [])
-        # Ни письма, ни пуша: с 23 августа 2026 отчёт продакта в Telegram не
-        # уходит. Отказ виден в снимке направления, который читает табло, и в
-        # ненулевом коде выхода тика — см. тест ниже.
-        self.assertEqual(self.told, [])
+        # Пушем — да, письмом — нет. 23 августа 2026 пользователь попросил не
+        # слать в Telegram отчёты по задачам; сообщение контроля цели он не
+        # называл, и независимая проверка круга 8 задачи 1260 отдельно записала,
+        # что убирать его заодно было решением автора, а не пользователя.
+        self.assertEqual(len(self.told), 1)
+        self.assertIn("ни живого прогона", self.told[0])
 
     def test_an_empty_answer_is_refused_like_silence(self):
         checked = session.post_check("process", [goal()], [], "   ", self.moment())

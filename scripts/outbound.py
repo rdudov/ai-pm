@@ -18,9 +18,9 @@ owner of the four rules that came out of that complaint:
    is being asked to choose, the usefulness of a product changed, or work they
    ordered finished with a document for them. «Прогон стартовал», «прогон
    закончился», «репозиторий двинулся» are not letters — they stay on the board,
-   which is where `thread_tick` still puts them. Until 2026-08-23 they also went
-   to the user's Telegram; that channel now carries a broken contour and nothing
-   else, because the user asked for the reports to stop coming there.
+   which is where `thread_tick` still puts them. The one thing 2026-08-23 took
+   off the user's Telegram is the `idle` report about a direction's task queue;
+   `thread_tick.notify` carries the user's words and the exact boundary.
 2. **Знание чата.** Before writing «мы сделали то-то» the owner's text is
    checked against what was actually said in the CLI conversations. Said
    already — not repeated.
@@ -41,8 +41,9 @@ owner of the four rules that came out of that complaint:
    see `repeated_question`. Every question is compared, long or short; what
    sameness is measured in changes with the length, and `same_question` says
    both units, both numbers and what neither of them can catch. Nothing is lost
-   by that: the question the user has not answered is still in their mailbox and
-   on the board, and the gateway journal keeps the refusal with its number.
+   by that: the question the user has not answered is still in their mailbox, in
+   the push `thread_tick.notify` sent with it and on the board, and the gateway
+   journal keeps the refusal with its number.
 
 The mirror of sent mail deliberately keeps no body (`gmail_client.
 record_sent_message`), so «то же самое по содержанию» cannot be answered from

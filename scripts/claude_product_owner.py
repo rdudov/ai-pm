@@ -62,10 +62,10 @@ STARTUP_PROMPT = (
     "Не превращай сводку в технический лог и не проси подтверждения для безопасных read-only проверок "
     "в доступных каталогах. "
     # Пользователь 23 августа 2026 просил исправить язык «отчётов и ответов», а
-    # не одних писем. Письмо получает те же правила из `plain_russian` через
-    # `thread_tick.verdict_block()`; консольный ответ читает их здесь, потому
-    # что мимо этого промпта он не проходит.
-    + plain_russian.console_rules()
+    # не одних писем. Интерактивная консоль системного приказа не получает —
+    # `claude_command` добавляет его только фоновому `--entry print`, — поэтому
+    # правила стоят прямо здесь.
+    + plain_russian.as_paragraph()
 )
 
 
@@ -510,6 +510,12 @@ def claude_command(model: str, entry: str | None, extra: list[str]) -> list[str]
     if entry == "print":
         return [
             CLAUDE_BIN, "--model", model, "--print", "--name", "product-owner-background",
+            # Единственное место, через которое проходит каждый фоновый ход
+            # продакта: письмо треда, утренняя оперативка, непрерывная сессия по
+            # цели, ответ на входящее письмо и ответ на просьбу из разговора. Два
+            # последних промпта собирает почтовая дверь соседнего репозитория, и
+            # правил языка в них нет; здесь они есть у всех сразу.
+            "--append-system-prompt", plain_russian.as_paragraph(),
             *workspace_access(), "--dangerously-skip-permissions",
             "--setting-sources", "project", *extra,
         ]
@@ -626,9 +632,14 @@ def main(argv: list[str] | None = None) -> int:
         print(notice, file=sys.stderr)
         os.execvpe(CODEX_BIN, command, os.environ)
         return 127
+    # Те же правила языка, что Claude получает флагом `--append-system-prompt`.
+    # У `codex exec` такого флага нет, а промпт он читает со stdin, поэтому
+    # правила встают перед ним. Перед, а не после: контракт письма требует
+    # `ПОВОД` первой строкой, и приказ, стоящий последним, ставит перед ним
+    # свой абзац.
     completed = subprocess.run(
-        command, input=sys.stdin.read(), text=True, capture_output=True,
-        cwd=HOME, env=os.environ, check=False,
+        command, input=f"{plain_russian.as_paragraph()}\n\n{sys.stdin.read()}",
+        text=True, capture_output=True, cwd=HOME, env=os.environ, check=False,
     )
     if completed.stderr:
         print(completed.stderr, file=sys.stderr, end="")

@@ -380,7 +380,7 @@ def standing(current: dict) -> list[dict]:
 
 
 def post_check(thread: str, standing_goals: list[dict], after_live: list[int],
-               reply: str, moment: datetime) -> dict | None:
+               reply: str, moment: datetime, announce: bool = True) -> dict | None:
     """Исход пробуждения по стоячей цели, проверенный наблюдением.
 
     Ревью 1127 (F-002) назвало ровно эту дыру: цель стоит, продакт разбужен,
@@ -390,11 +390,10 @@ def post_check(thread: str, standing_goals: list[dict], after_live: list[int],
 
     Два допустимых исхода, и оба наблюдаемы после хода: по задаче цели пошёл
     живой прогон — или в ответе назван конкретный блокер обычными словами.
-    Молчание третьим исходом не является: оно записывается как отказ, остаётся в
-    снимке направления, который читает табло, и делает выход тика ненулевым.
-    В Telegram отказ не уходит — пользователь 23 августа 2026 попросил не слать
-    туда отчёты продакта: «Отбивки от dev-pipeline пусть приходят, но отчёты —
-    нет».
+    Молчание третьим исходом не является: оно записывается как отказ, уходит
+    пушем, остаётся в снимке направления, который читает табло, и делает выход
+    тика ненулевым. Пуш здесь остался: 23 августа 2026 пользователь попросил не
+    слать в Telegram отчёты по задачам, а сообщение контроля цели он не называл.
     """
     if not standing_goals:
         return None
@@ -421,6 +420,8 @@ def post_check(thread: str, standing_goals: list[dict], after_live: list[int],
                 for goal in unresolved)
             + "\n\nЭто отказ механизма, а не решение продакта: обязательный исход "
               "пробуждения по стоячей цели не наблюдается.")
+    if announce:
+        thread_tick.notify(told)
     return {
         "at": moment.isoformat(),
         "resolved": False,
@@ -758,12 +759,9 @@ def loop(thread: str, once: bool = False) -> int:
                 seen = after
                 reply = (turn.get("reply") or "").strip()
                 if reply and reply != "SILENT":
-                    # Одна дверь и один канал: текст продакта уходит письмом, а
-                    # в Telegram — не уходит. См. `thread_tick.notify`.
-                    thread_tick.deliver(thread, "verdict",
-                                        f"Продакт: {current['report']['title']}",
-                                        reply, current["report"],
-                                        datetime.now(timezone.utc))
+                    thread_tick.announce(
+                        thread, current["report"]["title"], reply,
+                        current["report"], datetime.now(timezone.utc))
             else:
                 # Ход не состоялся. Разговор от этого не теряется — он на диске у
                 # CLI, — но продолжать вслепую нельзя: ротация записывается и
