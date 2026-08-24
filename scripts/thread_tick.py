@@ -1020,6 +1020,14 @@ def verdict_block() -> str:
     «Коротко» is not deleted, it is put where it belongs: nothing to say is still
     `SILENT`, and a letter still says only what moved. What it may no longer do
     is leave the reader guessing what it is about.
+
+    What stays here is the letter: its heading, its service lines, its question
+    and its repeat. Every rule about the language itself — grammar, word order
+    and «ни одного внутреннего термина без расшифровки» — moved to
+    `plain_russian` on 2026-08-24, because a language rule kept in the contract
+    of one letter reaches one letter. The mail reply that a review read on that
+    day said `lifecycle`, `drop` and `idle` to a person, and this block was the
+    only place that forbade it.
     """
     return f"""Правила ответа пользователю:
 - если сказать пользователю нечего, ответь ровно словом `SILENT`. Всё остальное,
@@ -1037,11 +1045,6 @@ def verdict_block() -> str:
   напиши: «От вас ничего не требуется». Служебная строка `ВОПРОС: нет` человеку
   этого не говорит: он читает её как часть письма, а не как ответ на свой
   вопрос «что от меня хотят»;
-- ни одного внутреннего термина без расшифровки при первом употреблении. Слова
-  вроде кандидат, вердикт, ревью, lifecycle, controller, receipt, GAP человеку
-  ничего не говорят: скажи обычными словами, что это, и только потом, если
-  нужно, назови термин. Причинно-следственную связь разворачивай предложением с
-  подлежащим и сказуемым, а не сжатой метафорой;
 {plain_russian.as_bullet()};
 - вопрос пользователю несёт сверх этого: исходная потребность пользователя,
   что именно проверено и ключевые наблюдения,

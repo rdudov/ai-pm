@@ -73,6 +73,21 @@ class ProductOwnerModelRouterTests(unittest.TestCase):
             with self.subTest(path=name):
                 self.assertIn(rules, " ".join(text.split()))
 
+    def test_the_shared_rules_own_the_term_and_the_cause(self):
+        """Правило о термине и о причине живёт здесь, а не в контракте письма.
+
+        24 августа 2026 проверка прочла настоящий ответ продакта на письмо
+        пользователя и нашла в нём `lifecycle`, `drop` и `idle` без перевода.
+        Правило «ни одного внутреннего термина без расшифровки» тогда стояло
+        только в `thread_tick.verdict_block()`, а ответ на письмо собирает
+        почтовая дверь соседнего репозитория и до этого блока не доходит.
+        Тест держит владельца: вернуть эти два правила в один промпт — значит
+        снова оставить без них все остальные пути к человеку.
+        """
+        rules = " ".join(plain_russian.RULES.split())
+        self.assertIn("внутреннего термина без расшифровки при первом употреблении", rules)
+        self.assertIn("причинно-следственную связь разворачивай предложением", rules)
+
     def test_the_background_entry_carries_the_rules_for_prompts_built_elsewhere(self):
         """Ответ на письмо и ответ на просьбу из разговора промпта здесь не имеют.
 
