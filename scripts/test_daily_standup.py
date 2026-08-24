@@ -49,6 +49,38 @@ class DailyStandupRendering(unittest.TestCase):
         self.assertNotIn("мешает: нет", plain)
         self.assertNotIn('data-label="Что мешает">нет', html)
 
+    def test_a_finished_phrase_does_not_get_a_second_punctuation_mark(self):
+        """Ровно те поля, из которых 24 августа собралась оперативка пользователя.
+
+        Модель пишет их законченными предложениями и ставит знак сама, а рендер
+        добавлял свой поверх: пользователь получил «проверки API.; мешает» и
+        «Первый шаг: … ..». Наблюдение — `live-evidence/round8-standup`
+        задачи 1260.
+        """
+        composed = {
+            "intro": "Сегодня форсируем готовность торгового приложения.",
+            "plans": [{"product": "MOEX",
+                       "today": "Повторим проверку приложения с настоящим Finam API.",
+                       "state": "Первая торговля ждёт проверки API.",
+                       "blocker": "Finam дважды вернул ошибку 503"},
+                      {"product": "Companion",
+                       "today": "Не меняем продукт",
+                       "state": "Направление стоит на пользовательской паузе.",
+                       "blocker": "нет"}],
+            "questions": [],
+            "initiatives": [{"idea": "Собрать карточку допуска первой сделки.",
+                             "effect": "Пользователь увидит риск одним экраном.",
+                             "first_step": "Свести результаты проверки API."}],
+        }
+        plain = daily.render_plain(composed)
+        for doubled in ("..", ".;", ",;", ".,", "?.", "!."):
+            with self.subTest(doubled=doubled):
+                self.assertNotIn(doubled, plain)
+        # Знак не пропал там, где модель его не поставила.
+        self.assertIn("Не меняем продукт — Направление стоит на пользовательской паузе.",
+                      plain)
+        self.assertIn("мешает: Finam дважды вернул ошибку 503.", plain)
+
     def test_mobile_scale_is_explicit_and_headings_are_bounded(self):
         html = daily.render_html(SAMPLE)
         self.assertIn('name=viewport content="width=device-width, initial-scale=1"', html)

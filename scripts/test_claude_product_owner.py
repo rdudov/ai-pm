@@ -58,9 +58,8 @@ class ProductOwnerModelRouterTests(unittest.TestCase):
         # 2026-08-23: «мне реально сложно читать, что ты пишешь… я трачу больше
         # времени и быстрее устаю, читая твои отчёты и ответы». Пользователь
         # назвал отчёты и ответы, а правила языка до этого стояли только в
-        # контракте письма. Текст к пользователю уходит тремя путями, и тест
-        # проверяет совпадение одного текста в трёх, а не похожие слова в трёх
-        # местах.
+        # контракте письма. Тест проверяет совпадение одного текста везде, а не
+        # похожие слова в разных местах.
         import daily_standup
         import thread_tick
 
@@ -73,6 +72,47 @@ class ProductOwnerModelRouterTests(unittest.TestCase):
         ):
             with self.subTest(path=name):
                 self.assertIn(rules, " ".join(text.split()))
+
+    def test_the_background_entry_carries_the_rules_for_prompts_built_elsewhere(self):
+        """Ответ на письмо и ответ на просьбу из разговора промпта здесь не имеют.
+
+        Их собирает почтовая дверь соседнего репозитория (`agent_prompt` и
+        `wake_prompt` в `mail_product_owner.py`), а запускает она
+        `claude_product_owner.py --entry print`. Перечислять такие пути по именам
+        значит через круг пропустить следующий, поэтому правила висят на самом
+        входе, а не на списке промптов.
+        """
+        rules = " ".join(plain_russian.RULES.split())
+        command = claude_command("opus", "print", [])
+        self.assertIn("--append-system-prompt", command)
+        appended = command[command.index("--append-system-prompt") + 1]
+        self.assertIn(rules, " ".join(appended.split()))
+        # Интерактивная консоль системного приказа не получает: её правила стоят
+        # в `STARTUP_PROMPT`, и он же не должен уехать вторым экземпляром.
+        self.assertNotIn("--append-system-prompt", claude_command("opus", "interactive", []))
+
+    def test_the_codex_route_gets_the_same_rules_before_the_prompt(self):
+        # У `codex exec` нет `--append-system-prompt`, промпт он читает со stdin.
+        # Правила встают перед ним: контракт письма требует `ПОВОД` первой
+        # строкой, и приказ, поставленный последним, вписал бы перед ним абзац.
+        rules = " ".join(plain_russian.RULES.split())
+        completed = mock.Mock(returncode=0, stdout="ПОВОД: польза\n", stderr="")
+        with mock.patch.object(router.subprocess, "run", return_value=completed) as run, \
+                mock.patch.object(router.sys, "stdin", StringIO("сам промпт")), \
+                mock.patch.object(router, "inspect_observation",
+                                  return_value=self.observation_forcing_codex()), \
+                redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+            router.main(["--entry", "print", "--force-codex"])
+        sent = run.call_args.kwargs["input"]
+        self.assertIn(rules, " ".join(sent.split()))
+        self.assertTrue(sent.strip().endswith("сам промпт"))
+
+    def observation_forcing_codex(self):
+        return router.UsageObservation(
+            route=Route("codex", CODEX_MODEL, "explicit_codex_pm_command"),
+            usage=None, codex_budget=observed_codex(81), codex_error=None,
+            attempted_at="2026-08-24T00:00:00+00:00", observed_at=None,
+            authorization_recovery="not_attempted", error=None)
 
     def test_switches_only_below_five_percent_remaining(self):
         self.assertEqual(select_model({"seven_day_opus": {"utilization": 95}})[0], "opus")

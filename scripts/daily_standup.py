@@ -114,13 +114,33 @@ def compose(packet: dict, local_date: str) -> dict:
     return parse_composition(result.stdout or "")
 
 
+# Модель пишет поля оперативки законченными предложениями и ставит знак сама.
+# Рендер добавлял свой знак поверх, и 24 августа 2026 пользователь получил
+# «нужны.; мешает» и «Первый шаг: … ..». Оба helper'а ниже читают то, что уже
+# написано, а не переписывают текст.
+SENTENCE_END = (".", "!", "?", "…", ":")
+
+
+def ends_sentence(text: str) -> str:
+    """Фраза с одним конечным знаком: своим, если он есть, иначе точкой."""
+    text = text.strip()
+    return text if not text or text.endswith(SENTENCE_END) else text + "."
+
+
+def opens_clause(text: str) -> str:
+    """Та же фраза перед нашей точкой с запятой, без её собственной точки."""
+    return text.strip().rstrip(".;,")
+
+
 def render_plain(data: dict) -> str:
     parts = [data["intro"], "", "Планы на сегодня"]
     for row in data["plans"]:
-        line = f"- {row['product']}: {row['today']} — {row['state']}"
-        if row.get("blocker", "").strip().casefold() not in {"", "нет", "-", "—"}:
-            line += f"; мешает: {row['blocker']}"
-        parts.append(line)
+        blocker = row.get("blocker", "").strip()
+        tail = ("" if blocker.casefold() in {"", "нет", "-", "—"}
+                else f"; мешает: {ends_sentence(blocker)}")
+        state = opens_clause(row["state"]) if tail else ends_sentence(row["state"])
+        parts.append(
+            f"- {row['product']}: {opens_clause(row['today'])} — {state}{tail}")
     if data["questions"]:
         parts += ["", "Нужен ваш выбор"]
         for item in data["questions"]:
@@ -128,7 +148,9 @@ def render_plain(data: dict) -> str:
                       f"  Цена вариантов: {item['tradeoff']}"]
     parts += ["", "Что ещё стоит попробовать"]
     for item in data["initiatives"]:
-        parts.append(f"- {item['idea']}. Эффект: {item['effect']}. Первый шаг: {item['first_step']}.")
+        parts.append(f"- {ends_sentence(item['idea'])} "
+                     f"Эффект: {ends_sentence(item['effect'])} "
+                     f"Первый шаг: {ends_sentence(item['first_step'])}")
     return "\n".join(parts).strip()
 
 

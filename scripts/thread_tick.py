@@ -648,9 +648,9 @@ def deliver(thread: str, kind: str, subject: str, body: str,
 
     The gate is on this side only, and everything it turns away is still on the
     board and in the gateway journal. «Прогон стартовал», «прогон закончился»,
-    «репозиторий двинулся» were also pushed to the user's Telegram until
-    2026-08-23, when they asked for the product reports there to stop; the push
-    above now carries a broken contour and nothing else.
+    «репозиторий двинулся» are not letters; the verdict that mentions them is
+    also pushed to the user's Telegram by `notify`, and only the `idle` report
+    stopped being pushed on 2026-08-23 — see that function for the user's words.
 
     A failed proactive send is held, not recorded as sent: the ledger's whole
     worth is that it says what the user was told. A failed reply stays an
@@ -739,20 +739,41 @@ def deliver(thread: str, kind: str, subject: str, body: str,
                    "state/outbound-journal.jsonl — все решения шлюза подряд"}
 
 
+def announce(thread: str, title: str, message: str, report: dict,
+             moment: datetime, chat: dict | None = None) -> dict:
+    """Вердикт продакта: письмо через дверь и пуш ровно о том, что она сказала.
+
+    Каналов два, и каждое сказанное приходит по разу в каждом. Пуш стоит после
+    двери, а не до неё, потому что 23 августа 2026 пользователь попросил две
+    вещи сразу: не повторять один и тот же вопрос и не слать в Telegram отчёты
+    по задачам. Пуш до двери уносил бы в Telegram тот самый повторный вопрос,
+    который дверь только что отбросила, и первую просьбу ломал бы второй канал.
+
+    Отсюда же вердикт непрерывной сессии по цели: правило одно, и место у него
+    тоже одно.
+    """
+    letter = deliver(thread, "verdict", f"Продакт: {title}", message, report,
+                     moment, chat)
+    if letter["action"] == "send":
+        notify(f"[{title}]\n{message}")
+    return letter
+
+
 def notify(text: str) -> None:
-    """Сообщение о сбое контура в личный Telegram владельца установки.
+    """Сообщение продакта в личный Telegram владельца установки.
 
-    Только о сбое. Отчёт, вердикт, вопрос и сообщение контроля цели сюда не
-    попадают: 23 августа 2026 пользователь написал «Я не просил присылать отчёты
-    по задачам в телеграм, только в почту. Отбивки от dev-pipeline пусть
-    приходят, но отчёты — нет». До этого дня каждый продуктовый текст уходил и
-    письмом, и пушем — 111 сообщений за пятнадцать часов, при том что почтовая
-    дверь их считанные единицы и пропускала.
+    Один вид сообщений сюда больше не попадает — отчёт о простое (`idle`).
+    23 августа 2026 пользователь написал: «Я не просил присылать отчёты по
+    задачам в телеграм, только в почту. Отбивки от dev-pipeline пусть приходят,
+    но отчёты — нет». `idle` и есть отчёт по задачам: он перечисляет очередь
+    направления и наблюдённые причины, почему из неё ничего не запущено.
 
-    Что видит пользователь теперь: продуктовый текст — письмом по правилам
-    почтовой двери, а то, что дверь отбросила порогом или повтором, — на
-    табло и в журнале шлюза. Здесь остаются два случая, и оба означают, что
-    контур сломан и сам о себе рассказать не сможет: разошедшийся контракт с
+    Вердикт тика, вопрос внутри вердикта, вердикт непрерывной сессии и
+    сообщение контроля стоячей цели пуш сохраняют. Пользователь их не называл, и
+    независимая проверка круга 8 этой задачи отдельно записала, что убрать их
+    заодно с отчётом было решением автора, а не пользователя.
+
+    Сюда же идут два сообщения о сломанном контуре: разошедшийся контракт с
     task_runner и не отработавшее пробуждение. Отбивки dev-pipeline о фоновых
     прогонах приходят своим транспортом из системы задач, эта правка их не
     касается.
@@ -1315,13 +1336,19 @@ def main() -> int:
         args.thread, goals["objects"], (after or {}).get("live", []), message, moment)
 
     if message and message != "SILENT":
-        mail.append(deliver(args.thread, "verdict", f"Продакт: {report['title']}",
-                            message, report, moment, chat))
+        mail.append(announce(args.thread, report["title"], message, report,
+                             moment, chat))
     elif idle and not (after or {}).get("live"):
         # The owner was woken because the direction is standing still and said
         # nothing. Silence is what the user complained about in as many words —
         # «ни письма не было с вопросами/проблемами, ни информации на доске» — so
-        # the observed reason goes out on the same channel the verdict does.
+        # the observed reason goes out as a letter.
+        #
+        # И только как письмо. Это и есть «отчёт по задачам», который 23 августа
+        # 2026 пользователь попросил в Telegram не слать: вид `idle` ни о чём
+        # другом не пишет — он перечисляет очередь направления и наблюдённые
+        # причины простоя. Вердикт выше и сообщение контроля цели пуш сохраняют:
+        # их пользователь не называл.
         told = (f"[{report['title']}] простоя не сняли: живых прогонов нет, "
                 f"к запуску {startable(report)}.\n\nПочему, по наблюдению:\n"
                 + "\n".join(f"- {item['text']}" for item in reasons))
