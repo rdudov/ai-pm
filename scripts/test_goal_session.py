@@ -542,6 +542,16 @@ class OneConversation(unittest.TestCase):
         self.assertEqual(turn["composer_failure"]["raw_response"], raw)
         self.assertIn("не выбрал канал", turn["error"])
 
+    def test_a_silent_composer_reply_is_recorded_as_deliberate_silence(self):
+        session.MIN_TURN_GAP_SECONDS = 0
+        session.run_turn = lambda *args, **kwargs: {
+            "ok": True, "reply": "**SILENT**", "usage": None,
+            "duration_seconds": 1.0, "error": None}
+        self.assertEqual(session.loop("process", once=True), 0)
+        turn = session.read("process")["last_turn"]
+        self.assertTrue(turn["silent"])
+        self.assertNotIn("composer_failure", turn)
+
     def test_recovery_continues_the_same_conversation(self):
         """Новый разговор стоил бы ровно ту пересборку, ради отказа от которой режим и заведён."""
         session.MIN_TURN_GAP_SECONDS = 0
