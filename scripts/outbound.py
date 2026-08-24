@@ -160,9 +160,9 @@ SENTENCE = re.compile(r"[^.!?\n]+[.!?]?")
 NAMED = re.compile(r"[a-zA-Z][a-zA-Z0-9]{2,}|\b\d{3,4}\b")
 # Разметка, которой составитель иногда выделяет служебную строку: `**ПОВОД:
 # готово**`, `**ВОПРОС:** нет`, `## НОВОЕ: …`. Письмо пишет языковая модель, и
-# 23 августа 2026 два живых письма из двадцати девяти пришли с жирными маркерами
-# (`live-evidence/measure_markers.py` задачи 1260). Просьба в промпте писать
-# строку голой уже стоит и уже не выполняется, а от того, увидела дверь эти
+# 23 августа 2026 два живых письма из двадцати девяти пришли с жирными
+# маркерами. Просьба в промпте писать строку голой уже стоит и уже не
+# выполняется, а от того, увидела дверь эти
 # строки или нет, зависят три её решения: считать ли письмо вопросом, назван ли
 # новый факт и какой у письма повод. Поэтому разметка вокруг строки
 # пропускается здесь, а не остаётся ещё одной просьбой к модели.
@@ -297,9 +297,9 @@ def named_in(letter: dict) -> set[str]:
     Восстанавливаем из того, что записано. Пары слов у такой строки есть,
     `spoken_words` уже достаёт из них слова, а латинские имена и номера задач в
     словах остаются — `named_things` находит их там так же, как в тексте письма.
-    Замер на боевой строке 08:40 (`live-evidence/measure_recovered_names.py`
-    задачи 1260): пересчёт с полного текста письма даёт 18 названных, возврат из
-    пар — те же 18 плюс `gpt` и `sol` из служебной первой строки. Доля повтора
+    Замер на боевой строке 08:40: пересчёт с полного текста письма даёт 18
+    названных, возврат из пар — те же 18 плюс `gpt` и `sol` из служебной первой
+    строки. Доля повтора
     09:40 одинакова в обоих случаях, 71%; 35 неродственных живых писем того же
     дня дают от 0% до 19%, ни одного на пороге.
 
@@ -319,8 +319,7 @@ def same_question(candidate: dict, previous: dict) -> tuple[int, str]:
     The reason for measuring anything here is the pair of letters the user
     complained about on 2026-08-23: Gmail `message-id` at 08:40 UTC and
     `message-id` at 09:40 UTC asked the same choice about the same three
-    files in different words. Measured on those exact bytes (`live-evidence/` of
-    task 1260):
+    files in different words. Measured on those exact bytes:
 
         word pairs, as `same_matter` measures      18%   — reads as a new matter
         words                                      34%   — real controls 2-28%
@@ -418,9 +417,9 @@ def was_question(letter: dict) -> bool:
     Прежних признаков два, и хватает любого. Причина `QUESTION_REASON` — её
     пишет только ветка вопроса в `decide`. Обрезанный до 400 символов `excerpt`,
     прочитанный тем же `asks_user`, которым читается свежее письмо. Замер на
-    боевом реестре (`live-evidence/legacy-rows-signals.txt` задачи 1260): из 80
-    старых строк причина узнаёт 28, excerpt — 28, вместе 30. Расходятся они
-    четырежды, и оба раза по делу. Два письма-ответа спрашивали пользователя,
+    боевом реестре: из 80 старых строк причина узнаёт 28, excerpt — 28, вместе
+    30. Расходятся они четырежды, и оба раза по делу. Два письма-ответа
+    спрашивали пользователя,
     но ушли с причиной ответа, — их узнаёт excerpt. У двух вопросов сам вопрос
     оказался ниже обрезки в 400 символов, — их узнаёт причина. Сегодняшний
     `apply` записал бы `asks_user=true` всем четырём.
@@ -1007,9 +1006,9 @@ def kept_letters(letters: list[dict]) -> list[dict]:
     come twice and named the one thing that lets it come again — a new fact —
     without putting any expiry beside it.
 
-    Measured on the real pair before this changed (`live-evidence/horizon-before.txt`
-    of task 1260): with the 08:40 question still in the list the 09:40 repeat is
-    dropped at 71%, and with twenty letters in between it is sent, because the
+    Measured on the real pair before this changed: with the 08:40 question
+    still in the list the 09:40 repeat is dropped at 71%, and with twenty
+    letters in between it is sent, because the
     trim had removed the only copy of the question the measure compares against.
     The same journal says the process direction sent twenty letters in as little
     as 18.8 hours, so the question was forgotten inside a day.
