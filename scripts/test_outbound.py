@@ -1373,27 +1373,31 @@ class TheTickUsesTheGate(unittest.TestCase):
 
     def test_a_standing_goal_left_without_an_outcome_is_pushed(self):
         # Пользователь 23 августа 2026 назвал один класс: «Я не просил присылать
-        # отчёты по задачам в телеграм». Сообщение контроля цели он не называл, и
-        # независимая проверка круга 8 задачи 1260 записала, что убрать его
-        # заодно с отчётом было решением автора. Пуш здесь остался.
+        # отчёты по задачам в телеграм». Это сообщение рассказом о работе не
+        # является: оно говорит, что пробуждение по стоячей цели не дало ни
+        # живого прогона, ни названного блокера. Почтовой копии у него нет —
+        # `deliver()` из этой ветки не вызывается, — поэтому без пуша поломку не
+        # видно нигде.
         import goal_session
 
         goal = {"id": 1, "waiting_on": [861], "outcome": "о", "gap": "g"}
-        with mock.patch.object(tick, "send_bot_message") as send:
+        with mock.patch.object(tick, "send_bot_message") as send, \
+                mock.patch.object(tick, "deliver") as door:
             checked = goal_session.post_check("process", [goal], [], "SILENT", AT)
         send.assert_called_once()
+        door.assert_not_called()
         self.assertIn("ни живого прогона", send.call_args.args[0])
         self.assertFalse(checked["resolved"])
         self.assertIn("told", checked)
 
-    def test_the_only_product_text_taken_off_telegram_is_the_idle_report(self):
-        # Что осталось в пуше: вердикт направления (`announce`, отсюда же вопрос
-        # внутри него и вердикт непрерывной сессии), сообщение контроля цели и
-        # два сообщения о сломанном контуре — разошедшийся контракт с
-        # `task_runner` и не отработавшее пробуждение. Чего не осталось: отчёт о
-        # простое, вид `idle`, который перечисляет очередь направления. Отбивки
-        # dev-pipeline о фоновых прогонах живут в системе задач и этой проверки
-        # не касаются.
+    def test_only_four_places_may_push_at_all(self):
+        # Пуш остался у четырёх мест, и каждое названо: вердикт направления
+        # (`announce`, отсюда же вердикт непрерывной сессии) — но только когда
+        # письмо спрашивает пользователя, см. соседний тест; сообщение контроля
+        # стоячей цели и два сообщения о сломанном контуре — разошедшийся
+        # контракт с `task_runner` и не отработавшее пробуждение. Отчёт о простое
+        # (`idle`) не пушится ниоткуда. Отбивки dev-pipeline о фоновых прогонах
+        # живут в системе задач и этой проверки не касаются.
         import ast
 
         callers = []
@@ -1439,6 +1443,28 @@ class TheTickUsesTheGate(unittest.TestCase):
                 if pushed:
                     self.assertIn("Процессный контур", push.call_args.args[0])
                     self.assertIn("ВОПРОС: да", push.call_args.args[0])
+
+    def test_a_sent_verdict_reaches_telegram_only_when_it_asks_the_user(self):
+        # Граница взята из наблюдения, а не выбрана автором. До 23 августа пуш
+        # шёл до двери и срабатывал на каждый продуктовый текст, и в окне, на
+        # которое пожаловался пользователь, журнал двери содержит 104 решения
+        # вида `verdict` и ни одного вида `idle`. Отчётами он назвал вердикты
+        # тика. Вопрос отчётом не является и теряться не должен.
+        report = {"title": "Процессный контур"}
+        report_text = ("ПОВОД: польза\nВОПРОС: нет\n\n## Над чем работаем\n\n"
+                       "- 1260 — письма продакта.\n\n"
+                       "Что изменилось для вас: ничего.\n\n"
+                       "От вас ничего не требуется.")
+        question_text = ("ПОВОД: вопрос\nВОПРОС: да\n\n## Над чем работаем\n\n"
+                         "- 1260 — письма продакта.\n\n"
+                         "Что выбрать: первое или второе?")
+        for body, pushed in ((report_text, 0), (question_text, 1)):
+            with self.subTest(pushed=pushed):
+                with mock.patch.object(tick, "deliver",
+                                       return_value={"action": "send"}), \
+                        mock.patch.object(tick, "notify") as push:
+                    tick.announce("process", report["title"], body, report, AT)
+                self.assertEqual(push.call_count, pushed)
 
     def test_notification_profile_preflight_uses_server_owner(self):
         with mock.patch.object(
