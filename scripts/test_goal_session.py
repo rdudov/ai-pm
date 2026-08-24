@@ -376,14 +376,12 @@ class StandingGoalOutcome(unittest.TestCase):
     """F-002: молчание не является третьим исходом пробуждения по стоячей цели."""
 
     def setUp(self) -> None:
-        self.told: list[str] = []
         self.mail: list[tuple] = []
-        self.notify, tick.notify = tick.notify, self.told.append
         self.deliver, tick.deliver = tick.deliver, lambda *args, **kwargs: self.mail.append(args)
         self.addCleanup(self.restore)
 
     def restore(self) -> None:
-        tick.notify, tick.deliver = self.notify, self.deliver
+        tick.deliver = self.deliver
 
     def moment(self) -> datetime:
         return datetime.now(timezone.utc)
@@ -391,14 +389,12 @@ class StandingGoalOutcome(unittest.TestCase):
     def test_a_started_run_on_the_goals_task_is_the_outcome(self):
         checked = session.post_check("process", [goal()], [1094], "SILENT", self.moment())
         self.assertTrue(checked["resolved"])
-        self.assertEqual(self.told, [])
 
     def test_a_named_blocker_is_the_other_outcome(self):
         checked = session.post_check("process", [goal()], [],
                                      "ПОВОД: механика\nдерево занято прогоном 1127",
                                      self.moment())
         self.assertTrue(checked["resolved"])
-        self.assertEqual(self.told, [])
 
     def test_silence_beside_an_unrelated_live_run_is_refused_without_mail(self):
         """Ровно та дыра, которую назвало ревью: `idle` не срабатывает, цель стоит."""
@@ -420,7 +416,6 @@ class StandingGoalOutcome(unittest.TestCase):
 
     def test_a_direction_without_standing_goals_is_not_judged(self):
         self.assertIsNone(session.post_check("process", [], [], "SILENT", self.moment()))
-        self.assertEqual(self.told, [])
 
     def test_the_tick_fails_its_unit_on_an_unresolved_standing_goal(self):
         """Код возврата — единственный сигнал, переживающий проверку, которую никто не читал."""
@@ -460,7 +455,6 @@ class OneConversation(unittest.TestCase):
             "ok": True, "engine": "claude", "model": "opus",
             "reason": "test_observed_route", "error": None,
         }
-        self.notify, tick.notify = tick.notify, lambda text: None
         self.deliver, tick.deliver = tick.deliver, lambda *args, **kwargs: {"action": "hold"}
         self.addCleanup(self.restore_stubs)
 
@@ -473,14 +467,19 @@ class OneConversation(unittest.TestCase):
     def restore_stubs(self) -> None:
         session.run_turn, session.observation = self.turn, self.observe
         session.session_route = self.route
-        tick.notify, tick.deliver = self.notify, self.deliver
+        tick.deliver = self.deliver
 
     def fake_observation(self, thread: str) -> dict:
         return self.observations[min(len(self.prompts), len(self.observations) - 1)]
 
     def fake_turn(self, model: str, session_id: str, prompt: str, opening: bool) -> dict:
         self.prompts.append({"id": session_id, "opening": opening, "prompt": prompt})
-        return {"ok": True, "reply": "работаю по задаче 1094", "session_id": session_id,
+        reply = json.dumps({"channel": "gmail", "kind": "report",
+                            "event_id": "report:task-1094:work-continues",
+                            "subject": "Работа продолжается",
+                            "body": "Работаю по задаче 1094", "attachments": []},
+                           ensure_ascii=False)
+        return {"ok": True, "reply": reply, "session_id": session_id,
                 "duration_seconds": 1.0, "cost_usd": 0.0, "error": None,
                 "usage": {"input_tokens": 1, "cache_creation_input_tokens": 2,
                           "cache_read_input_tokens": 30_000, "output_tokens": 4}}
@@ -505,12 +504,8 @@ class OneConversation(unittest.TestCase):
                 self.assertIn(required, delta)
                 self.assertIn(required, opening)
         self.assertNotIn("верни короткий текст", delta.lower())
-        # С 2026-08-23 контракт письма один для всех писем: команда «обычный
-        # вердикт остаётся коротким» была вторым, встречным приказом и ушла —
-        # см. `thread_tick.verdict_block`. Молчание осталось ровно там же.
-        self.assertNotIn("обычный вердикт остаётся коротким", delta)
-        self.assertIn("любое письмо самодостаточно", delta)
-        self.assertIn("ровно словом `SILENT`", delta)
+        self.assertIn("обычный отчёт остаётся коротким", delta)
+        self.assertIn("верни ровно `SILENT`", delta)
         self.assertIn("Не выдумывай", delta)
         self.assertIn("примеры из общих правил не являются текущим состоянием", delta)
         self.assertIn("не синтезируй сочетание вариантов", delta)
@@ -533,6 +528,19 @@ class OneConversation(unittest.TestCase):
         record = session.read("process")
         self.assertIn("окно исчерпано", record["stopped"]["reason"])
         self.assertEqual(record["stopped"]["rotation"], "требуется новая сессия")
+
+    def test_a_malformed_composed_reply_remains_visible_when_the_session_rotates(self):
+        session.MIN_TURN_GAP_SECONDS = 0
+        raw = "Готовое письмо без типизированного конверта"
+        session.run_turn = lambda *args, **kwargs: {
+            "ok": True, "reply": raw, "usage": None, "duration_seconds": 1.0,
+            "error": None}
+        self.assertEqual(session.loop("process", once=True), 1)
+        turn = session.read("process")["last_turn"]
+        self.assertEqual(turn["reply_excerpt"], raw)
+        self.assertFalse(turn["silent"])
+        self.assertEqual(turn["composer_failure"]["raw_response"], raw)
+        self.assertIn("не выбрал канал", turn["error"])
 
     def test_recovery_continues_the_same_conversation(self):
         """Новый разговор стоил бы ровно ту пересборку, ради отказа от которой режим и заведён."""
@@ -579,7 +587,12 @@ class OneConversation(unittest.TestCase):
         def measured_turn(model: str, session_id: str, prompt: str, opening: bool) -> dict:
             self.prompts.append({"id": session_id, "opening": opening, "prompt": prompt})
             cache_read = 30_000 if opening else 4_044_193
-            return {"ok": True, "reply": "продолжаю задачу 1094",
+            reply = json.dumps({"channel": "gmail", "kind": "report",
+                                "event_id": "report:task-1094:work-continues",
+                                "subject": "Работа продолжается",
+                                "body": "Продолжаю задачу 1094", "attachments": []},
+                               ensure_ascii=False)
+            return {"ok": True, "reply": reply,
                     "session_id": session_id, "duration_seconds": 1.0,
                     "cost_usd": 0.0, "error": None,
                     "usage": {"input_tokens": 1, "cache_creation_input_tokens": 2,

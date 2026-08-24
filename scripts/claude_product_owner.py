@@ -634,24 +634,24 @@ def main(argv: list[str] | None = None) -> int:
         return 127
     # Те же правила языка, что Claude получает флагом `--append-system-prompt`.
     # У `codex exec` такого флага нет, а промпт он читает со stdin, поэтому
-    # правила встают перед ним. Перед, а не после: контракт письма требует
-    # `ПОВОД` первой строкой, и приказ, стоящий последним, ставит перед ним
-    # свой абзац.
+    # правила встают перед ним. Перед, а не после: контракт составителя требует
+    # сначала выбрать типизированный результат, а последующий приказ мог бы
+    # заставить модель дописать к уже готовому конверту свой абзац.
     completed = subprocess.run(
         command, input=f"{plain_russian.as_paragraph()}\n\n{sys.stdin.read()}",
-        text=True, capture_output=True, cwd=HOME, env=os.environ, check=False,
+        text=True, capture_output=True,
+        cwd=HOME, env=os.environ, check=False,
     )
     if completed.stderr:
         print(completed.stderr, file=sys.stderr, end="")
     # Which engine answered is a diagnostic, and on this path stdout is not a
-    # console — it is the letter. Until 2026-08-23 this line was printed there,
-    # so every Codex-routed letter opened with «Продакт: у Codex больше
-    # наблюдаемый остаток недельного окна…», and a wake-up that answered exactly
-    # `SILENT` became a two-line letter that was no longer `SILENT`: the user was
-    # mailed the word itself at 11:35 UTC that day (Gmail `1a02e69d25468fe1`).
-    # The interactive branch above already treats this line as a diagnostic; here
-    # it is given the shape `thread_tick.route_diagnostics` keeps, so the route
-    # stays visible in the unit's own journal instead of in the mail.
+    # console — it is the composer's typed result. Until 2026-08-23 this line
+    # was printed there, so a wake-up that answered exactly `SILENT` became a
+    # two-line letter that was no longer `SILENT`: the user was mailed the word
+    # itself at 11:35 UTC that day (Gmail `1a02e69d25468fe1`). The interactive
+    # branch above already treats this line as a diagnostic; here it is given
+    # the shape `thread_tick.route_diagnostics` keeps, so the route stays visible
+    # in the unit's own journal instead of in the mail.
     print(f"product-owner: route selected; Codex ({route.reason}) — {notice}",
           file=sys.stderr)
     if completed.stdout:

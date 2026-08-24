@@ -9,6 +9,7 @@ from io import StringIO
 
 import claude_product_owner as router
 import plain_russian
+import thread_tick
 from claude_product_owner import (
     CODEX_MODEL,
     STARTUP_PROMPT,
@@ -346,6 +347,23 @@ class ProductOwnerModelRouterTests(unittest.TestCase):
         self.assertEqual(route, Route(
             "codex", CODEX_MODEL, "observed_shared_limit_exhausted:five_hour"
         ))
+
+    def test_background_codex_route_keeps_diagnostics_out_of_composer_stdout(self):
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout='SILENT\n', stderr='codex diagnostic\n')
+        stdout, stderr = StringIO(), StringIO()
+        with (mock.patch("claude_product_owner.fetch_usage", return_value={
+                  "five_hour": {"utilization": 100, "resets_at": "later"},
+              }),
+              mock.patch("claude_product_owner.subprocess.run", return_value=completed),
+              mock.patch("claude_product_owner.sys.stdin", StringIO("prompt")),
+              redirect_stdout(stdout), redirect_stderr(stderr)):
+            self.assertEqual(router.main(["--entry", "print"]), 0)
+        self.assertEqual(stdout.getvalue(), "SILENT\n")
+        self.assertIsNone(thread_tick.parse_composed_message(stdout.getvalue()))
+        self.assertIn("product-owner: route selected; Codex", stderr.getvalue())
+        self.assertIn("Codex GPT-5.6 Sol", stderr.getvalue())
+        self.assertIn("codex diagnostic", stderr.getvalue())
 
     def test_only_observed_exhaustion_of_both_scoped_models_selects_codex(self):
         usage = {"limits": [
