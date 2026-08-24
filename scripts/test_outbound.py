@@ -25,6 +25,7 @@ from pathlib import Path
 from unittest import mock
 
 import outbound
+import plain_russian
 import process_map_state as pms
 import product_memory
 import thread_state
@@ -1033,9 +1034,15 @@ class AChoiceRequestIsAQuestion(unittest.TestCase):
         self.assertIn("любое письмо самодостаточно", text)
         self.assertIn("Над чем работаем", text)
         self.assertIn("номер задачи", text)
-        self.assertIn("ни одного внутреннего термина без расшифровки", text)
-        self.assertIn("разворачивай предложением", text)
         self.assertIn("ровно словом `SILENT`", text)
+        # Два правила о самом языке письмо получает от общего владельца
+        # `plain_russian`, а не собственной копией: 24 августа они уехали туда,
+        # чтобы дойти и до ответа на письмо, и до ответа из разговора. Перенос
+        # ставит их в маркированный пункт, поэтому сравнивать надо без переносов.
+        flat = " ".join(text.split())
+        self.assertIn("внутреннего термина без расшифровки при первом употреблении", flat)
+        self.assertIn("причинно-следственную связь разворачивай предложением", flat)
+        self.assertIn(" ".join(plain_russian.RULES.split()), flat)
 
     def test_the_answer_is_either_silence_or_the_letter_itself(self):
         # 2026-08-24, наблюдение на сохранённом событии 09:40: составитель
