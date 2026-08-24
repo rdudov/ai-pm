@@ -1049,6 +1049,16 @@ class AChoiceRequestIsAQuestion(unittest.TestCase):
         self.assertIn("Не рассуждай", text)
         self.assertIn("ровно словом `SILENT`", text)
 
+    def test_a_letter_says_in_plain_words_what_it_wants_from_the_reader(self):
+        # 2026-08-24: читателю дали только текст письма 22:36 и спросили, что от
+        # него хотят. Он четыре раза подряд ответил «нельзя ответить из письма».
+        # Письмо и правда ничего не просило, но сказало об этом одной служебной
+        # строкой `ВОПРОС: нет`, которую человек читает как часть письма.
+        text = tick.verdict_block()
+        self.assertIn("что нужно от пользователя", text)
+        self.assertIn("«От вас ничего не требуется»", text)
+        self.assertIn("`ВОПРОС: нет` человеку", text)
+
     def test_the_contract_asks_for_plain_engineering_russian(self):
         # 2026-08-23, четвёртое подряд замечание о языке: «мне реально сложно
         # читать, что ты пишешь… я трачу больше времени и быстрее устаю».
