@@ -20,6 +20,7 @@ import urllib.request
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import codex_budget  # noqa: E402
+import plain_russian  # noqa: E402
 import product_memory  # noqa: E402
 
 
@@ -59,7 +60,12 @@ STARTUP_PROMPT = (
     "ли ничего не делать, убрать или отключить лишнее, настроить или переиспользовать "
     "существующее, упростить, и только затем заказывать минимально необходимый код. "
     "Не превращай сводку в технический лог и не проси подтверждения для безопасных read-only проверок "
-    "в доступных каталогах."
+    "в доступных каталогах. "
+    # Пользователь 23 августа 2026 просил исправить язык «отчётов и ответов», а
+    # не одних писем. Интерактивная консоль системного приказа не получает —
+    # `claude_command` добавляет его только фоновому `--entry print`, — поэтому
+    # правила стоят прямо здесь.
+    + plain_russian.as_paragraph()
 )
 
 
@@ -504,6 +510,12 @@ def claude_command(model: str, entry: str | None, extra: list[str]) -> list[str]
     if entry == "print":
         return [
             CLAUDE_BIN, "--model", model, "--print", "--name", "product-owner-background",
+            # Единственное место, через которое проходит каждый фоновый ход
+            # продакта: письмо треда, утренняя оперативка, непрерывная сессия по
+            # цели, ответ на входящее письмо и ответ на просьбу из разговора. Два
+            # последних промпта собирает почтовая дверь соседнего репозитория, и
+            # правил языка в них нет; здесь они есть у всех сразу.
+            "--append-system-prompt", plain_russian.as_paragraph(),
             *workspace_access(), "--dangerously-skip-permissions",
             "--setting-sources", "project", *extra,
         ]
@@ -620,13 +632,28 @@ def main(argv: list[str] | None = None) -> int:
         print(notice, file=sys.stderr)
         os.execvpe(CODEX_BIN, command, os.environ)
         return 127
+    # Те же правила языка, что Claude получает флагом `--append-system-prompt`.
+    # У `codex exec` такого флага нет, а промпт он читает со stdin, поэтому
+    # правила встают перед ним. Перед, а не после: контракт составителя требует
+    # сначала выбрать типизированный результат, а последующий приказ мог бы
+    # заставить модель дописать к уже готовому конверту свой абзац.
     completed = subprocess.run(
-        command, input=sys.stdin.read(), text=True, capture_output=True,
+        command, input=f"{plain_russian.as_paragraph()}\n\n{sys.stdin.read()}",
+        text=True, capture_output=True,
         cwd=HOME, env=os.environ, check=False,
     )
     if completed.stderr:
         print(completed.stderr, file=sys.stderr, end="")
-    print(notice)
+    # Which engine answered is a diagnostic, and on this path stdout is not a
+    # console — it is the composer's typed result. Until 2026-08-23 this line
+    # was printed there, so a wake-up that answered exactly `SILENT` became a
+    # two-line letter that was no longer `SILENT`: the user was mailed the word
+    # itself at 11:35 UTC that day (Gmail `1a02e69d25468fe1`). The interactive
+    # branch above already treats this line as a diagnostic; here it is given
+    # the shape `thread_tick.route_diagnostics` keeps, so the route stays visible
+    # in the unit's own journal instead of in the mail.
+    print(f"product-owner: route selected; Codex ({route.reason}) — {notice}",
+          file=sys.stderr)
     if completed.stdout:
         print(completed.stdout, end="" if completed.stdout.endswith("\n") else "\n")
     return completed.returncode

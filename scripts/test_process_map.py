@@ -1696,17 +1696,15 @@ class RunnerContractIsWatched(unittest.TestCase):
         body = source[source.index("def main("):]
         self.assertLess(body.index("runner_contract_alarm("), body.index("build(args.thread)"))
 
-    def test_a_divergence_leaves_through_the_channels_a_verdict_leaves_through(self):
+    def test_a_divergence_leaves_through_the_product_gmail_channel(self):
         violation = [{"kind": "name", "text": "разошлось", "src": "источник"}]
         moment = datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)
         with mock.patch.object(tick.runner_contract, "check", return_value=violation), \
-                mock.patch.object(tick, "notify") as notified, \
                 mock.patch.object(tick, "send_mail") as mailed:
             found, reminder = tick.runner_contract_alarm("process", {}, moment, announce=True)
         self.assertEqual(found, violation)
-        self.assertEqual(notified.call_count, 1)
         self.assertEqual(mailed.call_count, 1)
-        self.assertIn("разошлось", notified.call_args[0][0])
+        self.assertIn("разошлось", mailed.call_args[0][1])
         self.assertEqual(reminder["at"], moment.isoformat())
 
     def test_the_same_divergence_is_not_repeated_every_twenty_minutes(self):
@@ -1718,10 +1716,8 @@ class RunnerContractIsWatched(unittest.TestCase):
             "at": (moment - timedelta(seconds=60)).isoformat(),
             "signature": json.dumps(["разошлось"])}}
         with mock.patch.object(tick.runner_contract, "check", return_value=violation), \
-                mock.patch.object(tick, "notify") as notified, \
                 mock.patch.object(tick, "send_mail") as mailed:
             tick.runner_contract_alarm("process", stored, moment, announce=True)
-        self.assertEqual(notified.call_count, 0)
         self.assertEqual(mailed.call_count, 0)
 
     def test_a_new_divergence_is_news_at_once(self):
@@ -1731,20 +1727,18 @@ class RunnerContractIsWatched(unittest.TestCase):
             "at": (moment - timedelta(seconds=60)).isoformat(),
             "signature": json.dumps(["разошлось"])}}
         with mock.patch.object(tick.runner_contract, "check", return_value=violation), \
-                mock.patch.object(tick, "notify") as notified, \
-                mock.patch.object(tick, "send_mail"):
+                mock.patch.object(tick, "send_mail") as mailed:
             tick.runner_contract_alarm("process", stored, moment, announce=True)
-        self.assertEqual(notified.call_count, 1)
+        self.assertEqual(mailed.call_count, 1)
 
     def test_a_healthy_contract_says_nothing_and_forgets_the_old_alarm(self):
         moment = datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)
         stored = {"runner_contract_reminder": {"at": moment.isoformat(), "signature": "x"}}
         with mock.patch.object(tick.runner_contract, "check", return_value=[]), \
-                mock.patch.object(tick, "notify") as notified, \
                 mock.patch.object(tick, "send_mail") as mailed:
             found, reminder = tick.runner_contract_alarm("process", stored, moment, announce=True)
         self.assertEqual((found, reminder), ([], None))
-        self.assertEqual((notified.call_count, mailed.call_count), (0, 0))
+        self.assertEqual(mailed.call_count, 0)
 
     def test_a_divergence_makes_the_unit_fail_even_if_the_tick_still_observed(self):
         # An exit code is the one signal that survives a wake-up nobody reads.
@@ -1752,7 +1746,7 @@ class RunnerContractIsWatched(unittest.TestCase):
         # simply stopped; a tick that manages to observe with a broken contract
         # must still not be recorded as a success.
         source = Path(tick.__file__).read_text()
-        self.assertIn("verdict = 1 if contract else 0", source)
+        self.assertIn("verdict = 1 if contract or daily_failure else 0", source)
         self.assertNotIn("\n    return 0\n", source[source.index("    verdict = 1"):])
 
     def test_the_direction_state_file_carries_the_result_of_the_check(self):
@@ -3997,28 +3991,7 @@ class TheWakeUpSeesTheQueueMove(unittest.TestCase):
         self.assertEqual(tick.idle_reasons(self.report(),
                                            {"yielded_to_awake_owner": None}), [])
         self.assertNotIn("простое", tick.prompt(self.report(), ["первый запуск треда"],
-                                                [], [], tick.outbound.no_chat()))
-
-    def test_a_woken_owner_that_says_nothing_does_not_end_the_tick_in_silence(self):
-        """Ни письма с вопросами и проблемами, ни строки на доске.
-
-        The verdict channel is the only one the user reads, and `SILENT` is a
-        legitimate answer for a wake-up with nothing to report — but not for one
-        woken *because* the direction is standing still. Then the observed
-        reasons go out on the same two channels the verdict does.
-
-        Since 861 the mail half of that goes through `outbound.decide` like every
-        other letter, so what is asserted here is that the branch still speaks on
-        both channels — the push unconditionally, the letter through the gate as
-        its own kind. How often such a letter may repeat belongs to
-        `test_outbound.StandingIdle`, not here.
-        """
-        source = Path(tick.__file__).read_text()
-        branch = source[source.index('elif idle and not (after or {}).get("live")'):]
-        self.assertIn("notify(told)", branch)
-        self.assertIn('deliver(', branch)
-        self.assertIn('"idle"', branch)
-        self.assertIn("for item in reasons", branch)
+                                                [], []))
 
     def test_the_outcome_is_the_difference_in_live_runs_and_not_the_owner_s_prose(self):
         report = self.report(pickup=[861])

@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 from io import StringIO
 
 import claude_product_owner as router
+import plain_russian
+import thread_tick
 from claude_product_owner import (
     CODEX_MODEL,
     STARTUP_PROMPT,
@@ -52,6 +54,81 @@ class ProductOwnerModelRouterTests(unittest.TestCase):
         self.assertIn("настроить или переиспользовать", STARTUP_PROMPT)
         self.assertIn("минимально необходимый код", STARTUP_PROMPT)
         self.assertIn("Не превращай сводку в технический лог", STARTUP_PROMPT)
+
+    def test_every_text_for_the_user_carries_the_same_language_rules(self):
+        # 2026-08-23: «мне реально сложно читать, что ты пишешь… я трачу больше
+        # времени и быстрее устаю, читая твои отчёты и ответы». Пользователь
+        # назвал отчёты и ответы, а правила языка до этого стояли только в
+        # контракте письма. Тест проверяет совпадение одного текста везде, а не
+        # похожие слова в разных местах.
+        import daily_standup
+        import thread_tick
+
+        rules = " ".join(plain_russian.RULES.split())
+        packet = {"plan": "", "snapshots": {}, "threads": {}, "recent_letters": []}
+        for name, text in (
+            ("консольный ответ", STARTUP_PROMPT),
+            ("письмо", thread_tick.verdict_block()),
+            ("утренняя оперативка", daily_standup.prompt(packet, "2026-08-24")),
+        ):
+            with self.subTest(path=name):
+                self.assertIn(rules, " ".join(text.split()))
+
+    def test_the_shared_rules_own_the_term_and_the_cause(self):
+        """Правило о термине и о причине живёт здесь, а не в контракте письма.
+
+        24 августа 2026 проверка прочла настоящий ответ продакта на письмо
+        пользователя и нашла в нём `lifecycle`, `drop` и `idle` без перевода.
+        Правило «ни одного внутреннего термина без расшифровки» тогда стояло
+        только в `thread_tick.verdict_block()`, а ответ на письмо собирает
+        почтовая дверь соседнего репозитория и до этого блока не доходит.
+        Тест держит владельца: вернуть эти два правила в один промпт — значит
+        снова оставить без них все остальные пути к человеку.
+        """
+        rules = " ".join(plain_russian.RULES.split())
+        self.assertIn("внутреннего термина без расшифровки при первом употреблении", rules)
+        self.assertIn("причинно-следственную связь разворачивай предложением", rules)
+
+    def test_the_background_entry_carries_the_rules_for_prompts_built_elsewhere(self):
+        """Ответ на письмо и ответ на просьбу из разговора промпта здесь не имеют.
+
+        Их собирает почтовая дверь соседнего репозитория (`agent_prompt` и
+        `wake_prompt` в `mail_product_owner.py`), а запускает она
+        `claude_product_owner.py --entry print`. Перечислять такие пути по именам
+        значит через круг пропустить следующий, поэтому правила висят на самом
+        входе, а не на списке промптов.
+        """
+        rules = " ".join(plain_russian.RULES.split())
+        command = claude_command("opus", "print", [])
+        self.assertIn("--append-system-prompt", command)
+        appended = command[command.index("--append-system-prompt") + 1]
+        self.assertIn(rules, " ".join(appended.split()))
+        # Интерактивная консоль системного приказа не получает: её правила стоят
+        # в `STARTUP_PROMPT`, и он же не должен уехать вторым экземпляром.
+        self.assertNotIn("--append-system-prompt", claude_command("opus", "interactive", []))
+
+    def test_the_codex_route_gets_the_same_rules_before_the_prompt(self):
+        # У `codex exec` нет `--append-system-prompt`, промпт он читает со stdin.
+        # Правила встают перед ним: контракт письма требует `ПОВОД` первой
+        # строкой, и приказ, поставленный последним, вписал бы перед ним абзац.
+        rules = " ".join(plain_russian.RULES.split())
+        completed = mock.Mock(returncode=0, stdout="ПОВОД: польза\n", stderr="")
+        with mock.patch.object(router.subprocess, "run", return_value=completed) as run, \
+                mock.patch.object(router.sys, "stdin", StringIO("сам промпт")), \
+                mock.patch.object(router, "inspect_observation",
+                                  return_value=self.observation_forcing_codex()), \
+                redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+            router.main(["--entry", "print", "--force-codex"])
+        sent = run.call_args.kwargs["input"]
+        self.assertIn(rules, " ".join(sent.split()))
+        self.assertTrue(sent.strip().endswith("сам промпт"))
+
+    def observation_forcing_codex(self):
+        return router.UsageObservation(
+            route=Route("codex", CODEX_MODEL, "explicit_codex_pm_command"),
+            usage=None, codex_budget=observed_codex(81), codex_error=None,
+            attempted_at="2026-08-24T00:00:00+00:00", observed_at=None,
+            authorization_recovery="not_attempted", error=None)
 
     def test_switches_only_below_five_percent_remaining(self):
         self.assertEqual(select_model({"seven_day_opus": {"utilization": 95}})[0], "opus")
@@ -271,6 +348,23 @@ class ProductOwnerModelRouterTests(unittest.TestCase):
             "codex", CODEX_MODEL, "observed_shared_limit_exhausted:five_hour"
         ))
 
+    def test_background_codex_route_keeps_diagnostics_out_of_composer_stdout(self):
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout='SILENT\n', stderr='codex diagnostic\n')
+        stdout, stderr = StringIO(), StringIO()
+        with (mock.patch("claude_product_owner.fetch_usage", return_value={
+                  "five_hour": {"utilization": 100, "resets_at": "later"},
+              }),
+              mock.patch("claude_product_owner.subprocess.run", return_value=completed),
+              mock.patch("claude_product_owner.sys.stdin", StringIO("prompt")),
+              redirect_stdout(stdout), redirect_stderr(stderr)):
+            self.assertEqual(router.main(["--entry", "print"]), 0)
+        self.assertEqual(stdout.getvalue(), "SILENT\n")
+        self.assertIsNone(thread_tick.parse_composed_message(stdout.getvalue()))
+        self.assertIn("product-owner: route selected; Codex", stderr.getvalue())
+        self.assertIn("Codex GPT-5.6 Sol", stderr.getvalue())
+        self.assertIn("codex diagnostic", stderr.getvalue())
+
     def test_only_observed_exhaustion_of_both_scoped_models_selects_codex(self):
         usage = {"limits": [
             {"percent": 100, "scope": {"model": {"display_name": "Opus"}}},
@@ -370,6 +464,31 @@ class ProductOwnerModelRouterTests(unittest.TestCase):
               self.assertRaisesRegex(RuntimeError, "exec boundary")):
             router.main(["--entry", "interactive"])
         chdir.assert_called_once_with(router.HOME)
+
+    def test_the_codex_route_notice_is_a_diagnostic_and_not_part_of_the_letter(self):
+        """«Ровно `SILENT` остаётся молчанием» — 2026-08-23.
+
+        On the print path stdout is the letter. Until this day the router put its
+        Russian routing notice there, so every Codex-routed letter opened with
+        it, and a wake-up that answered exactly `SILENT` produced a two-line
+        letter that `thread_tick` no longer recognized as silence: the word
+        itself was mailed to the user at 11:35 UTC as Gmail `1a02e69d25468fe1`.
+        """
+        out, err = StringIO(), StringIO()
+        answer = subprocess.CompletedProcess([], 0, stdout="SILENT\n", stderr="")
+        with (mock.patch("claude_product_owner.codex_budget.latest",
+                         return_value=observed_codex(81)),
+              mock.patch("claude_product_owner.fetch_usage", return_value={
+                  "seven_day": {"utilization": 82},
+              }),
+              mock.patch("claude_product_owner.sys.stdin") as stdin,
+              mock.patch("claude_product_owner.subprocess.run", return_value=answer),
+              redirect_stdout(out), redirect_stderr(err)):
+            stdin.read.return_value = "проснись"
+            router.main(["--entry", "print"])
+        self.assertEqual(out.getvalue().strip(), "SILENT")
+        self.assertIn("product-owner: route selected; Codex", err.getvalue())
+        self.assertIn("продолжаю через Codex", err.getvalue())
 
     def test_an_installation_that_names_no_directories_gets_no_flag(self):
         # A fresh clone works in its own checkout: an empty `--add-dir` would be

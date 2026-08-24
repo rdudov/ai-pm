@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import outbound  # noqa: E402
+import plain_russian  # noqa: E402
 import product_memory  # noqa: E402
 import thread_state  # noqa: E402
 
@@ -41,7 +42,7 @@ def source_packet(moment: datetime) -> dict:
     reports = {name: compact_report(thread_state.build(name)) for name in config}
     with outbound.Ledger() as ledger:
         recent = [letter for entry in ledger.data.get("threads", {}).values()
-                  for letter in outbound.already_said(entry, moment)]
+                  for letter in outbound.already_said(entry)]
     return {"plan": product_memory.plan_text(plan) if plan else "",
             "snapshots": snapshots, "threads": reports,
             "recent_letters": sorted(recent, key=lambda item: item["at"])[-12:]}
@@ -63,6 +64,7 @@ def prompt(packet: dict, local_date: str) -> str:
 - планы — по каждому направлению, где сегодня есть работа или наблюдаемое ожидание;
 - вопросы — только выбор, который действительно должен сделать пользователь; к каждому дай рекомендацию и цену вариантов;
 - инициативы — от 1 до 3 новых продуктовых поводов ради пользовательского эффекта, не технический долг;
+{plain_russian.as_bullet()};
 - не рассказывай внутреннюю машинерию, номера гейтов и раннеров;
 - не используй строки «ПОВОД» и «ВОПРОС»;
 - не выдумывай факты и не повторяй отложенный вопрос из другого предмета.
@@ -112,13 +114,33 @@ def compose(packet: dict, local_date: str) -> dict:
     return parse_composition(result.stdout or "")
 
 
+# Модель пишет поля оперативки законченными предложениями и ставит знак сама.
+# Рендер добавлял свой знак поверх, и 24 августа 2026 пользователь получил
+# «нужны.; мешает» и «Первый шаг: … ..». Оба helper'а ниже читают то, что уже
+# написано, а не переписывают текст.
+SENTENCE_END = (".", "!", "?", "…", ":")
+
+
+def ends_sentence(text: str) -> str:
+    """Фраза с одним конечным знаком: своим, если он есть, иначе точкой."""
+    text = text.strip()
+    return text if not text or text.endswith(SENTENCE_END) else text + "."
+
+
+def opens_clause(text: str) -> str:
+    """Та же фраза перед нашей точкой с запятой, без её собственной точки."""
+    return text.strip().rstrip(".;,")
+
+
 def render_plain(data: dict) -> str:
     parts = [data["intro"], "", "Планы на сегодня"]
     for row in data["plans"]:
-        line = f"- {row['product']}: {row['today']} — {row['state']}"
-        if row.get("blocker", "").strip().casefold() not in {"", "нет", "-", "—"}:
-            line += f"; мешает: {row['blocker']}"
-        parts.append(line)
+        blocker = row.get("blocker", "").strip()
+        tail = ("" if blocker.casefold() in {"", "нет", "-", "—"}
+                else f"; мешает: {ends_sentence(blocker)}")
+        state = opens_clause(row["state"]) if tail else ends_sentence(row["state"])
+        parts.append(
+            f"- {row['product']}: {opens_clause(row['today'])} — {state}{tail}")
     if data["questions"]:
         parts += ["", "Нужен ваш выбор"]
         for item in data["questions"]:
@@ -126,7 +148,9 @@ def render_plain(data: dict) -> str:
                       f"  Цена вариантов: {item['tradeoff']}"]
     parts += ["", "Что ещё стоит попробовать"]
     for item in data["initiatives"]:
-        parts.append(f"- {item['idea']}. Эффект: {item['effect']}. Первый шаг: {item['first_step']}.")
+        parts.append(f"- {ends_sentence(item['idea'])} "
+                     f"Эффект: {ends_sentence(item['effect'])} "
+                     f"Первый шаг: {ends_sentence(item['first_step'])}")
     return "\n".join(parts).strip()
 
 
@@ -211,8 +235,9 @@ def maybe_send(moment: datetime | None = None, force: bool = False,
     plain, html = render_plain(data), render_html(data)
     subject = f"Продуктовая оперативка — {local:%d.%m}"
     return thread_tick.deliver(
-        "portfolio", "daily", subject, plain, None, moment,
-        raw_message=raw_message(thread_tick.MAIL_TO, subject, plain, html))
+        "portfolio", "daily", subject, plain, moment,
+        raw_message=raw_message(thread_tick.MAIL_TO, subject, plain, html),
+        event_id=f"daily:{local.date().isoformat()}")
 
 
 def main() -> int:
