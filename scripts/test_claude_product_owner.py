@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from io import StringIO
 
 import claude_product_owner as router
+import plain_russian
 from claude_product_owner import (
     CODEX_MODEL,
     STARTUP_PROMPT,
@@ -52,6 +53,26 @@ class ProductOwnerModelRouterTests(unittest.TestCase):
         self.assertIn("настроить или переиспользовать", STARTUP_PROMPT)
         self.assertIn("минимально необходимый код", STARTUP_PROMPT)
         self.assertIn("Не превращай сводку в технический лог", STARTUP_PROMPT)
+
+    def test_every_text_for_the_user_carries_the_same_language_rules(self):
+        # 2026-08-23: «мне реально сложно читать, что ты пишешь… я трачу больше
+        # времени и быстрее устаю, читая твои отчёты и ответы». Пользователь
+        # назвал отчёты и ответы, а правила языка до этого стояли только в
+        # контракте письма. Текст к пользователю уходит тремя путями, и тест
+        # проверяет совпадение одного текста в трёх, а не похожие слова в трёх
+        # местах.
+        import daily_standup
+        import thread_tick
+
+        rules = " ".join(plain_russian.RULES.split())
+        packet = {"plan": "", "snapshots": {}, "threads": {}, "recent_letters": []}
+        for name, text in (
+            ("консольный ответ", STARTUP_PROMPT),
+            ("письмо", thread_tick.verdict_block()),
+            ("утренняя оперативка", daily_standup.prompt(packet, "2026-08-24")),
+        ):
+            with self.subTest(path=name):
+                self.assertIn(rules, " ".join(text.split()))
 
     def test_switches_only_below_five_percent_remaining(self):
         self.assertEqual(select_model({"seven_day_opus": {"utilization": 95}})[0], "opus")
