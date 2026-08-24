@@ -1037,6 +1037,18 @@ class AChoiceRequestIsAQuestion(unittest.TestCase):
         self.assertIn("разворачивай предложением", text)
         self.assertIn("ровно словом `SILENT`", text)
 
+    def test_the_answer_is_either_silence_or_the_letter_itself(self):
+        # 2026-08-24, наблюдение на сохранённом событии 09:40: составитель
+        # ответил `SILENT`, тут же передумал строкой «Нет — стоп. Блокер по цели
+        # 0016 назвать обязан, поэтому письмо, а не молчание:» и дальше написал
+        # правильное письмо. Дверь пропускает такой ответ, потому что он не
+        # равен ровно `SILENT`, и пользователь читает эти две служебные строки
+        # первыми. Молчание при этом остаётся ровно там же, где было.
+        text = tick.verdict_block()
+        self.assertIn("либо ровно `SILENT`, либо само письмо", text)
+        self.assertIn("Не рассуждай", text)
+        self.assertIn("ровно словом `SILENT`", text)
+
     def test_the_contract_asks_for_plain_engineering_russian(self):
         # 2026-08-23, четвёртое подряд замечание о языке: «мне реально сложно
         # читать, что ты пишешь… я трачу больше времени и быстрее устаю».
