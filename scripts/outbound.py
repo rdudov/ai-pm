@@ -18,9 +18,14 @@ owner of the four rules that came out of that complaint:
    is being asked to choose, the usefulness of a product changed, or work they
    ordered finished with a document for them. «Прогон стартовал», «прогон
    закончился», «репозиторий двинулся» are not letters — they stay on the board,
-   which is where `thread_tick` still puts them. The one thing 2026-08-23 took
-   off the user's Telegram is the `idle` report about a direction's task queue;
-   `thread_tick.notify` carries the user's words and the exact boundary.
+   which is where `thread_tick` still puts them. Sending is one question and
+   Telegram is another: what 2026-08-23 took off the user's Telegram is *the
+   account of work* — the tick verdict, the goal-session verdict and the `idle`
+   report alike. They keep going out as mail and standing on the board; the
+   push is left to the letter that asks the user something, and only after this
+   module has actually sent it. `thread_tick.announce` holds that one condition
+   on this module's own `asks_user`, and `thread_tick.notify` carries the
+   user's words and the exact boundary.
 2. **Знание чата.** Before writing «мы сделали то-то» the owner's text is
    checked against what was actually said in the CLI conversations. Said
    already — not repeated.
