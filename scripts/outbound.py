@@ -83,18 +83,22 @@ def kind_due(entry: dict, kind: str, now: datetime, seconds: int) -> bool:
     return previous is None or (now - previous).total_seconds() >= seconds
 
 
-def instruction_ready(task_dir: Path) -> bool:
-    """Whether the latest independent review approved and its child is gone."""
+def instruction_ready(task_dir: Path, instruction: Path) -> bool:
+    """Whether the exact current instruction predates its completed approval."""
     try:
         status = json.loads((task_dir / "status.json").read_text(encoding="utf-8"))
         rows = [json.loads(line) for line in
                 (task_dir / "reviews" / "rounds.jsonl").read_text(encoding="utf-8").splitlines()
                 if line.strip()]
-    except (OSError, json.JSONDecodeError, ValueError):
+        latest = rows[-1]
+        approved_at = datetime.fromisoformat(latest["recorded_at"])
+        modified_at = instruction.stat().st_mtime
+    except (IndexError, KeyError, OSError, json.JSONDecodeError, TypeError, ValueError):
         return False
     return (isinstance(status, dict) and status.get("state") != "running"
-            and bool(rows) and isinstance(rows[-1], dict)
-            and rows[-1].get("decision") == "approved")
+            and isinstance(latest, dict) and latest.get("decision") == "approved"
+            and approved_at.tzinfo is not None
+            and modified_at <= approved_at.timestamp())
 
 
 def external_instructions(thread: str) -> list[dict]:
@@ -108,8 +112,6 @@ def external_instructions(thread: str) -> list[dict]:
         return []
     for task in thread_tasks(config):
         task_dir = REPO / str(task.get("path") or "")
-        if not instruction_ready(task_dir):
-            continue
         returned = task_dir / "from-external-agent"
         try:
             has_result = any(path.is_file() and path.name != "README.md"
@@ -134,10 +136,15 @@ def external_instructions(thread: str) -> list[dict]:
             path = box / name
             if not path.is_file():
                 continue
+            if not instruction_ready(task_dir, path):
+                continue
+            digest = _file_sha256(path)
+            if not instruction_ready(task_dir, path):
+                continue
             found.append({"task": task.get("id"),
                           "goal": task.get("title") or f"задача {task.get('id')}",
                           "path": str(path.resolve()),
-                          "sha256": _file_sha256(path)})
+                          "sha256": digest})
         if found:
             return found
     return []

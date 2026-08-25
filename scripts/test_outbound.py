@@ -343,7 +343,8 @@ class ExternalInstruction(unittest.TestCase):
         reviews = task / "reviews"
         reviews.mkdir(exist_ok=True)
         (reviews / "rounds.jsonl").write_text(
-            json.dumps({"round": 1, "decision": decision}) + "\n",
+            json.dumps({"round": 1, "decision": decision,
+                        "recorded_at": datetime.now(timezone.utc).isoformat()}) + "\n",
             encoding="utf-8")
 
     def direction(self, home: str, *tasks: tuple[int, str]):
@@ -386,6 +387,31 @@ class ExternalInstruction(unittest.TestCase):
             self.readiness(home, 1286, "approved", "running")
             self.assertIsNone(self.letter(home, ((1286, "completed"),)))
 
+    def test_file_rewritten_after_approval_waits_for_the_next_approval(self):
+        with tempfile.TemporaryDirectory() as home:
+            path = self.a_deliverable(home, 1286, "instruction.md", "approved v1\n")
+            first = self.letter(home, ((1286, "completed"),))
+            path.write_text("unreviewed v2\n", encoding="utf-8")
+            self.assertIsNone(self.letter(home, ((1286, "blocked"),)))
+            self.readiness(home, 1286, "approved", "completed")
+            second = self.letter(home, ((1286, "completed"),))
+        self.assertNotEqual(first["event_id"], second["event_id"])
+
+    def test_rewrite_during_hashing_is_not_sent_under_the_old_approval(self):
+        with tempfile.TemporaryDirectory() as home:
+            path = self.a_deliverable(home, 1286, "instruction.md", "approved\n")
+
+            def rewrite_while_hashing(candidate: Path) -> str:
+                digest = hashlib.sha256(candidate.read_bytes()).hexdigest()
+                candidate.write_text("rewritten during hash\n", encoding="utf-8")
+                return digest
+
+            repo, direction, listing = self.direction(home, (1286, "completed"))
+            with repo, direction, listing, \
+                    mock.patch.object(pms, "_file_sha256", side_effect=rewrite_while_hashing):
+                letter = outbound.instruction_letter("deep-research")
+        self.assertIsNone(letter)
+
     def test_task_1272_returned_result_suppresses_its_registered_instruction(self):
         with tempfile.TemporaryDirectory() as home:
             self.a_deliverable(home, 1272, "a100-run-instruction.md", "run\n")
@@ -415,11 +441,12 @@ class ExternalInstruction(unittest.TestCase):
             entry = {"letters": [], "instructions": [{"sha256": digest}]}
             self.assertIsNone(self.letter(home, ((1272, "blocked"),), entry))
 
-    def test_changed_bytes_are_a_new_event(self):
+    def test_changed_approved_bytes_are_a_new_event(self):
         with tempfile.TemporaryDirectory() as home:
             path = self.a_deliverable(home, 1272, "instruction.md", "v1\n")
             first = self.letter(home, ((1272, "blocked"),))
             path.write_text("v2\n", encoding="utf-8")
+            self.readiness(home, 1272, "approved", "completed")
             second = self.letter(home, ((1272, "blocked"),))
         self.assertNotEqual(first["event_id"], second["event_id"])
 
