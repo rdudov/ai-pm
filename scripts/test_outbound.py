@@ -169,10 +169,10 @@ class ComposerSelectsBeforeText(unittest.TestCase):
 class DirectDelivery(unittest.TestCase):
     def send(self, ledger: Path, *, event_id: str = "report:task-1280:accepted",
              body: str = "Готово", result: str | bool | None = "gmail-1",
-             selected_by: str = "composer"):
+             selected_by: str = "composer", thread: str = "process"):
         with mock.patch.object(outbound, "LEDGER", ledger), \
                 mock.patch.object(tick, "send_mail", return_value=result) as mailed:
-            record = tick.deliver("process", "report", "Продакт: результат", body,
+            record = tick.deliver(thread, "report", "Продакт: результат", body,
                                   AT, event_id=event_id, selected_by=selected_by)
         return record, mailed
 
@@ -201,6 +201,20 @@ class DirectDelivery(unittest.TestCase):
         self.assertEqual(first["action"], "send")
         self.assertEqual(first_mail.call_count, 1)
         self.assertEqual(second["action"], "drop")
+        self.assertEqual(second_mail.call_count, 0)
+
+    def test_the_same_event_is_not_sent_by_a_second_direction(self):
+        with tempfile.TemporaryDirectory() as home:
+            ledger = Path(home) / "outbound.json"
+            event_id = "report:task-1272:analysis-approved-round16"
+            first, first_mail = self.send(
+                ledger, event_id=event_id, thread="deep-research")
+            second, second_mail = self.send(
+                ledger, event_id=event_id, thread="process")
+        self.assertEqual(first["action"], "send")
+        self.assertEqual(first_mail.call_count, 1)
+        self.assertEqual(second["action"], "drop")
+        self.assertEqual(second["reason"], "это событие уже доставлено")
         self.assertEqual(second_mail.call_count, 0)
 
     def test_different_events_with_the_same_text_both_go(self):

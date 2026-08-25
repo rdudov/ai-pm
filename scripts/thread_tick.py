@@ -716,7 +716,7 @@ def deliver(thread: str, kind: str, subject: str, body: str, moment: datetime,
             event_id = f"{kind}:{thread}:{digest}"
     with outbound.Ledger() as ledger:
         entry = ledger.thread(thread)
-        duplicate = outbound.event_delivered(entry, event_id)
+        duplicate = outbound.event_delivered_anywhere(ledger.data, event_id)
         if names_instructions and not outbound.unnamed_instructions(entry, names_instructions):
             duplicate = True
         action = "drop" if duplicate else "send"
