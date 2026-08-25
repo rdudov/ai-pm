@@ -37,6 +37,18 @@ class ComposerSelectsBeforeText(unittest.TestCase):
     def test_silent_creates_no_message(self):
         self.assertIsNone(tick.parse_composed_message("SILENT"))
 
+    def test_paired_bold_markers_do_not_destroy_silence(self):
+        self.assertIsNone(tick.parse_composed_message(" **SILENT**\n"))
+
+    def test_an_outer_markdown_fence_does_not_destroy_composed_json(self):
+        message = tick.parse_composed_message(f"```json\n{composed()}\n```")
+        self.assertEqual(message["event_id"], "report:task-1280:accepted")
+
+    def test_prose_and_punctuation_are_not_interpreted_as_the_envelope(self):
+        for response in ("SILENT.", f"Письмо:\n{composed()}"):
+            with self.subTest(response=response), self.assertRaises(ValueError):
+                tick.parse_composed_message(response)
+
     def test_channel_and_identity_precede_text(self):
         message = tick.parse_composed_message(composed())
         self.assertEqual(message["channel"], "gmail")

@@ -755,7 +755,7 @@ def loop(thread: str, once: bool = False) -> int:
                 "error": turn.get("error"),
                 "started_runs": started_runs,
                 "reply_excerpt": reply_excerpt,
-                "silent": composed is None and not raw_reply.strip(),
+                "silent": composed is None and malformed is None,
                 "post_check": checked,
             }
             if malformed:
