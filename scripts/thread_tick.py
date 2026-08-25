@@ -75,6 +75,7 @@ import outbound  # noqa: E402
 import plain_russian  # noqa: E402
 import product_goal  # noqa: E402
 import product_memory  # noqa: E402
+import startup_context  # noqa: E402
 import runner_contract  # noqa: E402
 from process_map_schema import run_entrypoint  # noqa: E402
 from process_map_state import RUNNER_SCRIPTS, tunable  # noqa: E402
@@ -1076,15 +1077,21 @@ def verdict_block() -> str:
 
 
 def prompt(report: dict, events: list[str], reasons: list[dict],
-           said: list[dict], chat: dict, goals: str = "") -> str:
+           said: list[dict], chat: dict, startup: str = "") -> str:
     # Shown only when there is something observed to show. A heading over an
     # empty list reads as «причин нет», which is a different claim.
     seen = ("\nЧто наблюдение говорит о простое (это не приговор, а то, что видно с диска):\n"
             + "\n".join(f"- {item['text']} [{item['src']}]" for item in reasons) + "\n"
             ) if reasons else ""
+    bounded = startup.lstrip().startswith("{")
+    startup_block = (f"""
+Ограниченный стартовый пакет ниже уже собран из всех обязательных источников.
+Не перечитывай AGENTS.md, план, снимки, состояния, бюджеты и цели второй раз.
+Историческую подробность по хешу открывай адресно только для события этого тика.
+{startup}
+""" if bounded else plan_block() + startup)
     return f"""Ты продакт-агент на фоновом пробуждении треда «{report['title']}».
-{plan_block()}
-{goals}
+{startup_block}
 {heard_block(said, chat)}
 
 Произошло с прошлого пробуждения:
@@ -1331,7 +1338,8 @@ def main() -> int:
     result = subprocess.run(
         [str(CLAUDE_PRODUCT_OWNER), "--entry", "print"],
         input=prompt(report, events, reasons, said, chat,
-                     product_goal.block(args.thread)), env=environment,
+                     startup_context.render(startup_context.packet((args.thread, report)))),
+        env=environment,
         capture_output=True, text=True, cwd=HOME, timeout=WAKE_TIMEOUT,
     )
     for diagnostic in route_diagnostics(result.stderr or ""):
