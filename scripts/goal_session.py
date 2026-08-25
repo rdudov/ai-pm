@@ -437,7 +437,7 @@ def post_check(thread: str, standing_goals: list[dict], after_live: list[int],
 # ---------------------------------------------------------------------------
 
 
-def opening_prompt(thread: str, current: dict, said: list[dict], chat: dict) -> str:
+def opening_prompt(thread: str, current: dict, said: list[dict]) -> str:
     """Тяжёлый стартовый контекст. Собирается один раз за сессию, и только тут."""
     report = current["report"]
     return f"""Ты продакт-владелец направления «{report['title']}» и ведёшь одну
@@ -448,7 +448,7 @@ def opening_prompt(thread: str, current: dict, said: list[dict], chat: dict) -> 
 больше не буду.
 {thread_tick.plan_block()}
 {product_goal.block(thread)}
-{thread_tick.heard_block(said, chat)}
+{thread_tick.heard_block(said)}
 
 Наблюдаемое состояние направления (собрано механически, не со слов исполнителя):
 {json.dumps(report, ensure_ascii=False, indent=2)}
@@ -701,9 +701,8 @@ def loop(thread: str, once: bool = False) -> int:
             standing_goals = standing(current)
             if not opening_done:
                 with outbound.Ledger() as ledger:
-                    said = outbound.already_said(ledger.thread(thread), moment)
-                chat = outbound.heard_in_chat(moment)
-                prompt, kind = opening_prompt(thread, current, said, chat), "open"
+                    said = outbound.already_said(ledger.thread(thread))
+                prompt, kind = opening_prompt(thread, current, said), "open"
             elif after_recovery:
                 prompt = recovery_prompt(thread, current, record.get("recovered") or {})
                 kind, after_recovery = "recovery", False
@@ -718,12 +717,25 @@ def loop(thread: str, once: bool = False) -> int:
             write(thread, record)
             turn = run_turn(record["session"]["model"], session_id, prompt,
                             opening=not opening_done)
+            raw_reply = turn.get("reply", "")
+            malformed = None
+            try:
+                composed = (thread_tick.parse_composed_message(raw_reply)
+                            if turn.get("ok") else None)
+            except ValueError as error:
+                malformed = thread_tick.composer_failure(
+                    raw_reply, error, "stdout составителя непрерывной сессии")
+                turn = {**turn, "ok": False,
+                        "error": f"составитель не выбрал канал до текста: {error}"}
+                composed = None
             record["in_turn"] = None
             last_turn_at = time.time()
             after = observation(thread)
             started_runs = sorted(set(after["live"]) - set(before_live))
             checked = post_check(thread, standing_goals, after["live"],
-                                 turn.get("reply", ""), datetime.now(timezone.utc))
+                                 (composed or {}).get("body", ""),
+                                 datetime.now(timezone.utc))
+            reply_excerpt = ((composed or {}).get("body") or raw_reply)[:400]
             entry = {
                 "n": record["session"]["turns"] + 1,
                 "at": moment.isoformat(),
@@ -742,10 +754,12 @@ def loop(thread: str, once: bool = False) -> int:
                 "ok": turn.get("ok"),
                 "error": turn.get("error"),
                 "started_runs": started_runs,
-                "reply_excerpt": (turn.get("reply") or "")[:400],
-                "silent": (turn.get("reply") or "").strip() in ("", "SILENT"),
+                "reply_excerpt": reply_excerpt,
+                "silent": composed is None and not raw_reply.strip(),
                 "post_check": checked,
             }
+            if malformed:
+                entry["composer_failure"] = malformed
             record["turns"] = (record["turns"] + [entry])[-KEEP_TURNS:]
             record["session"]["turns"] += 1
             record["last_turn"] = entry
@@ -757,11 +771,11 @@ def loop(thread: str, once: bool = False) -> int:
             if turn.get("ok"):
                 opening_done = True
                 seen = after
-                reply = (turn.get("reply") or "").strip()
-                if reply and reply != "SILENT":
-                    thread_tick.announce(
-                        thread, current["report"]["title"], reply,
-                        current["report"], datetime.now(timezone.utc))
+                if composed:
+                    thread_tick.deliver(
+                        thread, composed["kind"], composed["subject"], composed["body"],
+                        datetime.now(timezone.utc),
+                        attachments=composed["attachments"], event_id=composed["event_id"])
             else:
                 # Ход не состоялся. Разговор от этого не теряется — он на диске у
                 # CLI, — но продолжать вслепую нельзя: ротация записывается и

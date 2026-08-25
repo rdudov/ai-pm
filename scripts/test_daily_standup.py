@@ -147,7 +147,7 @@ class DailyStandupRendering(unittest.TestCase):
                 mock.patch.object(outbound, "LEDGER", Path(home) / "outbound.json"), \
                 mock.patch.object(thread_tick, "send_mail", return_value="gmail-daily") as send:
             record = thread_tick.deliver(
-                "portfolio", "daily", "Оперативка", "Доброе утро", None, at,
+                "portfolio", "daily", "Оперативка", "Доброе утро", at,
                 raw_message=b"To: user@example.test\n\nbody")
         self.assertEqual(record["action"], "send")
         self.assertEqual(record["message_id"], "gmail-daily")

@@ -39,8 +39,9 @@ undeclared`, `decision: not_a_review`, `verdict_binding: forbidden`. Так по
 справке основанием звать проверяющего через `start` не является.
 
 Фоновый продакт запускается `systemctl start
-product-thread@<тред>.service`; его Telegram transport читает тот же серверный
-владелец. Сырые секреты и адрес не передаются в argv.
+product-thread@<тред>.service`. Продуктовые вопросы и отчёты этот процесс
+отправляет только через Gmail; Telegram lifecycle принадлежит системе задач.
+Сырые секреты и адрес не передаются в argv.
 
 ### Граница сборки и установки
 
