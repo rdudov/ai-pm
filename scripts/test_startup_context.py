@@ -69,6 +69,35 @@ current bet
             self.assertEqual([item["source"] for item in records], [str(new)])
             self.assertEqual(records[0]["text"], "new")
 
+    def test_one_large_post_cursor_record_is_manifested_not_inlined(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            large = root / "large.md"; large.write_text("x" * (startup.MAX_RECORD_BYTES + 1))
+            cursor = datetime.now(timezone.utc).timestamp() - 1
+            plan = {"accepted_at": datetime.fromtimestamp(cursor, timezone.utc).isoformat(),
+                    "outcome_links": []}
+            with mock.patch.object(startup.product_memory, "root", return_value=root), \
+                    mock.patch.object(startup.product_memory, "installation", return_value={}):
+                records = startup.post_cursor(plan)
+            self.assertTrue(records[0]["manifested"])
+            self.assertEqual(records[0]["bytes"], startup.MAX_RECORD_BYTES + 1)
+            self.assertNotIn("text", records[0])
+
+    def test_unreadable_plan_becomes_explicit_safe_refusal(self):
+        observation = mock.Mock(route=mock.Mock(engine="claude", model="opus", reason="test"),
+                                usage={}, codex_budget={})
+        with mock.patch.object(startup.product_memory, "current_plan",
+                               side_effect=startup.product_memory.ContentError("broken")), \
+                mock.patch.object(startup.product_memory, "installation", return_value={}), \
+                mock.patch.object(startup.product_memory, "slugs", return_value=[]), \
+                mock.patch.object(startup.claude_product_owner, "inspect_observation",
+                                  return_value=observation), \
+                mock.patch.object(startup.codex_budget, "latest", return_value={}), \
+                mock.patch.object(startup.product_goal, "active", return_value=[]):
+            value = startup.packet()
+        self.assertIn("не запускай работу", value["portfolio_plan"])
+        self.assertEqual(value["post_cursor_records"], [])
+
 
 if __name__ == "__main__":
     unittest.main()

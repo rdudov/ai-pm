@@ -31,6 +31,8 @@ TASK_RECORD_NAMES = {
     "task.md", "plan.md", "findings.md", "verification.md", "status.json",
     "progress.json", "manifest.json",
 }
+MAX_RECORD_BYTES = 65_536
+MAX_POST_CURSOR_BYTES = 262_144
 
 
 def digest_text(text: str) -> str:
@@ -98,7 +100,10 @@ def post_cursor(plan: dict, frozen_at: datetime | None = None) -> list[dict]:
     paths: set[Path] = set()
     root = product_memory.root()
     for path in root.rglob("*"):
+        relative = path.relative_to(root)
         if (not path.is_file() or path.name == "snapshot.md"
+                or relative.parts[0] in {"plan", "goals"}
+                or "attachments" in relative.parts
                 or path.suffix.lower() not in {".md", ".json", ".jsonl", ".txt"}):
             continue
         stamp = path.stat().st_mtime
@@ -117,17 +122,34 @@ def post_cursor(plan: dict, frozen_at: datetime | None = None) -> list[dict]:
                             and cursor < path.stat().st_mtime <= ceiling):
                         paths.add(path)
     records = []
+    used = 0
     for path in sorted(paths, key=str):
         try:
             text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeError):
             continue
+        size = len(text.encode("utf-8"))
+        if size > MAX_RECORD_BYTES or used + size > MAX_POST_CURSOR_BYTES:
+            records.append({
+                "source": str(path), "manifested": True, "bytes": size,
+                "sha256": digest_text(text),
+                "reason": "post-cursor input bound; open this durable original addressably",
+            })
+            continue
         records.append({"source": str(path), "text": text})
+        used += size
     return records
 
 
 def packet(current_thread: tuple[str, dict] | None = None) -> dict:
-    plan = product_memory.current_plan()
+    try:
+        plan = product_memory.current_plan()
+    except product_memory.ContentError as error:
+        plan = None
+        plan_text = ("Портфельный план не читается: " + str(error)
+                     + ". Порядок работ не установлен; не запускай работу, меняющую пользу.")
+    else:
+        plan_text = product_memory.plan_text(plan)
     reports = {}
     for name in product_memory.installation().get("threads", {}):
         reports[name] = (current_thread[1] if current_thread and current_thread[0] == name
@@ -142,7 +164,7 @@ def packet(current_thread: tuple[str, dict] | None = None) -> dict:
                 "open historical detail only when the observed event requires it"
             ),
         },
-        "portfolio_plan": product_memory.plan_text(plan),
+        "portfolio_plan": plan_text,
         "product_snapshots": {slug: snapshot_view(slug) for slug in product_memory.slugs()},
         "thread_states": reports,
         "model_budgets": {
@@ -156,7 +178,7 @@ def packet(current_thread: tuple[str, dict] | None = None) -> dict:
             },
         },
         "active_goals": [goal_view(goal) for goal in product_goal.active()],
-        "post_cursor_records": post_cursor(plan),
+        "post_cursor_records": post_cursor(plan) if plan else [],
     }
 
 
