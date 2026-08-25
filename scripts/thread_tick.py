@@ -623,6 +623,8 @@ def send_mail(subject: str, body: str, *,
 
 COMPOSED_KEYS = ("channel", "kind", "event_id", "subject", "body", "attachments")
 COMPOSED_EVENT = re.compile(r"^[a-z0-9][a-z0-9:._-]{5,199}$")
+COMPOSED_FENCE = re.compile(
+    r"```(?:json)?[ \t]*\r?\n(?P<payload>.*?)\r?\n```", re.DOTALL)
 
 
 def parse_composed_message(text: str) -> dict | None:
@@ -632,10 +634,11 @@ def parse_composed_message(text: str) -> dict | None:
         payload = "SILENT"
     if payload in {"", "SILENT"}:
         return None
-    fenced = re.fullmatch(
-        r"```(?:json)?[ \t]*\r?\n(?P<payload>.*)\r?\n```", payload, re.DOTALL)
+    fenced = [match.group("payload") for match in COMPOSED_FENCE.finditer(payload)]
     if fenced:
-        payload = fenced.group("payload").strip()
+        if len(set(fenced)) != 1:
+            raise ValueError("composer returned multiple different fenced blocks")
+        payload = fenced[0].strip()
     try:
         value = json.loads(payload)
     except json.JSONDecodeError as error:
