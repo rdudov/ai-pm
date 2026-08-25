@@ -380,7 +380,7 @@ def standing(current: dict) -> list[dict]:
 
 
 def post_check(thread: str, standing_goals: list[dict], after_live: list[int],
-               reply: str, moment: datetime, announce: bool = True) -> dict | None:
+               reply: str, moment: datetime) -> dict | None:
     """Исход пробуждения по стоячей цели, проверенный наблюдением.
 
     Ревью 1127 (F-002) назвало ровно эту дыру: цель стоит, продакт разбужен,
@@ -390,13 +390,9 @@ def post_check(thread: str, standing_goals: list[dict], after_live: list[int],
 
     Два допустимых исхода, и оба наблюдаемы после хода: по задаче цели пошёл
     живой прогон — или в ответе назван конкретный блокер обычными словами.
-    Молчание третьим исходом не является: оно записывается как отказ, уходит
-    пушем, остаётся в снимке направления, который читает табло, и делает выход
-    тика ненулевым. Пуш здесь остался, хотя 23 августа 2026 пользователь
-    попросил не слать в Telegram отчёты по задачам: это не рассказ о работе, а
-    сообщение о сломанном контуре, и почтовой копии у него нет — `deliver()`
-    отсюда не вызывается. Снять пуш значило бы спрятать поломку везде, а
-    пользователь просил не дублировать письмо, а не молчать.
+    Молчание третьим исходом не является: оно записывается как отказ в снимке
+    направления и делает ход неуспешным. Внутренние номера целей в Telegram из
+    этого пути не проецируются.
     """
     if not standing_goals:
         return None
@@ -423,8 +419,9 @@ def post_check(thread: str, standing_goals: list[dict], after_live: list[int],
                 for goal in unresolved)
             + "\n\nЭто отказ механизма, а не решение продакта: обязательный исход "
               "пробуждения по стоячей цели не наблюдается.")
-    if announce:
-        thread_tick.notify(told)
+    # stderr is already collected by both installed systemd units. Keep the
+    # failure observable there without turning it back into a user delivery.
+    print(told, file=sys.stderr)
     return {
         "at": moment.isoformat(),
         "resolved": False,

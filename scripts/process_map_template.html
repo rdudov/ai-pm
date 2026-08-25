@@ -2378,6 +2378,13 @@ function goalSessionNode(session) {
       (session.recovered ? " · сессия восстановлена watchdog'ом" : "");
     node.appendChild(last);
   }
+  if (session.post_check && !session.post_check.resolved) {
+    const failure = document.createElement("div");
+    failure.className = "gap";
+    failure.textContent = session.post_check.told;
+    failure.title = "наблюдено: " + session.post_check.src;
+    node.appendChild(failure);
+  }
   return node;
 }
 
