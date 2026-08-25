@@ -42,7 +42,7 @@ def source_packet(moment: datetime) -> dict:
     reports = {name: compact_report(thread_state.build(name)) for name in config}
     with outbound.Ledger() as ledger:
         recent = [letter for entry in ledger.data.get("threads", {}).values()
-                  for letter in outbound.already_said(entry, moment)]
+                  for letter in outbound.already_said(entry)]
     return {"plan": product_memory.plan_text(plan) if plan else "",
             "snapshots": snapshots, "threads": reports,
             "recent_letters": sorted(recent, key=lambda item: item["at"])[-12:]}
@@ -235,8 +235,9 @@ def maybe_send(moment: datetime | None = None, force: bool = False,
     plain, html = render_plain(data), render_html(data)
     subject = f"Продуктовая оперативка — {local:%d.%m}"
     return thread_tick.deliver(
-        "portfolio", "daily", subject, plain, None, moment,
-        raw_message=raw_message(thread_tick.MAIL_TO, subject, plain, html))
+        "portfolio", "daily", subject, plain, moment,
+        raw_message=raw_message(thread_tick.MAIL_TO, subject, plain, html),
+        event_id=f"daily:{local.date().isoformat()}")
 
 
 def main() -> int:

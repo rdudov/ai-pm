@@ -20,8 +20,8 @@ guard nobody has.
 So the check lives here, in one place, with two callers instead of one:
 
 * `thread_tick.py` asks before every wake-up of every direction, which is four
-  times per twenty minutes on the stand. A broken contract becomes a letter, a
-  telegram, a line in the direction's own state file and a failed unit — not a
+  times per twenty minutes on the stand. A broken contract becomes a Gmail
+  alarm, a line in the direction's own state file and a failed unit — not a
   traceback in a journal nobody reads;
 * `test_process_map.py::RunnerInterface` asks the same module, so the regression
   and the operational guard cannot drift apart into two answers.

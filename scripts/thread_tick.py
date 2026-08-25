@@ -59,6 +59,7 @@ Usage: thread_tick.py <thread> [--dry-run] [--force]
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -81,18 +82,6 @@ from process_map_schema import run_entrypoint  # noqa: E402
 from process_map_state import RUNNER_SCRIPTS, tunable  # noqa: E402
 from process_map_state import THREAD_STATE as STATE_DIR  # noqa: E402
 from thread_state import HOME, REPO, build  # noqa: E402
-
-# The push channel belongs to the installation, not to the core: it is the
-# personal assistant's own bot transport, and an installation that has none is a
-# working installation whose news arrives by mail and on the board. Only a
-# channel that exists is then required to work — see `require_notification_profile`.
-TELEGRAM_SCRIPTS = REPO / "skills" / "telegram-client" / "scripts"
-if str(TELEGRAM_SCRIPTS) not in sys.path:
-    sys.path.insert(0, str(TELEGRAM_SCRIPTS))
-try:
-    from bot_transport import resolve_bot_target, send_bot_message  # type: ignore  # noqa: E402
-except ImportError:  # no push channel installed beside this product owner
-    resolve_bot_target = send_bot_message = None  # type: ignore[assignment]
 
 CLAUDE_PRODUCT_OWNER = HOME / "scripts" / "claude_product_owner.py"
 # The letter leaves through the task system's own mail client, and goes to the
@@ -135,14 +124,14 @@ MAIL_TIMEOUT = tunable("PRODUCT_OWNER_MAIL_TIMEOUT_SECONDS", 180)
 CODEX_HEAVY_PERCENT = tunable("PRODUCT_OWNER_CODEX_HEAVY_PERCENT", 80)
 # Письма, которые при неудачной отправке не уходят в общую очередь проактивных
 # новостей, и что о каждом из них записано. Ответ принадлежит своей побудке,
-# оперативка — своему утру, а письмо о принятой инструкции пересобирается
+# оперативка — своему утру, а письмо о зарегистрированной инструкции пересобирается
 # следующим тиком: цифра в нём считается с байтов файла в минуту отправки, и
 # полежавший в очереди текст назвал бы редакцию, которой на диске может уже не
 # быть.
 FAILED_SEND = {
     "reply": "отправка ответа не удалась; повтор не выполнен",
     "daily": "отправка оперативки не удалась; следующий утренний тик повторит",
-    "instruction": ("письмо о принятой инструкции не ушло; следующий тик соберёт "
+    "instruction": ("письмо о зарегистрированной инструкции не ушло; следующий тик соберёт "
                     "его заново с текущим sha256"),
 }
 
@@ -587,17 +576,10 @@ def send_mail(subject: str, body: str, *,
               raw_message: bytes | None = None) -> str | bool | None:
     """Put one letter in the mailbox the user actually reads.
 
-    The push path needs a bot token in the environment, and the systemd unit
-    that runs this tick has none: one night's wake-up produced a full verdict
-    and then dropped it on the floor, so the user learned nothing until they
-    asked. Mail is the channel that is provably wired in both directions, so
-    the verdict goes there first and the push stays a bonus.
-
-    Whether a letter *should* go is not decided here — `outbound.decide` owns
-    that, and `deliver` below is the only caller. What is decided here is
-    whether it went, which the ledger needs: a send that failed must stay held
-    rather than be written down as said. On success the Gmail message id is
-    returned when the sender prints it; `True` preserves the older success
+    Whether a letter should exist and which channel owns it was decided by its
+    composer before this function. What is decided here is only whether Gmail
+    accepted it, which the receipt ledger needs. On success the Gmail message id
+    is returned when the sender prints it; `True` preserves the older success
     contract if that receipt is absent.
     """
     if not MAIL_TO or not MAIL_SCRIPT.is_file() or not MAIL_PYTHON.is_file():
@@ -639,193 +621,128 @@ def send_mail(subject: str, body: str, *,
     return receipt.group(1) if receipt else True
 
 
-def deliver(thread: str, kind: str, subject: str, body: str,
-            report: dict | None, moment: datetime, chat: dict | None = None,
+COMPOSED_KEYS = ("channel", "kind", "event_id", "subject", "body", "attachments")
+COMPOSED_EVENT = re.compile(r"^[a-z0-9][a-z0-9:._-]{5,199}$")
+
+
+def parse_composed_message(text: str) -> dict | None:
+    """Read the composer's route declaration without interpreting its prose."""
+    if text.strip() in {"", "SILENT"}:
+        return None
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError as error:
+        raise ValueError(f"composer returned neither SILENT nor JSON: {error}") from error
+    if not isinstance(value, dict) or set(value) != set(COMPOSED_KEYS):
+        raise ValueError(
+            "composer JSON keys must be channel, kind, event_id, subject, body, attachments")
+    if value["channel"] != "gmail":
+        raise ValueError("a background product message may select only gmail")
+    if value["kind"] not in {"question", "report"}:
+        raise ValueError("composer kind must be question or report")
+    if not isinstance(value["event_id"], str) or not COMPOSED_EVENT.fullmatch(value["event_id"]):
+        raise ValueError("composer event_id is missing or unstable")
+    if not isinstance(value["subject"], str) or not value["subject"].strip():
+        raise ValueError("composer subject is empty")
+    if not isinstance(value["body"], str) or not value["body"].strip():
+        raise ValueError("composer body is empty")
+    attachments = value["attachments"]
+    if (not isinstance(attachments, list)
+            or not all(isinstance(path, str) and Path(path).is_absolute()
+                       for path in attachments)):
+        raise ValueError("composer attachments must be absolute paths")
+    return value
+
+
+def composer_failure(raw_response: str, error: ValueError, src: str) -> dict:
+    """Describe one composed response that did not satisfy its envelope."""
+    return {
+        "error": str(error),
+        "raw_response": raw_response,
+        "src": src,
+    }
+
+
+def persist_composer_failure(state_path: Path, state: dict,
+                             raw_response: str, error: ValueError) -> None:
+    """Keep a composed but malformed response in the thread's existing state."""
+    state["composer_failure"] = composer_failure(
+        raw_response, error, f"stdout составителя; {state_path}")
+    if isinstance(state.get("check"), dict):
+        state["check"]["outcome"] = "составитель вернул ответ без допустимого конверта"
+        state["check"]["outcome_src"] = f"composer_failure; {state_path}"
+    state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2))
+
+
+def deliver(thread: str, kind: str, subject: str, body: str, moment: datetime,
             *, reply_to_message_id: str | None = None,
             attachments: list[str] | None = None,
             raw_message: bytes | None = None,
-            names_instructions: list[dict] | None = None) -> dict:
-    """The one door mail leaves this contour through.
-
-    The gate is on this side only, and everything it turns away is still on the
-    board and in the gateway journal. «Прогон стартовал», «прогон закончился»,
-    «репозиторий двинулся» are not letters. Of what does leave through this
-    door, Telegram sees only a letter that asks the user something — see
-    `announce` and `notify` for the user's words and the measurement behind that
-    boundary.
-
-    A failed proactive send is held, not recorded as sent: the ledger's whole
-    worth is that it says what the user was told. A failed reply stays an
-    explicit failure for its mail-wake owner instead of entering the proactive
-    merge queue.
-
-    `names_instructions` — редакции инструкции внешнему исполнителю, которые это
-    письмо называет путём и полным sha256. Заявлено вызывающим, а не угадано
-    здесь по прозе или по соседству: это единственная связь между готовым файлом
-    и конкретным сообщением, и она в подписи. Названными редакции становятся
-    только после успешной отправки — см. `outbound.instruction_letter`.
-    """
+            names_instructions: list[dict] | None = None,
+            event_id: str | None = None) -> dict:
+    """Send one already-routed Gmail message and receipt its exact event."""
     if (kind == "reply") != bool(reply_to_message_id):
         raise ValueError("kind='reply' and reply_to_message_id must be supplied together")
-    if kind != "verdict":
-        chat = outbound.no_chat()
-    elif chat is None:
-        chat = outbound.heard_in_chat(moment)
+    if event_id is None:
+        if reply_to_message_id:
+            event_id = f"reply:{reply_to_message_id}"
+        elif names_instructions:
+            event_id = outbound.instruction_event_id(thread, names_instructions[0])
+        else:
+            # Mechanical legacy callers have no semantic event field yet. An
+            # exact byte digest prevents a retry from becoming a duplicate; it
+            # does not interpret the text or decide whether it was worth mail.
+            digest = hashlib.sha256(body.encode("utf-8")).hexdigest()[:24]
+            event_id = f"{kind}:{thread}:{digest}"
     with outbound.Ledger() as ledger:
         entry = ledger.thread(thread)
-        decision = outbound.decide(thread, kind, subject, body, report or {},
-                                   moment, entry, chat)
+        duplicate = outbound.event_delivered(entry, event_id)
+        if names_instructions and not outbound.unnamed_instructions(entry, names_instructions):
+            duplicate = True
+        action = "drop" if duplicate else "send"
+        reason = ("это событие уже доставлено" if duplicate else
+                  "канал Gmail выбран составителем до текста")
         delivered = None
         message_id = None
-        if names_instructions and not outbound.unnamed_instructions(
-                entry, names_instructions):
-            # Пока это письмо собиралось, редакцию назвал другой тик того же
-            # направления: реестр читается под тем же замком, под которым
-            # пишется, и решает он, а не наблюдение минутной давности.
-            decision = {**decision, "action": "drop", "flush": [],
-                        "reason": "эту редакцию пользователю уже называли"}
-        if decision["action"] == "send":
+        if action == "send":
             mail_options = {"reply_to_message_id": reply_to_message_id,
                             "attachments": attachments}
             if raw_message is not None:
                 mail_options["raw_message"] = raw_message
-            send_result = send_mail(subject, decision["body"], **mail_options)
+            send_result = send_mail(subject, body, **mail_options)
             delivered = bool(send_result)
             message_id = send_result if isinstance(send_result, str) else None
             if not delivered:
-                if kind in FAILED_SEND:
-                    # A reply may not ride out later as proactive news. Keep the
-                    # failure explicit for the mail-wake owner to handle; putting
-                    # it in generic pending would violate the very reply boundary
-                    # this kind establishes. The morning letter and the letter
-                    # about an accepted instruction are owed to their own moment
-                    # in the same way — see `FAILED_SEND`.
-                    decision = {**decision, "action": "fail",
-                                "reason": FAILED_SEND[kind],
-                                "body": decision["raw_body"], "flush": []}
-                else:
-                    # Held as it was written, not as it was merged: what
-                    # accumulated is still in `pending` because nothing was
-                    # flushed, and holding the merged text would put every one
-                    # of those items in twice.
-                    decision = {**decision, "action": "hold",
-                                "reason": "отправка не удалась, письмо ждёт следующего",
-                                "body": decision["raw_body"], "flush": []}
+                action = "fail"
+                reason = FAILED_SEND.get(kind, "отправка не удалась; событие не отмечено доставленным")
+            else:
+                outbound.remember_delivery(
+                    entry, event_id=event_id, subject=subject, body=body,
+                    kind=kind, now=moment, message_id=message_id)
             if delivered and names_instructions:
-                # Названной редакция считается только когда письмо действительно
-                # ушло: несостоявшееся письмо соберут заново на следующем тике, с
-                # той редакцией, которая будет лежать на диске в ту минуту.
                 outbound.remember_instructions(entry, names_instructions, moment)
-        # A reply is owed independently of proactive news and therefore must
-        # neither advance nor erase the baseline used by the proactive gate. The
-        # door's own letter about an accepted instruction is owed the same way:
-        # it says nothing about the direction's news, and moving the baseline
-        # with it would silence the owner's letter about that very acceptance.
-        applied_report = None if kind in {"reply", "instruction"} else report
-        outbound.apply(entry, decision, subject, moment, applied_report, kind)
         record = {"at": moment.isoformat(), "thread": thread, "kind": kind,
-                  "subject": subject, "action": decision["action"],
-                  "reason": decision["reason"],
+                  "event_id": event_id, "channel": "gmail", "subject": subject,
+                  "action": action, "reason": reason,
                   "delivered": None if delivered is None else bool(delivered),
                   "message_id": message_id,
                   "reply_to_message_id": reply_to_message_id,
-                  "asks_user": outbound.asks_user(decision["raw_body"]),
-                  "chat": chat["src"]}
-        # Appended rather than written into the direction's state file, which is
-        # rewritten whole on every tick: on 2026-08-09 a review could show only
-        # the later of two production ticks having gone through this gate,
-        # because the earlier one's evidence had lasted twenty minutes.
+                  "composer_selected": True}
         ledger.record(record)
-    return {**record,
-            "src": "state/outbound.json — реестр сказанного пользователю; "
-                   "state/outbound-journal.jsonl — все решения шлюза подряд"}
+    return {**record, "src": "state/outbound.json — успешные event_id; "
+            "state/outbound-journal.jsonl — все попытки доставки подряд"}
 
 
-def announce(thread: str, title: str, message: str, report: dict,
-             moment: datetime, chat: dict | None = None) -> dict:
-    """Вердикт продакта: письмо через дверь, а пуш — только если письмо спрашивает.
-
-    23 августа 2026 пользователь попросил две вещи сразу: не повторять один и
-    тот же вопрос и не слать в Telegram отчёты по задачам. Обе выполняются
-    здесь, и порядок важен.
-
-    Пуш стоит после двери, а не до неё: пуш до двери уносил бы в Telegram тот
-    самый повторный вопрос, который дверь только что отбросила.
-
-    Пуш идёт только у письма, которое спрашивает пользователя. Отчёт о работе
-    уходит письмом и остаётся на табло. Границу «отчёта» здесь не выбирает
-    автор: до 23 августа пуш срабатывал на каждый продуктовый текст, и в том
-    самом окне, на которое пожаловался пользователь (сообщения Calypso 93571
-    22:57 UTC — 93870 13:12 UTC), журнал двери содержит 104 решения вида
-    `verdict` и ни одного вида `idle`. Пользователь назвал отчётами вердикты
-    тика, а вопрос отчётом не является — и терять его нельзя. На том же окне
-    это правило даёт 3 сообщения вместо 112.
-
-    Спрашивает письмо или нет, решает `outbound.asks_user` — та же функция,
-    которой дверь решает судьбу вопроса и которую она пишет в свой журнал.
-    Считается она по тексту, который и уходит в пуш. Вопрос, который дверь
-    придержала и приложила к более позднему письму, пуша не получит: письмо с
-    ним пользователь получит почтой, а Telegram повторяет только то, что дверь
-    отправила сама.
-
-    Отсюда же вердикт непрерывной сессии по цели: правило одно, и место у него
-    тоже одно.
-    """
-    letter = deliver(thread, "verdict", f"Продакт: {title}", message, report,
-                     moment, chat)
-    if letter["action"] == "send" and outbound.asks_user(message):
-        notify(f"[{title}]\n{message}")
-    return letter
-
-
-def notify(text: str) -> None:
-    """Сообщение продакта в личный Telegram владельца установки.
-
-    23 августа 2026 пользователь написал: «Я не просил присылать отчёты по
-    задачам в телеграм, только в почту. Отбивки от dev-pipeline пусть приходят,
-    но отчёты — нет». С тех пор сюда доходят ровно две вещи.
-
-    Первая — письмо, которое ставит перед пользователем вопрос или выбор, и
-    только после того, как дверь его отправила (см. `announce`). Вопрос отчётом
-    не является, а увидеть его надо быстро.
-
-    Вторая — два сообщения о сломанном контуре: разошедшийся контракт с
-    `task_runner` и не отработавшее пробуждение. Эти аварии остаются быстрыми
-    пушами независимо от параллельного письма. Отказ проверки стоячей цели
-    остаётся в снимке направления и журнале, но внутренние номера целей сюда не
-    попадают.
-
-    Рассказ о работе сюда не идёт вообще: ни вердикт тика, ни вердикт
-    непрерывной сессии, ни отчёт о простое (`idle`). Он уходит письмом и стоит
-    на табло. Отбивки dev-pipeline о фоновых прогонах приходят своим
-    транспортом из системы задач, эта правка их не касается.
-    """
-    if send_bot_message is None:
-        return
-    try:
-        send_bot_message(text)
-    except (OSError, SystemExit, ValueError):
-        return
-
-
-def require_notification_profile() -> str | None:
-    """Fail before product work when its server-owned push route is absent.
-
-    «Absent» here means a channel this installation has and cannot use, which is
-    the failure this check was written for: work that nobody would be told about.
-    An installation with no push channel at all is a different thing and not a
-    failure — it says everything by mail and on the board.
-    """
-    if resolve_bot_target is None:
-        return None
-    try:
-        _token, destination = resolve_bot_target()
-    except (OSError, SystemExit, ValueError) as exc:
-        raise SystemExit(
-            "product-owner: server-owned notification profile is unavailable: "
-            f"{exc}"
-        ) from None
-    return destination
+def deliver_idle(thread: str, title: str, report: dict, reasons: list[dict],
+                 moment: datetime) -> dict:
+    """Send the observed idle outcome through its sole product channel."""
+    body = (f"[{title}] простоя не сняли: живых прогонов нет, "
+            f"к запуску {startable(report)}.\n\nПочему, по наблюдению:\n"
+            + "\n".join(f"- {item['text']}" for item in reasons))
+    return deliver(
+        thread, "idle",
+        f"Продакт: «{title}» ничего не запустил при непустой очереди",
+        body, moment)
 
 
 def runner_contract_alarm(thread: str, stored: dict, moment: datetime,
@@ -843,8 +760,8 @@ def runner_contract_alarm(thread: str, stored: dict, moment: datetime,
     mechanism ran that test — so the guard runs from here, where a mechanism
     genuinely exists: four timers, every twenty minutes each. What it changes is
     not the breakage but the silence around it. A divergence now leaves through
-    the two channels the verdicts leave through, is written into the direction's
-    own state file where the board reads it, and makes the unit fail.
+    Gmail, is written into the direction's own state file where the board reads
+    it, and makes the unit fail.
 
     Rate-limited like the other standing reminders, and for the same reason: the
     contour wakes twelve times an hour and the same alarm twelve times an hour is
@@ -864,9 +781,8 @@ def runner_contract_alarm(thread: str, stored: dict, moment: datetime,
                 + "\n".join(f"- {item['text']}\n  ({item['src']})" for item in violations)
                 + "\n\nПока это не починено, живые прогоны, простой и свежесть работы "
                   "считаются кодом, который может отвечать ошибкой вместо ответа.")
-        notify(told)
         deliver(thread, "alarm", "Продакт: контракт с task_runner разошёлся",
-                told, None, moment)
+                told, moment)
         reminder = {"at": moment.isoformat(), "signature": signature}
     return violations, reminder
 
@@ -939,40 +855,22 @@ def yielded(report: dict) -> dict | None:
     }
 
 
-def heard_block(said: list[dict], chat: dict) -> str:
-    """What the user has already been told, put in front of the owner.
-
-    The gate in `outbound` can only refuse a repeat after it is written; this is
-    the half that keeps it from being written. Both sources were on disk all
-    along and neither was read: «меня например раздражают письма примерно про
-    одно и то же. Особенно если мы проговорили в чате CLI, а потом приходит
-    письмо „А знаешь, мы тут такое сделали за это время! …“».
-    """
-    if not said and not chat["sessions"]:
+def heard_block(said: list[dict]) -> str:
+    """Successful Gmail events shown before the composer chooses a channel."""
+    if not said:
         return ""
     letters = "\n".join(
-        f"- {item['at'][:16].replace('T', ' ')} UTC «{item['subject']}»: "
+        f"- {item.get('event_id') or 'старое событие без id'} — "
+        f"{str(item['at'])[:16].replace('T', ' ')} UTC «{item['subject']}»: "
         f"{' '.join(item['excerpt'].split())[:220]}" for item in said
-    ) or "- писем в этом окне не было"
-    spoken = (f"Разговоры в CLI, где говорил человек: {len(chat['sessions'])} сессий, "
-              f"{chat['chars']} символов, названы задачи "
-              + (", ".join(str(i) for i in chat["tasks"]) or "нет")
-              + f" [{chat['src']}]") if chat["sessions"] else (
-        "Разговоров в CLI с человеком в этом окне не было.")
+    )
     return f"""
-Что пользователь уже слышал (письма — из реестра отправленного, разговор — из
-стенограмм CLI; и то и другое наблюдаемо, не со слов):
+Уже доставленные Gmail-события (из реестра успешной отправки):
 {letters}
-{spoken}
 
-Новостью может быть только то, чего в этом списке нет: пересказ уже сказанного
-письмом не идёт, он будет отброшен как повтор, и пользователь увидит вместо него
-табло. Если новости нет — SILENT. Это не разрешение писать непонятно: шапка «над
-чем работаем» и объяснение предмета — не пересказ новости, а то, без чего
-новость нельзя понять, и они нужны в каждом письме.
-
-Если вопрос из этого списка ещё без ответа, второй раз его не задают. Такое
-письмо имеет смысл только с новым фактом и обязано назвать его строкой `НОВОЕ:`.
+Не создавай второе сообщение с тем же `event_id`. Если нового Gmail-события нет,
+верни SILENT. Ответ, который уже дан пользователю в текущем CLI-диалоге,
+принадлежит тому диалогу и сам по себе Gmail-событием не становится.
 """
 
 
@@ -1003,54 +901,25 @@ def plan_block() -> str:
 
 
 def verdict_block() -> str:
-    """One output contract for both the ordinary tick and a goal session.
-
-    Self-sufficiency is asked of *every* letter, and that is the whole of the
-    change of 2026-08-23. Until then this block asked it of a question and told
-    an ordinary verdict to stay short — two commands about the same letter, and
-    the shorter one won. What came out on 2026-08-23 07:20 UTC (Gmail
-    `1a02d831f8eb1e44`) was five sentences with no heading, no task number and
-    eight untranslated internal terms in a row, about which the user said: «даже
-    если получатель немного в контексте наших задач, ему крайне сложно понять, о
-    чём идёт речь». Task 1244 had already fixed exactly this for questions by
-    editing exactly this block, and the letters it produced do carry the heading,
-    the choice and the price — which is why the fix here is the same edit with
-    the fork removed rather than a new checker over the model's output.
-
-    «Коротко» is not deleted, it is put where it belongs: nothing to say is still
-    `SILENT`, and a letter still says only what moved. What it may no longer do
-    is leave the reader guessing what it is about.
-
-    What stays here is the letter: its heading, its service lines, its question
-    and its repeat. Every rule about the language itself — grammar, word order
-    and «ни одного внутреннего термина без расшифровки» — moved to
-    `plain_russian` on 2026-08-24, because a language rule kept in the contract
-    of one letter reaches one letter. The mail reply that a review read on that
-    day said `lifecycle`, `drop` and `idle` to a person, and this block was the
-    only place that forbade it.
-    """
-    return f"""Правила ответа пользователю:
-- если сказать пользователю нечего, ответь ровно словом `SILENT`. Всё остальное,
-  что ты отправляешь, — письмо человеку вне нашего контекста;
-- твой ответ целиком — это либо ровно `SILENT`, либо само письмо. Не рассуждай
-  вслух до первой строки и не передумывай в ответе: письмо начинается строкой
-  `ПОВОД:`, и всё, что стоит выше неё, пользователь читает как начало письма;
-- любое письмо самодостаточно: его читают, не открывая задач и не помня
-  предыдущей переписки. Начинай шапкой «Над чем работаем» — список работ, у
-  каждой номер задачи и одна фраза, что это и в какой стадии. Дальше: что
-  изменилось для пользователя, цена, что осталось, и «Риск/долг», если в
-  verification есть GAP;
-- в конце письма скажи обычными словами, что нужно от пользователя. Нужно
-  решение или действие — назови его одной фразой. Не нужно ничего — так и
-  напиши: «От вас ничего не требуется». Служебная строка `ВОПРОС: нет` человеку
-  этого не говорит: он читает её как часть письма, а не как ответ на свой
-  вопрос «что от меня хотят»;
-{plain_russian.as_bullet()};
-- вопрос пользователю несёт сверх этого: исходная потребность пользователя,
-  что именно проверено и ключевые наблюдения,
-  рекомендация и реальная альтернатива с её ценой,
-  точный выбор и что произойдёт при каждом ответе,
-  что пока не изменилось и существенный риск;
+    """One output contract for both the ordinary tick and a goal session."""
+    return f"""Контракт результата этого фонового составителя:
+- сначала реши, есть ли отдельное Gmail-событие. Ответ в текущем CLI-диалоге не
+  дублируется в почту. Технические отбивки системы задач остаются в Telegram,
+  но продуктовые отчёты и вопросы туда не отправляются;
+- если Gmail-события нет, верни ровно `SILENT` и не пиши сообщение;
+- если оно есть, сначала выбери канал и устойчивую тождественность события, и
+  только после этого пиши текст. Верни только JSON без markdown и комментариев,
+  ровно с этими ключами:
+  {{"channel":"gmail","kind":"question|report","event_id":"...","subject":"...","body":"...","attachments":[]}};
+- `event_id` описывает наблюдаемое событие, а не формулировку текста: например
+  `question:task-861:choose-run-order` или `report:task-861:accepted`. Повтор того
+  же перехода получает тот же id; новое состояние — новый id;
+- обычный отчёт остаётся коротким;
+- вопрос пользователю не сокращай до короткого вердикта. Он должен быть
+  самодостаточным: сначала «Над чем работаем», затем исходная потребность
+  пользователя, что именно проверено и ключевые наблюдения, рекомендация и
+  реальная альтернатива с её ценой, точный выбор и что произойдёт при каждом
+  ответе, что пока не изменилось и существенный риск;
 - человек должен суметь принять решение из одного этого письма, не зная номеров
   задач и предыдущего разговора. Подробность важнее требования краткости, но не
   повторяй сведения, которые не помогают понять и выбрать. Не выдумывай
@@ -1060,23 +929,14 @@ def verdict_block() -> str:
   примеры из общих правил не являются текущим состоянием. Не добавляй «паузу»
   третьим вариантом и не синтезируй сочетание вариантов, если их прямо не
   называет проверенный материал;
-- один и тот же вопрос дважды не задают. Если ты уже спрашивал пользователя об
-  этом же выборе и ответа ещё нет, новое письмо имеет смысл только тогда, когда
-  с прошлого письма стало известно что-то новое. Тогда назови это строкой
-  `НОВОЕ: <что стало известно с прошлого письма>` сразу после шапки — и только
-  настоящий новый факт, не пересказ прежнего другими словами. Нечего написать в
-  этой строке — значит писать нечего: `SILENT`. Дверь письма проверяет это же
-  наблюдением и повтор без нового факта не отправляет;
-- первой строкой поставь `ПОВОД: вопрос|польза|готово|механика`, второй —
-  `ВОПРОС: да|нет`. `вопрос` означает, что нужен выбор пользователя, и такое
-  письмо доходит всегда, пока это не повтор уже заданного. `польза` —
-  изменилось, что пользователь может; `готово` — закончилась заказанная работа;
-  `механика` — прогон или движение репозитория, которые видны на табло.
-  Просьба выбрать, даже кончающаяся точкой, требует `ВОПРОС: да`."""
+- `kind=question` означает, что нужен выбор пользователя; `kind=report` — что
+  изменилось, что пользователь может, либо закончилась заказанная работа.
+  Прогон, коммит и движение репозитория отдельным письмом не становятся;
+{plain_russian.as_bullet()}."""
 
 
 def prompt(report: dict, events: list[str], reasons: list[dict],
-           said: list[dict], chat: dict, startup: str = "") -> str:
+           said: list[dict], startup: str = "") -> str:
     # Shown only when there is something observed to show. A heading over an
     # empty list reads as «причин нет», which is a different claim.
     seen = ("\nЧто наблюдение говорит о простое (это не приговор, а то, что видно с диска):\n"
@@ -1091,7 +951,7 @@ def prompt(report: dict, events: list[str], reasons: list[dict],
 """ if bounded else plan_block() + startup)
     return f"""Ты продакт-агент на фоновом пробуждении треда «{report['title']}».
 {startup_block}
-{heard_block(said, chat)}
+{heard_block(said)}
 
 Произошло с прошлого пробуждения:
 {chr(10).join('- ' + event for event in events)}
@@ -1115,9 +975,9 @@ def prompt(report: dict, events: list[str], reasons: list[dict],
    Новое обещание добавляй через `product_memory.append_work_line`, а не правкой
    файла руками: рядом пишет второй продакт. Обнови состояние пользовательских
    путей в снимке, если оно изменилось по артефакту, а не по прозе исполнителя.
-4. Верни текст для пользователя в формате вердикта продакта: что теперь
-   может пользователь, цена, что осталось, и строка «Риск/долг», если в
-   verification есть GAP.
+4. Верни `SILENT` или одно типизированное Gmail-сообщение по контракту ниже.
+   Текст отчёта отвечает: что теперь может пользователь, цена, что осталось, и
+   строка «Риск/долг», если в verification есть GAP.
 
 {verdict_block()}
 
@@ -1151,8 +1011,6 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true", help="показать события и выйти")
     parser.add_argument("--force", action="store_true", help="разбудить агента даже без событий")
     args = parser.parse_args()
-
-    require_notification_profile()
 
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     state_path = STATE_DIR / f"{args.thread}.json"
@@ -1301,19 +1159,21 @@ def main() -> int:
 
     state_path.write_text(json.dumps(record(None, not woke), ensure_ascii=False, indent=2))
 
-    # Письмо о принятой инструкции внешнему исполнителю. Здесь, а не внутри
+    # Письмо о зарегистрированной инструкции внешнему исполнителю. Здесь, а не внутри
     # разбуженного продакта: оно целиком собрано из наблюдения, поэтому не зависит
     # ни от того, что продакт написал, ни от того, будили ли его вообще. Уходит
     # один раз на редакцию — `deliver` под замком реестра проверяет, не назвал ли
     # её уже соседний тик, — и своим письмом, поэтому чужие письма направления
     # остаются ровно такими, какими были.
     mail = []
-    letter = outbound.instruction_letter(args.thread)
+    with outbound.Ledger() as ledger:
+        letter = outbound.instruction_letter(args.thread, ledger.thread(args.thread))
     if letter is not None:
         mail.append(deliver(
             args.thread, "instruction",
-            f"Продакт: {report['title']} — путь к принятой инструкции для внешнего исполнителя",
-            letter["body"], report, moment, names_instructions=letter["names"]))
+            f"Продакт: {report['title']} — путь к зарегистрированной инструкции для внешнего исполнителя",
+            letter["body"], moment, names_instructions=letter["names"],
+            event_id=letter["event_id"]))
 
     if not woke:
         if mail:
@@ -1329,14 +1189,13 @@ def main() -> int:
     # variadic and would otherwise swallow a trailing positional prompt.
     # Read before the owner is woken, not after it has written: a repeat that
     # was never composed costs nothing, and one that was costs a wake-up.
-    chat = outbound.heard_in_chat(moment)
     with outbound.Ledger() as ledger:
-        said = outbound.already_said(ledger.thread(args.thread), moment)
+        said = outbound.already_said(ledger.thread(args.thread))
 
     environment = {**os.environ, "IS_SANDBOX": "1"}
     result = subprocess.run(
         [str(CLAUDE_PRODUCT_OWNER), "--entry", "print"],
-        input=prompt(report, events, reasons, said, chat,
+        input=prompt(report, events, reasons, said,
                      startup_context.render(startup_context.packet((args.thread, report)))),
         env=environment,
         capture_output=True, text=True, cwd=HOME, timeout=WAKE_TIMEOUT,
@@ -1346,11 +1205,19 @@ def main() -> int:
     message = (result.stdout or "").strip()
     if result.returncode != 0:
         failure = f"[{args.thread}] пробуждение треда не отработало: {(result.stderr or '')[:300]}"
-        notify(failure)
         deliver(args.thread, "wake_failure",
                 f"Продакт: пробуждение треда «{report['title']}» не отработало",
-                failure, report, moment)
+                failure, moment)
         return 1
+
+    try:
+        composed = parse_composed_message(message)
+    except ValueError as error:
+        failure = f"[{args.thread}] составитель не выбрал канал до текста: {error}"
+        persist_composer_failure(state_path, record(None, True), message, error)
+        print(failure, file=sys.stderr)
+        return 1
+    message_body = composed["body"] if composed else ""
 
     # What the wake-up came to, observed rather than believed: the same
     # projection taken again, and the difference in live runs is the answer.
@@ -1365,28 +1232,25 @@ def main() -> int:
     # Молчание третьим исходом не является — и до этой проверки оно им было,
     # когда рядом шёл посторонний живой прогон и обычный `idle` не срабатывал.
     goal_check = goal_session.post_check(
-        args.thread, goals["objects"], (after or {}).get("live", []), message, moment)
+        args.thread, goals["objects"], (after or {}).get("live", []), message_body, moment)
 
-    if message and message != "SILENT":
-        mail.append(announce(args.thread, report["title"], message, report,
-                             moment, chat))
+    if composed:
+        mail.append(deliver(
+            args.thread, composed["kind"], composed["subject"], composed["body"],
+            moment, attachments=composed["attachments"],
+            event_id=composed["event_id"]))
     elif idle and not (after or {}).get("live"):
         # The owner was woken because the direction is standing still and said
         # nothing. Silence is what the user complained about in as many words —
         # «ни письма не было с вопросами/проблемами, ни информации на доске» — so
-        # the observed reason goes out as a letter.
-        #
-        # И только как письмо: это рассказ о работе, а такой текст 23 августа
-        # 2026 пользователь попросил в Telegram не слать. Вердикт выше идёт по
-        # тому же правилу — пуш достаётся только письму с вопросом, см.
-        # `announce`.
-        told = (f"[{report['title']}] простоя не сняли: живых прогонов нет, "
-                f"к запуску {startable(report)}.\n\nПочему, по наблюдению:\n"
-                + "\n".join(f"- {item['text']}" for item in reasons))
-        mail.append(deliver(
-            args.thread, "idle",
-            f"Продакт: «{report['title']}» ничего не запустил при непустой очереди",
-            told, report, moment))
+        # the observed reason goes out on the same channel the verdict does.
+        with outbound.Ledger() as ledger:
+            idle_due = outbound.kind_due(
+                ledger.thread(args.thread), "idle", moment,
+                outbound.IDLE_LETTER_SECONDS)
+        if idle_due:
+            mail.append(deliver_idle(
+                args.thread, report["title"], report, reasons, moment))
     if mail or goal_check:
         # Written after the fact and into the same file the board reads, because
         # «письмо не ушло» is an observation about this check like every other
