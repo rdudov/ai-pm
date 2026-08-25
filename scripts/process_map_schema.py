@@ -516,7 +516,8 @@ def startable(task: dict) -> bool:
 
 GOAL_SESSION_FIELDS = ("live", "reason", "id", "engine", "model", "turns",
                        "opened_at", "heartbeat", "last_turn_at",
-                       "last_turn_reaction_seconds", "recovered", "stopped", "src")
+                       "last_turn_reaction_seconds", "post_check", "recovered",
+                       "stopped", "src")
 
 
 def validate_goal_session(session: dict, where: str) -> dict:
@@ -538,6 +539,15 @@ def validate_goal_session(session: dict, where: str) -> dict:
         raise ContractError(f"{where}: не сказано, почему сессия жива или не жива")
     if session["live"] and not str(session["id"] or "").strip():
         raise ContractError(f"{where}: живая сессия без идентификатора разговора")
+    post_check = session["post_check"]
+    if post_check is not None and (
+            not isinstance(post_check, dict)
+            or not isinstance(post_check.get("resolved"), bool)
+            or not str(post_check.get("how") or "").strip()
+            or not str(post_check.get("src") or "").strip()
+            or (not post_check["resolved"]
+                and not str(post_check.get("told") or "").strip())):
+        raise ContractError(f"{where}: пост-контроль цели не называет исход и наблюдение")
     return session
 
 

@@ -3653,6 +3653,7 @@ def thread_session(key: str) -> dict | None:
             "heartbeat": record.get("heartbeat"),
             "last_turn_at": turn.get("at") or None,
             "last_turn_reaction_seconds": turn.get("reaction_seconds"),
+            "post_check": turn.get("post_check"),
             "recovered": bool(record.get("recovered")),
             "stopped": (record.get("stopped") or {}).get("reason"),
             "src": alive["src"],
