@@ -39,6 +39,12 @@ def event_delivered(entry: dict, event_id: str) -> bool:
             or any(item.get("event_id") == event_id for item in entry.get("letters", [])))
 
 
+def event_delivered_anywhere(data: dict, event_id: str) -> bool:
+    """Whether any direction has a successful receipt for this exact event."""
+    return any(event_delivered(entry, event_id)
+               for entry in data.get("threads", {}).values())
+
+
 def remember_delivery(entry: dict, *, event_id: str, subject: str, body: str,
                       kind: str, now: datetime, message_id: str | None) -> None:
     """Record a successful send; failed attempts never make an event delivered."""
