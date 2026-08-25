@@ -775,7 +775,8 @@ def loop(thread: str, once: bool = False) -> int:
                     thread_tick.deliver(
                         thread, composed["kind"], composed["subject"], composed["body"],
                         datetime.now(timezone.utc),
-                        attachments=composed["attachments"], event_id=composed["event_id"])
+                        attachments=composed["attachments"], event_id=composed["event_id"],
+                        selected_by="composer")
             else:
                 # Ход не состоялся. Разговор от этого не теряется — он на диске у
                 # CLI, — но продолжать вслепую нельзя: ротация записывается и

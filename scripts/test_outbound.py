@@ -79,15 +79,25 @@ class ComposerSelectsBeforeText(unittest.TestCase):
     def test_malformed_composer_response_stays_in_the_existing_thread_state(self):
         with tempfile.TemporaryDirectory() as directory:
             state_path = Path(directory, "process.json")
-            tick.persist_composer_failure(
-                state_path, {"thread": "process", "check": {"woke_owner": True}},
-                "Готовый текст без конверта", ValueError("expected JSON"))
+            ledger_path = Path(directory, "outbound.json")
+            with mock.patch.object(outbound, "LEDGER", ledger_path):
+                tick.persist_composer_failure(
+                    state_path,
+                    {"thread": "process", "updated_at": AT.isoformat(),
+                     "snapshot": {"ready": [1286]},
+                     "check": {"woke_owner": True}},
+                    "Готовый текст без конверта", ValueError("expected JSON"),
+                    retry_snapshot={"ready": []})
             saved = json.loads(state_path.read_text())
+            journal = json.loads(Path(directory, "outbound-journal.jsonl").read_text())
         self.assertEqual(saved["composer_failure"]["raw_response"],
                          "Готовый текст без конверта")
         self.assertEqual(saved["composer_failure"]["error"], "expected JSON")
         self.assertTrue(saved["check"]["woke_owner"])
         self.assertIn("без допустимого конверта", saved["check"]["outcome"])
+        self.assertEqual(saved["snapshot"], {"ready": []})
+        self.assertEqual(journal["kind"], "composer_failure")
+        self.assertEqual(journal["raw_response"], "Готовый текст без конверта")
 
     def test_idle_fallback_uses_gmail_delivery_with_the_observed_reason(self):
         report = {"ready_to_start": [{"id": 1280}], "decided_not_done": [],
@@ -136,11 +146,12 @@ class ComposerSelectsBeforeText(unittest.TestCase):
 
 class DirectDelivery(unittest.TestCase):
     def send(self, ledger: Path, *, event_id: str = "report:task-1280:accepted",
-             body: str = "Готово", result: str | bool | None = "gmail-1"):
+             body: str = "Готово", result: str | bool | None = "gmail-1",
+             selected_by: str = "composer"):
         with mock.patch.object(outbound, "LEDGER", ledger), \
                 mock.patch.object(tick, "send_mail", return_value=result) as mailed:
             record = tick.deliver("process", "report", "Продакт: результат", body,
-                                  AT, event_id=event_id)
+                                  AT, event_id=event_id, selected_by=selected_by)
         return record, mailed
 
     def test_composer_selected_message_goes_directly_to_gmail(self):
@@ -151,6 +162,14 @@ class DirectDelivery(unittest.TestCase):
         self.assertEqual(record["action"], "send")
         self.assertEqual(record["channel"], "gmail")
         self.assertTrue(record["composer_selected"])
+        self.assertEqual(record["decision_owner"], "composer")
+
+    def test_mechanical_door_does_not_claim_a_composer_selected_its_message(self):
+        with tempfile.TemporaryDirectory() as home:
+            record, _mailed = self.send(
+                Path(home) / "outbound.json", selected_by="instruction_door")
+        self.assertFalse(record["composer_selected"])
+        self.assertEqual(record["decision_owner"], "instruction_door")
 
     def test_the_same_event_is_not_sent_twice(self):
         with tempfile.TemporaryDirectory() as home:
@@ -281,7 +300,8 @@ class ExternalInstruction(unittest.TestCase):
         return path
 
     def direction(self, home: str, *tasks: tuple[int, str]):
-        rows = [{"id": number, "path": f"tasks/{number}-external", "status": status}
+        rows = [{"id": number, "path": f"tasks/{number}-external", "status": status,
+                 "title": f"Цель внешней задачи {number}"}
                 for number, status in tasks]
         return (mock.patch.object(pms, "REPO", Path(home)),
                 mock.patch.object(thread_state, "load_thread", return_value={}),
@@ -292,14 +312,25 @@ class ExternalInstruction(unittest.TestCase):
         with repo, direction, listing:
             return outbound.instruction_letter("deep-research", entry)
 
-    def test_registered_file_is_ready_even_while_task_is_blocked(self):
+    def test_registered_file_without_a_return_is_ready_while_task_is_blocked(self):
         with tempfile.TemporaryDirectory() as home:
             path = self.a_deliverable(home, 1272, "a100-run-instruction.md", "run\n")
             letter = self.letter(home, ((1272, "blocked"),))
         digest = hashlib.sha256(b"run\n").hexdigest()
         self.assertIn(str(path), letter["body"])
         self.assertIn(digest, letter["body"])
+        self.assertIn("Цель внешней задачи 1272", letter["body"])
+        self.assertIn("результат внешнего выполнения ещё не возвращён", letter["body"])
+        self.assertIn("Точное действие", letter["body"])
         self.assertEqual(letter["event_id"], f"instruction:deep-research:1272:{digest}")
+
+    def test_task_1272_returned_result_suppresses_its_registered_instruction(self):
+        with tempfile.TemporaryDirectory() as home:
+            self.a_deliverable(home, 1272, "a100-run-instruction.md", "run\n")
+            returned = Path(home, "tasks", "1272-external", "from-external-agent")
+            returned.mkdir()
+            (returned / "aggregation-pro.json").write_text("{}\n", encoding="utf-8")
+            self.assertIsNone(self.letter(home, ((1272, "blocked"),)))
 
     def test_unregistered_file_is_not_ready(self):
         with tempfile.TemporaryDirectory() as home:
