@@ -406,8 +406,8 @@ class StandingGoalOutcome(unittest.TestCase):
         self.assertIn("ни живого прогона", checked["told"])
         self.assertEqual(self.mail, [])
         # Внутренний номер цели остаётся в машинной записи отказа, но не уходит
-        # пользователю отдельным Telegram-сообщением.
-        self.assertEqual(self.told, [])
+        # пользователю отдельным сообщением; продуктового Telegram-отправителя
+        # в этом пути больше нет.
         self.assertIn("ни живого прогона", journal.write.call_args_list[0].args[0])
 
     def test_an_empty_answer_is_refused_like_silence(self):
