@@ -1378,32 +1378,28 @@ class TheTickUsesTheGate(unittest.TestCase):
             tick.notify("status")
         send.assert_called_once_with("status")
 
-    def test_a_standing_goal_left_without_an_outcome_is_pushed(self):
-        # Пользователь 23 августа 2026 назвал один класс: «Я не просил присылать
-        # отчёты по задачам в телеграм». Это сообщение рассказом о работе не
-        # является: оно говорит, что пробуждение по стоячей цели не дало ни
-        # живого прогона, ни названного блокера. Почтовой копии у него нет —
-        # `deliver()` из этой ветки не вызывается, — поэтому без пуша поломку не
-        # видно нигде.
+    def test_a_standing_goal_failure_is_recorded_without_a_user_message(self):
+        # Внутренний отказ остаётся в возвращаемой записи для снимка и журнала,
+        # но не создаёт Telegram- или Gmail-сообщение.
         import goal_session
 
         goal = {"id": 1, "waiting_on": [861], "outcome": "о", "gap": "g"}
         with mock.patch.object(tick, "send_bot_message") as send, \
                 mock.patch.object(tick, "deliver") as door:
             checked = goal_session.post_check("process", [goal], [], "SILENT", AT)
-        send.assert_called_once()
+        send.assert_not_called()
         door.assert_not_called()
-        self.assertIn("ни живого прогона", send.call_args.args[0])
         self.assertFalse(checked["resolved"])
         self.assertIn("told", checked)
+        self.assertIn("ни живого прогона", checked["told"])
 
-    def test_only_four_places_may_push_at_all(self):
-        # Пуш остался у четырёх мест, и каждое названо: вердикт направления
+    def test_only_three_places_may_push_at_all(self):
+        # Пуш остался у трёх мест, и каждое названо: вердикт направления
         # (`announce`, отсюда же вердикт непрерывной сессии) — но только когда
-        # письмо спрашивает пользователя, см. соседний тест; сообщение контроля
-        # стоячей цели и два сообщения о сломанном контуре — разошедшийся
-        # контракт с `task_runner` и не отработавшее пробуждение. Отчёт о простое
-        # (`idle`) не пушится ниоткуда. Отбивки dev-pipeline о фоновых прогонах
+        # письмо спрашивает пользователя, см. соседний тест; два сообщения о
+        # сломанном контуре — разошедшийся контракт с `task_runner` и не
+        # отработавшее пробуждение. Отчёт о простое (`idle`) и внутренние номера
+        # целей не пушатся ниоткуда. Отбивки dev-pipeline о фоновых прогонах
         # живут в системе задач и этой проверки не касаются.
         import ast
 
@@ -1423,8 +1419,7 @@ class TheTickUsesTheGate(unittest.TestCase):
                     if name == "notify":
                         callers.append((path.name, node.name))
         self.assertEqual(sorted(callers),
-                         [("goal_session.py", "post_check"),
-                          ("thread_tick.py", "announce"),
+                         [("thread_tick.py", "announce"),
                           ("thread_tick.py", "main"),
                           ("thread_tick.py", "runner_contract_alarm")])
         source = Path(tick.__file__).read_text(encoding="utf-8")

@@ -21,6 +21,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -401,19 +402,17 @@ class StandingGoalOutcome(unittest.TestCase):
 
     def test_silence_beside_an_unrelated_live_run_is_refused_without_mail(self):
         """Ровно та дыра, которую назвало ревью: `idle` не срабатывает, цель стоит."""
-        checked = session.post_check("process", [goal()], [1126], "SILENT", self.moment())
+        with mock.patch("sys.stderr") as journal:
+            checked = session.post_check(
+                "process", [goal()], [1126], "SILENT", self.moment())
         self.assertFalse(checked["resolved"])
         self.assertEqual(checked["goals"], ["0001"])
         self.assertIn("ни живого прогона", checked["told"])
         self.assertEqual(self.mail, [])
-        # Пушем — да, письмом — нет. 23 августа 2026 пользователь попросил не
-        # слать в Telegram отчёты по задачам, и рассказ о работе туда больше не
-        # уходит. Это сообщение рассказом о работе не является: оно говорит, что
-        # пробуждение по стоячей цели не дало ни живого прогона, ни названного
-        # блокера. Почтовой копии у него нет — `self.mail` пуст той же
-        # проверкой, — поэтому без пуша поломку не видно нигде.
-        self.assertEqual(len(self.told), 1)
-        self.assertIn("ни живого прогона", self.told[0])
+        # Внутренний номер цели остаётся в машинной записи отказа, но не уходит
+        # пользователю отдельным Telegram-сообщением.
+        self.assertEqual(self.told, [])
+        self.assertIn("ни живого прогона", journal.write.call_args_list[0].args[0])
 
     def test_an_empty_answer_is_refused_like_silence(self):
         checked = session.post_check("process", [goal()], [], "   ", self.moment())
@@ -622,8 +621,8 @@ class OnTheBoard(unittest.TestCase):
         base = {"live": True, "reason": "процесс сессии наблюдается живым", "id": "s-1",
                 "engine": "claude", "model": "opus", "turns": 4, "opened_at": None,
                 "heartbeat": None, "last_turn_at": None,
-                "last_turn_reaction_seconds": None, "recovered": False, "stopped": None,
-                "src": "pid и стартовый тик /proc"}
+                "last_turn_reaction_seconds": None, "post_check": None,
+                "recovered": False, "stopped": None, "src": "pid и стартовый тик /proc"}
         return {**base, **fields}
 
     def test_a_named_session_says_what_observed_it(self):
@@ -646,6 +645,13 @@ class OnTheBoard(unittest.TestCase):
         template = (Path(session.__file__).parent / "process_map_template.html").read_text()
         self.assertIn("function goalSessionNode(session)", template)
         self.assertIn("goalSessionNode(panel.goal_session)", template)
+
+    def test_an_unresolved_goal_check_is_printed_on_the_board(self):
+        failure = {"resolved": False, "how": "нет исхода", "told": "полный отказ",
+                   "src": "наблюдение после хода"}
+        schema.validate_goal_session(self.projection(post_check=failure), "направление")
+        template = (Path(session.__file__).parent / "process_map_template.html").read_text()
+        self.assertIn("session.post_check.told", template)
 
 
 class TheTickBecomesAWatchdog(unittest.TestCase):
