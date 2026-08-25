@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Durable receipts for messages whose composer already selected Gmail.
+"""Durable receipts for messages whose owner already selected Gmail.
 
-This module does not decide whether prose is worth sending and does not infer a
-channel, question, subject, or duplicate from Russian text. The composer owns
-those decisions before it writes the message. Here the only decision is an
-exact one: an explicitly named event is sent once.
+This module never infers a channel, question, subject, or duplicate from Russian
+text. A product composer owns those decisions for product messages. The direct
+instruction door owns one narrower decision from task state: a registered
+instruction with no returned external result is sent once.
 """
 from __future__ import annotations
 
@@ -24,9 +24,11 @@ KEEP_INSTRUCTIONS = 50
 IDLE_LETTER_SECONDS = 6 * 60 * 60
 
 EXTERNAL_INSTRUCTION = re.compile(r"(?:^|[-_])instruction\.md$", re.IGNORECASE)
-HANDOFF_HEADING = "Инструкция внешнему исполнителю (собрано при отправке):"
-HANDOFF_NOTE = ("Файл лежит по этому пути на этой машине; у внешнего исполнителя "
-                "есть к ней доступ и он забирает документ сам. sha256 посчитан с "
+HANDOFF_HEADING = "Актуальная инструкция внешнему исполнителю:"
+HANDOFF_NOTE = ("Точное действие: передайте внешнему исполнителю перечисленные "
+                "пути и sha256. Файл лежит по этому пути на этой машине; у "
+                "внешнего исполнителя есть к ней доступ и он забирает документ "
+                "сам. sha256 посчитан с "
                 "байтов файла в минуту отправки этого письма — если ревью "
                 "перепишет инструкцию, придёт письмо о новой редакции.")
 
@@ -76,7 +78,7 @@ def kind_due(entry: dict, kind: str, now: datetime, seconds: int) -> bool:
 
 
 def external_instructions(thread: str) -> list[dict]:
-    """Newest instruction registered as a task deliverable for this direction."""
+    """Newest registered instruction that still awaits an external result."""
     from process_map_state import REPO, _file_sha256, thread_tasks  # noqa: PLC0415
     from thread_state import load_thread  # noqa: PLC0415
 
@@ -85,7 +87,16 @@ def external_instructions(thread: str) -> list[dict]:
     except (SystemExit, OSError, ValueError):
         return []
     for task in thread_tasks(config):
-        box = REPO / str(task.get("path") or "") / "deliverables"
+        task_dir = REPO / str(task.get("path") or "")
+        returned = task_dir / "from-external-agent"
+        try:
+            has_result = any(path.is_file() and path.name != "README.md"
+                             for path in returned.rglob("*"))
+        except OSError:
+            has_result = False
+        if has_result:
+            continue
+        box = task_dir / "deliverables"
         try:
             data = json.loads((box / "manifest.json").read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError, ValueError):
@@ -101,7 +112,9 @@ def external_instructions(thread: str) -> list[dict]:
             path = box / name
             if not path.is_file():
                 continue
-            found.append({"task": task.get("id"), "path": str(path.resolve()),
+            found.append({"task": task.get("id"),
+                          "goal": task.get("title") or f"задача {task.get('id')}",
+                          "path": str(path.resolve()),
                           "sha256": _file_sha256(path)})
         if found:
             return found
@@ -158,7 +171,10 @@ def instruction_letter(thread: str, entry: dict | None = None) -> dict | None:
               f"видна и не читается, письмо без её sha256 не собирается: "
               f"{', '.join(unreadable)}", file=sys.stderr)
         return None
-    lines = [f"- {item['task']} — {item['path']}\n  sha256: {item['sha256']}"
+    lines = [f"Цель: {item['goal']}\n"
+             "Причина отправки: инструкция зарегистрирована, а результат "
+             "внешнего выполнения ещё не возвращён.\n"
+             f"- {item['task']} — {item['path']}\n  sha256: {item['sha256']}"
              for item in found]
     return {
         "body": f"{HANDOFF_HEADING}\n\n" + "\n".join(lines) + f"\n\n{HANDOFF_NOTE}",

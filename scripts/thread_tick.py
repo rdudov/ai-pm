@@ -671,14 +671,23 @@ def composer_failure(raw_response: str, error: ValueError, src: str) -> dict:
 
 
 def persist_composer_failure(state_path: Path, state: dict,
-                             raw_response: str, error: ValueError) -> None:
-    """Keep a composed but malformed response in the thread's existing state."""
+                             raw_response: str, error: ValueError,
+                             retry_snapshot: dict | None = None) -> None:
+    """Keep a malformed response durable without consuming its observation."""
     state["composer_failure"] = composer_failure(
         raw_response, error, f"stdout составителя; {state_path}")
+    if retry_snapshot is not None:
+        state["snapshot"] = retry_snapshot
     if isinstance(state.get("check"), dict):
         state["check"]["outcome"] = "составитель вернул ответ без допустимого конверта"
         state["check"]["outcome_src"] = f"composer_failure; {state_path}"
     state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2))
+    with outbound.Ledger() as ledger:
+        ledger.record({"at": state.get("updated_at"),
+                       "thread": state.get("thread"),
+                       "kind": "composer_failure", "action": "fail",
+                       "reason": str(error), "raw_response": raw_response,
+                       "src": f"stdout составителя; {state_path}"})
 
 
 def deliver(thread: str, kind: str, subject: str, body: str, moment: datetime,
@@ -686,7 +695,8 @@ def deliver(thread: str, kind: str, subject: str, body: str, moment: datetime,
             attachments: list[str] | None = None,
             raw_message: bytes | None = None,
             names_instructions: list[dict] | None = None,
-            event_id: str | None = None) -> dict:
+            event_id: str | None = None,
+            selected_by: str = "delivery_door") -> dict:
     """Send one already-routed Gmail message and receipt its exact event."""
     if (kind == "reply") != bool(reply_to_message_id):
         raise ValueError("kind='reply' and reply_to_message_id must be supplied together")
@@ -708,7 +718,7 @@ def deliver(thread: str, kind: str, subject: str, body: str, moment: datetime,
             duplicate = True
         action = "drop" if duplicate else "send"
         reason = ("это событие уже доставлено" if duplicate else
-                  "канал Gmail выбран составителем до текста")
+                  f"канал Gmail выбран до текста: {selected_by}")
         delivered = None
         message_id = None
         if action == "send":
@@ -734,7 +744,8 @@ def deliver(thread: str, kind: str, subject: str, body: str, moment: datetime,
                   "delivered": None if delivered is None else bool(delivered),
                   "message_id": message_id,
                   "reply_to_message_id": reply_to_message_id,
-                  "composer_selected": True}
+                  "decision_owner": selected_by,
+                  "composer_selected": selected_by == "composer"}
         ledger.record(record)
     return {**record, "src": "state/outbound.json — успешные event_id; "
             "state/outbound-journal.jsonl — все попытки доставки подряд"}
@@ -1173,9 +1184,9 @@ def main() -> int:
 
     state_path.write_text(json.dumps(record(None, not woke), ensure_ascii=False, indent=2))
 
-    # Письмо о зарегистрированной инструкции внешнему исполнителю. Здесь, а не внутри
-    # разбуженного продакта: оно целиком собрано из наблюдения, поэтому не зависит
-    # ни от того, что продакт написал, ни от того, будили ли его вообще. Уходит
+    # Письмо об актуальной зарегистрированной инструкции внешнему исполнителю.
+    # Здесь, а не внутри разбуженного продакта: дверь наблюдает и сам файл, и
+    # отсутствие возвращённого внешнего результата в той же задаче. Уходит
     # один раз на редакцию — `deliver` под замком реестра проверяет, не назвал ли
     # её уже соседний тик, — и своим письмом, поэтому чужие письма направления
     # остаются ровно такими, какими были.
@@ -1187,7 +1198,7 @@ def main() -> int:
             args.thread, "instruction",
             f"Продакт: {report['title']} — путь к зарегистрированной инструкции для внешнего исполнителя",
             letter["body"], moment, names_instructions=letter["names"],
-            event_id=letter["event_id"]))
+            event_id=letter["event_id"], selected_by="instruction_door"))
 
     if not woke:
         if mail:
@@ -1228,7 +1239,9 @@ def main() -> int:
         composed = parse_composed_message(message)
     except ValueError as error:
         failure = f"[{args.thread}] составитель не выбрал канал до текста: {error}"
-        persist_composer_failure(state_path, record(None, True), message, error)
+        persist_composer_failure(
+            state_path, record(None, True), message, error,
+            retry_snapshot=previous)
         print(failure, file=sys.stderr)
         return 1
     message_body = composed["body"] if composed else ""
@@ -1252,7 +1265,7 @@ def main() -> int:
         mail.append(deliver(
             args.thread, composed["kind"], composed["subject"], composed["body"],
             moment, attachments=composed["attachments"],
-            event_id=composed["event_id"]))
+            event_id=composed["event_id"], selected_by="composer"))
     elif idle and not (after or {}).get("live"):
         # The owner was woken because the direction is standing still and said
         # nothing. Silence is what the user complained about in as many words —
