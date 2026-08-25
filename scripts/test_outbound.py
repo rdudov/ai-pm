@@ -6,6 +6,7 @@ import contextlib
 import hashlib
 import io
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -336,15 +337,17 @@ class ExternalInstruction(unittest.TestCase):
         self.readiness(home, number, "approved", "completed")
         return path
 
-    def readiness(self, home: str, number: int, decision: str, state: str) -> None:
+    def readiness(self, home: str, number: int, decision: str, state: str,
+                  recorded_at: datetime | None = None) -> None:
         task = Path(home) / "tasks" / f"{number}-external"
         (task / "status.json").write_text(
             json.dumps({"state": state}), encoding="utf-8")
         reviews = task / "reviews"
         reviews.mkdir(exist_ok=True)
+        recorded_at = recorded_at or datetime.now(timezone.utc)
         (reviews / "rounds.jsonl").write_text(
             json.dumps({"round": 1, "decision": decision,
-                        "recorded_at": datetime.now(timezone.utc).isoformat()}) + "\n",
+                        "recorded_at": recorded_at.isoformat()}) + "\n",
             encoding="utf-8")
 
     def direction(self, home: str, *tasks: tuple[int, str]):
@@ -390,20 +393,29 @@ class ExternalInstruction(unittest.TestCase):
     def test_file_rewritten_after_approval_waits_for_the_next_approval(self):
         with tempfile.TemporaryDirectory() as home:
             path = self.a_deliverable(home, 1286, "instruction.md", "approved v1\n")
+            approved_at = datetime.now(timezone.utc)
+            self.readiness(home, 1286, "approved", "completed", approved_at)
+            os.utime(path, (approved_at.timestamp() - 1,) * 2)
             first = self.letter(home, ((1286, "completed"),))
             path.write_text("unreviewed v2\n", encoding="utf-8")
+            os.utime(path, (approved_at.timestamp() + 1,) * 2)
             self.assertIsNone(self.letter(home, ((1286, "blocked"),)))
-            self.readiness(home, 1286, "approved", "completed")
+            self.readiness(home, 1286, "approved", "completed",
+                           approved_at + timedelta(seconds=2))
             second = self.letter(home, ((1286, "completed"),))
         self.assertNotEqual(first["event_id"], second["event_id"])
 
     def test_rewrite_during_hashing_is_not_sent_under_the_old_approval(self):
         with tempfile.TemporaryDirectory() as home:
             path = self.a_deliverable(home, 1286, "instruction.md", "approved\n")
+            approved_at = datetime.now(timezone.utc)
+            self.readiness(home, 1286, "approved", "completed", approved_at)
+            os.utime(path, (approved_at.timestamp() - 1,) * 2)
 
             def rewrite_while_hashing(candidate: Path) -> str:
                 digest = hashlib.sha256(candidate.read_bytes()).hexdigest()
                 candidate.write_text("rewritten during hash\n", encoding="utf-8")
+                os.utime(candidate, (approved_at.timestamp() + 1,) * 2)
                 return digest
 
             repo, direction, listing = self.direction(home, (1286, "completed"))
