@@ -627,10 +627,17 @@ COMPOSED_EVENT = re.compile(r"^[a-z0-9][a-z0-9:._-]{5,199}$")
 
 def parse_composed_message(text: str) -> dict | None:
     """Read the composer's route declaration without interpreting its prose."""
-    if text.strip() in {"", "SILENT"}:
+    payload = text.strip()
+    if re.fullmatch(r"\*\*[ \t]*SILENT[ \t]*\*\*", payload):
+        payload = "SILENT"
+    if payload in {"", "SILENT"}:
         return None
+    fenced = re.fullmatch(
+        r"```(?:json)?[ \t]*\r?\n(?P<payload>.*)\r?\n```", payload, re.DOTALL)
+    if fenced:
+        payload = fenced.group("payload").strip()
     try:
-        value = json.loads(text)
+        value = json.loads(payload)
     except json.JSONDecodeError as error:
         raise ValueError(f"composer returned neither SILENT nor JSON: {error}") from error
     if not isinstance(value, dict) or set(value) != set(COMPOSED_KEYS):
