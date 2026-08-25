@@ -333,7 +333,18 @@ class ExternalInstruction(unittest.TestCase):
         if registered:
             (box / "manifest.json").write_text(
                 json.dumps({"deliverables": [name]}), encoding="utf-8")
+        self.readiness(home, number, "approved", "completed")
         return path
+
+    def readiness(self, home: str, number: int, decision: str, state: str) -> None:
+        task = Path(home) / "tasks" / f"{number}-external"
+        (task / "status.json").write_text(
+            json.dumps({"state": state}), encoding="utf-8")
+        reviews = task / "reviews"
+        reviews.mkdir(exist_ok=True)
+        (reviews / "rounds.jsonl").write_text(
+            json.dumps({"round": 1, "decision": decision}) + "\n",
+            encoding="utf-8")
 
     def direction(self, home: str, *tasks: tuple[int, str]):
         rows = [{"id": number, "path": f"tasks/{number}-external", "status": status,
@@ -348,7 +359,7 @@ class ExternalInstruction(unittest.TestCase):
         with repo, direction, listing:
             return outbound.instruction_letter("deep-research", entry)
 
-    def test_registered_file_without_a_return_is_ready_while_task_is_blocked(self):
+    def test_approved_registered_file_without_a_return_is_ready(self):
         with tempfile.TemporaryDirectory() as home:
             path = self.a_deliverable(home, 1272, "a100-run-instruction.md", "run\n")
             letter = self.letter(home, ((1272, "blocked"),))
@@ -359,6 +370,21 @@ class ExternalInstruction(unittest.TestCase):
         self.assertIn("результат внешнего выполнения ещё не возвращён", letter["body"])
         self.assertIn("Точное действие", letter["body"])
         self.assertEqual(letter["event_id"], f"instruction:deep-research:1272:{digest}")
+
+    def test_rework_rounds_emit_nothing_until_the_latest_round_is_approved(self):
+        with tempfile.TemporaryDirectory() as home:
+            self.a_deliverable(home, 1286, "instruction.md", "v5\n")
+            self.readiness(home, 1286, "rework", "blocked")
+            self.assertIsNone(self.letter(home, ((1286, "blocked"),)))
+            self.readiness(home, 1286, "approved", "completed")
+            letter = self.letter(home, ((1286, "completed"),))
+        self.assertIsNotNone(letter)
+
+    def test_approved_round_emits_nothing_while_its_child_is_running(self):
+        with tempfile.TemporaryDirectory() as home:
+            self.a_deliverable(home, 1286, "instruction.md", "ready soon\n")
+            self.readiness(home, 1286, "approved", "running")
+            self.assertIsNone(self.letter(home, ((1286, "completed"),)))
 
     def test_task_1272_returned_result_suppresses_its_registered_instruction(self):
         with tempfile.TemporaryDirectory() as home:
@@ -374,7 +400,7 @@ class ExternalInstruction(unittest.TestCase):
                                registered=False)
             self.assertIsNone(self.letter(home, ((1272, "completed"),)))
 
-    def test_newest_registered_instruction_wins_regardless_of_status(self):
+    def test_newest_ready_registered_instruction_wins_regardless_of_catalogue_status(self):
         with tempfile.TemporaryDirectory() as home:
             new = self.a_deliverable(home, 1272, "instruction.md", "new\n")
             old = self.a_deliverable(home, 1233, "instruction.md", "old\n")

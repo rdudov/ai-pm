@@ -83,8 +83,22 @@ def kind_due(entry: dict, kind: str, now: datetime, seconds: int) -> bool:
     return previous is None or (now - previous).total_seconds() >= seconds
 
 
+def instruction_ready(task_dir: Path) -> bool:
+    """Whether the latest independent review approved and its child is gone."""
+    try:
+        status = json.loads((task_dir / "status.json").read_text(encoding="utf-8"))
+        rows = [json.loads(line) for line in
+                (task_dir / "reviews" / "rounds.jsonl").read_text(encoding="utf-8").splitlines()
+                if line.strip()]
+    except (OSError, json.JSONDecodeError, ValueError):
+        return False
+    return (isinstance(status, dict) and status.get("state") != "running"
+            and bool(rows) and isinstance(rows[-1], dict)
+            and rows[-1].get("decision") == "approved")
+
+
 def external_instructions(thread: str) -> list[dict]:
-    """Newest registered instruction that still awaits an external result."""
+    """Newest approved, idle instruction that still awaits an external result."""
     from process_map_state import REPO, _file_sha256, thread_tasks  # noqa: PLC0415
     from thread_state import load_thread  # noqa: PLC0415
 
@@ -94,6 +108,8 @@ def external_instructions(thread: str) -> list[dict]:
         return []
     for task in thread_tasks(config):
         task_dir = REPO / str(task.get("path") or "")
+        if not instruction_ready(task_dir):
+            continue
         returned = task_dir / "from-external-agent"
         try:
             has_result = any(path.is_file() and path.name != "README.md"
