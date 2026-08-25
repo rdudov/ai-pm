@@ -111,6 +111,20 @@ class ComposerSelectsBeforeText(unittest.TestCase):
         self.assertNotIn("ПОВОД: вопрос", text)
         self.assertNotIn("ВОПРОС: да|нет", text)
 
+    def test_the_same_contract_asks_every_letter_to_stand_on_its_own(self):
+        text = tick.verdict_block()
+        self.assertNotIn("обычный отчёт остаётся коротким", text)
+        self.assertIn("любое письмо самодостаточно", text)
+        self.assertIn("Над чем работаем", text)
+        self.assertIn("номер задачи", text)
+        self.assertIn("верни ровно `SILENT`", text)
+
+    def test_a_letter_says_in_plain_words_what_it_wants_from_the_reader(self):
+        text = tick.verdict_block()
+        self.assertIn("что нужно от пользователя", text)
+        self.assertIn("«От вас ничего не требуется»", text)
+        self.assertIn("Поле `kind` технического конверта", text)
+
     def test_late_russian_text_rules_are_gone(self):
         source = Path(outbound.__file__).read_text(encoding="utf-8")
         for old_owner in ("def asks_user", "def already_heard", "def same_question",
