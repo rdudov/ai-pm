@@ -44,6 +44,28 @@ class ComposerSelectsBeforeText(unittest.TestCase):
         message = tick.parse_composed_message(f"```json\n{composed()}\n```")
         self.assertEqual(message["event_id"], "report:task-1280:accepted")
 
+    def test_one_unambiguous_fenced_envelope_after_prose_is_parsed(self):
+        message = tick.parse_composed_message(
+            f"Составитель записал служебный итог.\n```json\n{composed()}\n```")
+        self.assertEqual(message["channel"], "gmail")
+        self.assertEqual(message["event_id"], "report:task-1280:accepted")
+
+    def test_different_fenced_blocks_are_an_explicit_failure(self):
+        first = f"```json\n{composed()}\n```"
+        second = f"```json\n{composed(body='Другой текст')}\n```"
+        response = f"{first}\n{second}"
+        with self.assertRaisesRegex(ValueError, "multiple different fenced blocks"):
+            tick.parse_composed_message(response)
+
+    def test_identical_fenced_blocks_have_one_unambiguous_envelope(self):
+        block = f"```json\n{composed()}\n```"
+        message = tick.parse_composed_message(f"{block}\nповтор\n{block}")
+        self.assertEqual(message["event_id"], "report:task-1280:accepted")
+
+    def test_malformed_fenced_json_is_refused(self):
+        with self.assertRaisesRegex(ValueError, "neither SILENT nor JSON"):
+            tick.parse_composed_message("пояснение\n```json\n{not-json}\n```")
+
     def test_prose_and_punctuation_are_not_interpreted_as_the_envelope(self):
         for response in ("SILENT.", f"Письмо:\n{composed()}"):
             with self.subTest(response=response), self.assertRaises(ValueError):
