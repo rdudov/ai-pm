@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
+import ctypes.util
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 import fcntl
@@ -11,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import subprocess
 import sys
 from typing import Any
@@ -43,6 +46,12 @@ OPUS_MODEL = "opus"
 FABLE_MODEL = "fable"
 CODEX_MODEL = "gpt-5.6-sol"
 OPUS_REMAINING_THRESHOLD = 5.0
+# `EX_TEMPFAIL` из sysexits.h — «временный отказ; просьбу следует повторить
+# позже». Единственный канал между этим запускателем и тем, кто его позвал, —
+# код возврата, и число здесь стандартное, а не наше: тот, кто следует той же
+# договорённости, уже говорит этим кодом то же самое. Читает его почтовая дверь
+# соседнего репозитория (`mail_product_owner.ENGINE_NEVER_MOVED_EXIT`).
+ENGINE_NEVER_MOVED_EXIT = 75
 STARTUP_PROMPT = (
     "Ты работаешь как самостоятельный продакт-владелец. Полностью прочитай AGENTS.md "
     "этого каталога и следуй ему. На старте прочитай текущую редакцию портфельного "
@@ -324,6 +333,51 @@ def fetch_usage(
     return payload
 
 
+def answered_token_total(result: object) -> float:
+    """How many tokens a Claude Code result envelope accounts for.
+
+    Zero means no request of this run was ever answered: the counters are
+    filled from responses, so nothing else can leave them all at zero.
+    """
+    usage = result.get("usage") if isinstance(result, dict) else None
+    return sum(
+        value for key, value in (usage or {}).items()
+        if key.endswith("_tokens") and isinstance(value, (int, float))
+    )
+
+
+def engine_never_moved(result: object) -> bool:
+    """Whether the engine stopped before the model ever got a move.
+
+    Observed, not assumed (task 1315, 27 August 2026). Under
+    `--output-format json` Claude Code prints its envelope even when the
+    provider refuses it, and three separate refusals — a stub answering 403
+    with the verbatim text of the 27 August incident, the same stub answering
+    401, and the real API answering 401 to a bad key — all came back
+    `terminal_reason: "api_error"` with an empty `modelUsage`, every token
+    counter, the cost and `duration_api_ms` at zero. A run that did move looks
+    nothing like it: the control answer came back `terminal_reason:
+    "completed"` with two models billed and non-zero counters.
+
+    Both halves have to hold. `api_error` alone would also fire when the
+    provider refuses the seventh turn of a session that has already created a
+    task or sent a message, and repeating that request would repeat its
+    effects. The empty accounting is what says no answer was ever received, so
+    there were no effects to repeat.
+
+    `num_turns` is deliberately not consulted: it reads 1 for a refused run and
+    0 for a command that asks nothing of the model, which is the opposite of
+    the way round it would have to be.
+    """
+    if not isinstance(result, dict):
+        return False
+    return (
+        result.get("terminal_reason") == "api_error"
+        and not result.get("modelUsage")
+        and answered_token_total(result) == 0
+    )
+
+
 def refresh_authorization_with_claude() -> None:
     """Let Claude Code, the credential owner, refresh auth without a model turn."""
     command = [
@@ -356,17 +410,12 @@ def refresh_authorization_with_claude() -> None:
         result = json.loads(completed.stdout)
     except json.JSONDecodeError as exc:
         raise RuntimeError("Claude authorization refresh returned non-JSON output") from exc
-    usage = result.get("usage") if isinstance(result, dict) else None
-    token_total = sum(
-        value for key, value in (usage or {}).items()
-        if key.endswith("_tokens") and isinstance(value, (int, float))
-    )
     if (
         not isinstance(result, dict)
         or result.get("is_error") is not False
         or result.get("num_turns") != 0
         or result.get("total_cost_usd") not in (0, 0.0)
-        or token_total != 0
+        or answered_token_total(result) != 0
     ):
         raise RuntimeError("Claude authorization refresh was not a zero-turn /usage command")
 
@@ -532,6 +581,82 @@ def codex_command(entry: str, extra: list[str]) -> list[str]:
     return [*common, *extra]
 
 
+def reserved_exit(code: int) -> int:
+    """Never repeat by accident a code this launcher earns by observation.
+
+    `ENGINE_NEVER_MOVED_EXIT` means «I watched the envelope and the model never
+    moved». An engine that exits with the same number for a reason of its own
+    would be making that claim without anybody having checked it, so it is
+    reported as the plain failure it is.
+    """
+    return 1 if code == ENGINE_NEVER_MOVED_EXIT else code
+
+
+def _die_with_parent() -> None:
+    """Make the engine follow this launcher into the grave.
+
+    Until the print route started reading the engine's envelope it replaced
+    itself with the engine, so a caller that killed the launcher on timeout
+    killed the engine too. Staying alive above it must not turn a timed-out
+    wake-up into an unattended agent that was started with permissions skipped.
+    PR_SET_PDEATHSIG is 1; this process is single-threaded, which is what makes
+    it the right thread to bind the signal to.
+
+    Runs between fork and exec, so a raise here would mean no engine at all. A
+    platform without this call gets a wake-up that works and a line saying which
+    guarantee it does not have, rather than no wake-up and a stack trace.
+    """
+    try:
+        ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6",
+                    use_errno=True).prctl(1, signal.SIGTERM)
+    except (OSError, AttributeError) as exc:
+        print(f"product-owner: движок не привязан к жизни запускателя ({exc}); "
+              "прерванное по таймауту пробуждение может оставить его работать",
+              file=sys.stderr)
+
+
+def run_background_engine(command: list[str], environment: dict[str, str]) -> int:
+    """Run the engine for a caller who cannot see it, and say if it never moved.
+
+    The background entry is the one product-owner path whose caller is a
+    service rather than a person: the mail door, the thread tick and the daily
+    standup all capture this output and none of them can look at the engine. So
+    it is the one entry that gets a parent. `--output-format json` is read here
+    and the envelope's own `result` goes to stdout, which leaves callers the
+    same plain text `--print` gave them, while the fact they cannot see — that
+    the provider refused before the model moved — becomes an exit code they can.
+
+    Output that does not parse is passed through exactly as it arrived. A run
+    that died mid-work leaves no envelope, and inventing a verdict for it is
+    what would repeat a request that already had effects.
+    """
+    completed = subprocess.run(
+        [*command, "--output-format", "json"],
+        text=True, capture_output=True, cwd=HOME, env=environment,
+        preexec_fn=_die_with_parent, check=False,
+    )
+    if completed.stderr:
+        print(completed.stderr, file=sys.stderr, end="")
+    try:
+        envelope = json.loads(completed.stdout)
+    except json.JSONDecodeError:
+        # Byte for byte: this is what replacing this process with the engine
+        # would have written, and there is nothing here worth interpreting.
+        print(completed.stdout, end="")
+        return reserved_exit(completed.returncode)
+    # The envelope's `result` is a value rather than a stream, and `--print`
+    # ends the answer with a newline, so the caller reads the same shape it did.
+    answer = envelope.get("result") if isinstance(envelope, dict) else None
+    text = answer if isinstance(answer, str) else completed.stdout
+    print(text, end="" if text.endswith("\n") else "\n")
+    if engine_never_moved(envelope):
+        print("product-owner: движок не ответил, разбор не начинался "
+              f"({envelope.get('api_error_status')}); просьбу можно повторить",
+              file=sys.stderr)
+        return ENGINE_NEVER_MOVED_EXIT
+    return reserved_exit(completed.returncode)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(add_help=True)
     mode = parser.add_mutually_exclusive_group()
@@ -616,8 +741,11 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
     if route.engine == "claude":
+        environment = {**os.environ, "IS_SANDBOX": "1"}
+        if args.entry == "print":
+            return run_background_engine(command, environment)
         os.chdir(HOME)
-        os.execvpe(CLAUDE_BIN, command, {**os.environ, "IS_SANDBOX": "1"})
+        os.execvpe(CLAUDE_BIN, command, environment)
         return 127
 
     if args.force_codex:
@@ -656,7 +784,9 @@ def main(argv: list[str] | None = None) -> int:
           file=sys.stderr)
     if completed.stdout:
         print(completed.stdout, end="" if completed.stdout.endswith("\n") else "\n")
-    return completed.returncode
+    # This route has no envelope to read, so it never claims the model failed to
+    # move; a Codex exit that happens to be that number still means «failed».
+    return reserved_exit(completed.returncode)
 
 
 if __name__ == "__main__":

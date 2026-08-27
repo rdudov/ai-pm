@@ -16,10 +16,26 @@ All interactive, timer and mail entrypoints call
 - A missing observation is never turned into a percentage. Without a comparable
   weekly remainder the router keeps Opus and names which observation is missing;
   Claude network/API failures and unknown schemas remain visible. Every selected
-  Claude route emits its reason before `exec`: mail keeps it in its existing
-  agent stderr artifact, and the timer forwards that one diagnostic to its
-  service journal without replaying arbitrary model stderr. This also leaves a
-  durable trace when a higher observed Claude remainder wins the comparison.
+  Claude route emits its reason before the engine starts: mail keeps it in its
+  existing agent stderr artifact, and the timer forwards that one diagnostic to
+  its service journal without replaying arbitrary model stderr. This also leaves
+  a durable trace when a higher observed Claude remainder wins the comparison.
+- `--entry print` is the one entry whose caller is a service rather than a
+  person, so it is the one entry the router stays alive above instead of
+  replacing itself with the engine. It runs Claude Code under
+  `--output-format json`, passes the envelope's own `result` to stdout — the
+  same plain text callers already parse — and exits `75` (`EX_TEMPFAIL`) when
+  that envelope says the provider refused before the model ever answered:
+  `terminal_reason: api_error` with an empty `modelUsage` and every token
+  counter at zero. A refusal that arrives after the model has worked has
+  non-zero counters and is reported as an ordinary failure, because repeating
+  such a request would repeat what it did. Output that is not an envelope is
+  passed through byte for byte and never earns the code, and a child that exits
+  75 for a reason of its own is reported as 1. The engine is bound to the
+  router's own life with `PR_SET_PDEATHSIG`, so a caller that kills the router
+  on timeout still kills the engine, as replacing the process used to. The mail
+  door of the task-system repository is what reads exit 75: it returns that one
+  conversation request to its waiting queue exactly once.
 - The Codex side is accepted only from an explicitly 10,080-minute rate-limit
   window whose event timestamp still belongs to its unexpired reset window.
 - The quota endpoint uses Claude Code's short-lived OAuth access token. If that
