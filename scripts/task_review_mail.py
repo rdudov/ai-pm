@@ -12,6 +12,7 @@ import subprocess
 import sys
 from argparse import Namespace
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 
 try:  # installed public engine
@@ -93,13 +94,26 @@ def delivery_receipt(task_dir: Path, stage: str, result: dict) -> dict | None:
 
 def delivered_stage_receipts(task_dir: Path, stage: str) -> list[dict]:
     """Return every delivered review letter for this task and stage, newest first."""
-    prefix = f"task-{stage}:{task_number(task_dir)}:"
+    number = task_number(task_dir)
+    prefix = f"task-{stage}:{number}:"
     expected_kind = KINDS[stage]
+    bootstrap_prefix = f"reply:task-{number}:{stage}:"
+    bootstrap_owner = f"task_{number}_bootstrap_boundary"
     return [
         row
         for row in reversed(journal_rows())
-        if str(row.get("event_id") or "").startswith(prefix)
-        and row.get("kind") == expected_kind
+        if (
+            (
+                str(row.get("event_id") or "").startswith(prefix)
+                and row.get("kind") == expected_kind
+            )
+            or (
+                stage == "statement"
+                and str(row.get("event_id") or "").startswith(bootstrap_prefix)
+                and row.get("kind") == "reply"
+                and row.get("decision_owner") == bootstrap_owner
+            )
+        )
         and row.get("action") == "send"
         and row.get("delivered") is True
         and isinstance(row.get("message_id"), str)
@@ -338,6 +352,23 @@ def gmail_verbatim_text(source_id: str) -> str:
     return (body[: quoted_reply.start()] if quoted_reply else body).rstrip("\r\n")
 
 
+def gmail_occurred_at(source_id: str) -> str:
+    """Return the authenticated Gmail Date header as a normalized UTC instant."""
+    source = MAIL_STATE / "inbox" / source_id / "metadata.json"
+    try:
+        metadata = json.loads(source.read_text(encoding="utf-8"))
+        raw_date = str(metadata.get("date") or "")
+        try:
+            occurred_at = datetime.fromisoformat(raw_date.replace("Z", "+00:00"))
+        except ValueError:
+            occurred_at = parsedate_to_datetime(raw_date)
+    except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+        raise ValueError(f"Gmail Date is missing or unreadable: {source}") from exc
+    if occurred_at.tzinfo is None:
+        raise ValueError(f"Gmail Date has no timezone: {source}")
+    return occurred_at.astimezone(timezone.utc).isoformat()
+
+
 def append_verbatim_message(
     task_dir: Path,
     *,
@@ -356,6 +387,7 @@ def append_verbatim_message(
             raise ValueError(
                 "Gmail verbatim text differs from the authenticated stored reply body"
             )
+        occurred_at = gmail_occurred_at(source_id)
     path = product_review.verbatim_path(task_dir)
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -391,13 +423,188 @@ def append_verbatim_message(
         and item.get("source_id") == message["source_id"]
     ]
     if matching:
-        if matching[0] != message:
+        existing = matching[0]
+        identity_fields = ("text", "reason") if channel == "gmail" else (
+            "text", "reason", "occurred_at"
+        )
+        if any(
+            str(existing.get(name) or "") != str(message.get(name) or "")
+            for name in identity_fields
+        ):
             raise ValueError("verbatim user message identity already has different content")
+        if channel == "gmail" and existing.get("occurred_at") != message["occurred_at"]:
+            existing["occurred_at"] = message["occurred_at"]
+            path.write_text(
+                json.dumps(value, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            product_review.load_verbatim_messages(task_dir)
         return value
     (excluded if reason else messages).append(message)
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     product_review.load_verbatim_messages(task_dir)
     return value
+
+
+def feedback_target_snapshot(task_dir: Path, stage: str, result: dict) -> dict:
+    """Capture the task state when feedback is recorded, not the replied-to letter."""
+    snapshot = {
+        **product_review.current_statement_digests(task_dir),
+        "candidate_states": None,
+        "result_states": None,
+        "verbatim_user_words_sha256": product_review.verbatim_sha256(task_dir),
+    }
+    if stage == "completion":
+        candidates = result.get("candidate_states")
+        if not isinstance(candidates, dict) or not candidates:
+            raise ValueError("completion feedback has no repository set to snapshot")
+        snapshot["candidate_states"] = {
+            raw_path: product_review.git_candidate_state(Path(raw_path))
+            for raw_path in candidates
+        }
+        snapshot["result_states"] = declared_result_state(
+            task_dir, result, verify_expected=False
+        )
+    return snapshot
+
+
+def declared_result_state(
+    task_dir: Path, result: dict, *, verify_expected: bool = True
+) -> dict[str, list[dict]]:
+    """Observe declared result files and optionally verify their reviewed digests."""
+    packet_name = result.get("packet")
+    if not isinstance(packet_name, str) or not packet_name:
+        raise ValueError("completion review has no result-file packet")
+    packet_path = (task_dir / packet_name).resolve()
+    if product_review.task_relative_path(task_dir, packet_path) != packet_name:
+        raise ValueError("completion review packet path is not normalized")
+    try:
+        packet = json.loads(packet_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError("completion review packet is unreadable") from exc
+    exact_candidate = packet.get("exact_candidate") if isinstance(packet, dict) else None
+    manifests = (
+        exact_candidate.get("result_files")
+        if isinstance(exact_candidate, dict)
+        else None
+    )
+    candidates = result.get("candidate_states")
+    if not isinstance(candidates, dict) or not candidates:
+        raise ValueError("completion review has no repository set")
+    if not isinstance(manifests, dict):
+        raise ValueError("completion packet has no result-file manifest")
+    if manifests.keys() != candidates.keys():
+        raise ValueError(
+            "completion packet result-file repositories differ from the reviewed set"
+        )
+    state: dict[str, list[dict]] = {}
+    for raw_repository, entries in manifests.items():
+        repository = Path(raw_repository)
+        if not repository.is_absolute():
+            raise ValueError(
+                "completion packet result-file repository path is not absolute"
+            )
+        if not isinstance(entries, list) or not entries:
+            raise ValueError("completion packet has no declared result files")
+        normalized: list[dict] = []
+        seen: set[str] = set()
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise ValueError("completion packet result-file entry is malformed")
+            raw_path = entry.get("path")
+            expected = entry.get("sha256")
+            if (
+                not isinstance(raw_path, str)
+                or not raw_path
+                or Path(raw_path).is_absolute()
+                or Path(raw_path).as_posix() != raw_path
+                or ".." in Path(raw_path).parts
+                or raw_path in seen
+                or not isinstance(expected, str)
+                or re.fullmatch(r"[0-9a-f]{64}", expected) is None
+            ):
+                raise ValueError("completion packet result-file entry is malformed")
+            path = (repository / raw_path).resolve()
+            try:
+                path.relative_to(repository.resolve())
+                actual = product_review.file_sha256(path)
+            except (OSError, ValueError) as exc:
+                if verify_expected:
+                    raise ValueError(
+                        "a declared completion result file is unreadable"
+                    ) from exc
+                actual = None
+            if verify_expected and actual != expected:
+                raise ValueError("a declared completion result file differs from its packet")
+            seen.add(raw_path)
+            normalized.append({"path": raw_path, "sha256": actual})
+        normalized.sort(key=lambda item: item["path"])
+        state[raw_repository] = normalized
+    return state
+
+
+FEEDBACK_SNAPSHOT_FIELDS = {
+    "task_sha256", "contract_sha256", "candidate_states", "result_states",
+    "verbatim_user_words_sha256",
+}
+
+
+def feedback_snapshot_is_complete(value: object) -> bool:
+    """Whether a feedback snapshot has every field used by resolution."""
+    return isinstance(value, dict) and FEEDBACK_SNAPSHOT_FIELDS <= value.keys()
+
+
+def legacy_statement_feedback_snapshot(task_dir: Path, feedback: dict) -> dict:
+    """Recover the one pre-snapshot statement record from its frozen review packet."""
+    target_event = str(feedback.get("target_event_id") or "")
+    match = re.fullmatch(
+        rf"reply:task-{re.escape(task_number(task_dir))}:statement:([0-9a-f]{{12,64}}):[0-9a-f]+",
+        target_event,
+    )
+    if match is None:
+        raise ValueError("the recorded defect has no complete task-state snapshot")
+    task_prefix = match.group(1)
+    matches: list[dict] = []
+    for packet_path in sorted((task_dir / "reviews").glob("statement-review-packet-*.json")):
+        try:
+            packet = json.loads(packet_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            continue
+        subject = packet.get("subject") if isinstance(packet, dict) else None
+        if (
+            isinstance(subject, dict)
+            and str(subject.get("sha256") or "").startswith(task_prefix)
+            and "contract_sha256" in subject
+        ):
+            matches.append(subject)
+    if len(matches) != 1:
+        raise ValueError("the recorded defect has no unique frozen task-state snapshot")
+    verbatim = product_review.load_verbatim_record(task_dir)
+    gmail_id = str(feedback.get("gmail_id") or "")
+    without_feedback = {
+        **verbatim,
+        "messages": [
+            item for item in verbatim["messages"]
+            if not (item.get("channel") == "gmail" and item.get("source_id") == gmail_id)
+        ],
+    }
+    if "excluded_messages" in verbatim:
+        without_feedback["excluded_messages"] = [
+            item for item in verbatim["excluded_messages"]
+            if not (item.get("channel") == "gmail" and item.get("source_id") == gmail_id)
+        ]
+    verbatim_digest = hashlib.sha256(
+        json.dumps(
+            without_feedback, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        ).encode("utf-8")
+    ).hexdigest()
+    return {
+        "task_sha256": matches[0]["sha256"],
+        "contract_sha256": matches[0]["contract_sha256"],
+        "candidate_states": None,
+        "result_states": None,
+        "verbatim_user_words_sha256": verbatim_digest,
+    }
 
 
 def record_feedback(args: argparse.Namespace) -> dict:
@@ -440,8 +647,6 @@ def record_feedback(args: argparse.Namespace) -> dict:
     existing = next(
         (item for item in records if item.get("gmail_id") == args.gmail_id), None
     )
-    if existing is not None:
-        return existing
     verbatim_before_append = product_review.verbatim_sha256(task_dir)
     append_verbatim_message(
         task_dir,
@@ -451,16 +656,22 @@ def record_feedback(args: argparse.Namespace) -> dict:
         text=exact_text,
     )
     verbatim_after_append = product_review.verbatim_sha256(task_dir)
+    if existing is not None:
+        if (
+            args.stage == "statement"
+            and existing.get("classification") == "defect"
+            and not feedback_snapshot_is_complete(existing.get("target_review"))
+            and str(existing.get("target_event_id") or "").startswith(
+                f"reply:task-{task_number(task_dir)}:statement:"
+            )
+        ):
+            existing["target_review"] = legacy_statement_feedback_snapshot(task_dir, existing)
+            existing.pop("resolution", None)
+            write_feedback_records(task_dir, args.stage, records)
+            set_blocked(task_dir)
+        return existing
     target_event = str(receipt["event_id"])
-    current_event = event_id(task_dir, args.stage, result)
-    target_review = {}
-    if target_event == current_event:
-        target_review = {
-            "task_sha256": result.get("task_sha256"),
-            "contract_sha256": result.get("contract_sha256"),
-            "candidate_states": result.get("candidate_states"),
-            "verbatim_user_words_sha256": result.get("verbatim_user_words_sha256"),
-        }
+    target_review = feedback_target_snapshot(task_dir, args.stage, result)
     record = {
         "schema_version": 1,
         "gmail_id": args.gmail_id,
@@ -522,14 +733,27 @@ def resolve_feedback(args: argparse.Namespace) -> dict:
     if current_event == feedback.get("target_event_id"):
         raise ValueError("the defect still points at the current review")
     previous = feedback.get("target_review")
-    previous = previous if isinstance(previous, dict) else {}
+    if not feedback_snapshot_is_complete(previous):
+        raise ValueError("the recorded defect has no complete task-state snapshot")
     if args.stage == "statement":
         changed = any(
             previous.get(name) != result.get(name)
             for name in ("task_sha256", "contract_sha256")
         )
     else:
-        changed = previous.get("candidate_states") != result.get("candidate_states")
+        previous_candidates = previous.get("candidate_states")
+        current_candidates = result.get("candidate_states")
+        if not isinstance(previous_candidates, dict) or not isinstance(current_candidates, dict):
+            raise ValueError("the recorded defect has no complete repository snapshot")
+        if previous_candidates.keys() != current_candidates.keys():
+            raise ValueError("the reviewed repository set differs from the defect snapshot")
+        previous_results = previous.get("result_states")
+        if not isinstance(previous_results, dict):
+            raise ValueError("the recorded defect has no declared result snapshot")
+        current_results = declared_result_state(task_dir, result)
+        if previous_results.keys() != current_results.keys():
+            raise ValueError("the declared result repository set differs from the defect snapshot")
+        changed = previous_results != current_results
     if not changed:
         raise ValueError("the task statement/result itself has not changed since the defect")
     receipt = delivery_receipt(task_dir, args.stage, result)

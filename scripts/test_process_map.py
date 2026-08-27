@@ -1700,11 +1700,15 @@ class RunnerContractIsWatched(unittest.TestCase):
         violation = [{"kind": "name", "text": "разошлось", "src": "источник"}]
         moment = datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)
         with mock.patch.object(tick.runner_contract, "check", return_value=violation), \
+                mock.patch.object(tick, "product_review_boundary_violations", return_value=[]), \
                 mock.patch.object(tick, "send_mail") as mailed:
             found, reminder = tick.runner_contract_alarm("process", {}, moment, announce=True)
         self.assertEqual(found, violation)
         self.assertEqual(mailed.call_count, 1)
-        self.assertIn("разошлось", mailed.call_args[0][1])
+        subject, body = mailed.call_args.args[:2]
+        self.assertEqual(subject, "Продакт: контракт с task_runner разошёлся")
+        self.assertIn("наблюдение продакта держится на именах из task-agent", body)
+        self.assertIn("разошлось", body)
         self.assertEqual(reminder["at"], moment.isoformat())
 
     def test_the_same_divergence_is_not_repeated_every_twenty_minutes(self):
@@ -1716,6 +1720,7 @@ class RunnerContractIsWatched(unittest.TestCase):
             "at": (moment - timedelta(seconds=60)).isoformat(),
             "signature": json.dumps(["разошлось"])}}
         with mock.patch.object(tick.runner_contract, "check", return_value=violation), \
+                mock.patch.object(tick, "product_review_boundary_violations", return_value=[]), \
                 mock.patch.object(tick, "send_mail") as mailed:
             tick.runner_contract_alarm("process", stored, moment, announce=True)
         self.assertEqual(mailed.call_count, 0)
@@ -1727,6 +1732,7 @@ class RunnerContractIsWatched(unittest.TestCase):
             "at": (moment - timedelta(seconds=60)).isoformat(),
             "signature": json.dumps(["разошлось"])}}
         with mock.patch.object(tick.runner_contract, "check", return_value=violation), \
+                mock.patch.object(tick, "product_review_boundary_violations", return_value=[]), \
                 mock.patch.object(tick, "send_mail") as mailed:
             tick.runner_contract_alarm("process", stored, moment, announce=True)
         self.assertEqual(mailed.call_count, 1)
@@ -1735,6 +1741,7 @@ class RunnerContractIsWatched(unittest.TestCase):
         moment = datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)
         stored = {"runner_contract_reminder": {"at": moment.isoformat(), "signature": "x"}}
         with mock.patch.object(tick.runner_contract, "check", return_value=[]), \
+                mock.patch.object(tick, "product_review_boundary_violations", return_value=[]), \
                 mock.patch.object(tick, "send_mail") as mailed:
             found, reminder = tick.runner_contract_alarm("process", stored, moment, announce=True)
         self.assertEqual((found, reminder), ([], None))
@@ -1748,6 +1755,54 @@ class RunnerContractIsWatched(unittest.TestCase):
         source = Path(tick.__file__).read_text()
         self.assertIn("verdict = 1 if contract or daily_failure else 0", source)
         self.assertNotIn("\n    return 0\n", source[source.index("    verdict = 1"):])
+
+    def test_unavailable_product_review_boundary_reuses_the_process_alarm(self):
+        tasks = Path(self._ledger.name) / "tasks"
+        policy = tasks / "1246-example" / ".runner" / "companion-application-policy.json"
+        policy.parent.mkdir(parents=True)
+        policy.write_text(json.dumps({
+            "product_review_boundary": {
+                "mode": "unavailable",
+                "detail": (
+                    "enforcement requested before its owners are ready: "
+                    "task product-review mail owner is missing: /missing/owner.py"
+                ),
+            }
+        }), encoding="utf-8")
+        moment = datetime(2026, 8, 27, 3, 0, tzinfo=timezone.utc)
+        with mock.patch.object(tick.product_memory, "tasks_repo", return_value=tasks.parent), \
+                mock.patch.object(tick.runner_contract, "check", return_value=[]), \
+                mock.patch.object(tick, "send_mail") as mailed:
+            found, reminder = tick.runner_contract_alarm(
+                "process", {}, moment, announce=True
+        )
+        self.assertEqual(found[0]["kind"], "product_review_boundary")
+        self.assertIn("программа отправки писем о проверке не найдена", found[0]["text"])
+        self.assertEqual(mailed.call_count, 1)
+        subject, body = mailed.call_args.args[:2]
+        self.assertIn("обязательная проверка", subject.lower())
+        self.assertIn("обязательная проверка", body.lower())
+        self.assertNotIn("enforcement requested", body)
+        self.assertNotIn("mail owner is missing", body)
+        self.assertNotIn("контракт с task_runner разошёлся", subject)
+        self.assertIsNotNone(reminder)
+
+    def test_a_terminal_task_does_not_keep_the_boundary_alarm_alive(self):
+        tasks = Path(self._ledger.name) / "tasks"
+        task = tasks / "1246-example"
+        policy = task / ".runner" / "companion-application-policy.json"
+        policy.parent.mkdir(parents=True)
+        policy.write_text(json.dumps({
+            "product_review_boundary": {
+                "mode": "unavailable",
+                "detail": "mail owner timed out",
+            }
+        }), encoding="utf-8")
+        (task / "task.md").write_text(
+            '---\nid: 1246\nstatus: "completed"\n---\n# Done\n', encoding="utf-8"
+        )
+        with mock.patch.object(tick.product_memory, "tasks_repo", return_value=tasks.parent):
+            self.assertEqual(tick.product_review_boundary_violations(), [])
 
     def test_the_direction_state_file_carries_the_result_of_the_check(self):
         # «Проверка была и прошла» and «проверки никто не делал» are different
