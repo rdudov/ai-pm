@@ -76,10 +76,11 @@ import outbound  # noqa: E402
 import plain_russian  # noqa: E402
 import product_goal  # noqa: E402
 import product_memory  # noqa: E402
+import process_map_recorder  # noqa: E402
 import startup_context  # noqa: E402
 import runner_contract  # noqa: E402
 from process_map_schema import run_entrypoint  # noqa: E402
-from process_map_state import RUNNER_SCRIPTS, tunable  # noqa: E402
+from process_map_state import RUNNER_SCRIPTS, TERMINAL, tunable  # noqa: E402
 from process_map_state import THREAD_STATE as STATE_DIR  # noqa: E402
 from thread_state import HOME, REPO, build  # noqa: E402
 
@@ -768,9 +769,46 @@ def deliver_idle(thread: str, title: str, report: dict, reasons: list[dict],
         body, moment)
 
 
+def product_review_boundary_violations() -> list[dict]:
+    """Return enforced review boundaries that degraded to unavailable owners."""
+    tasks_root = product_memory.tasks_repo() / "tasks"
+    violations: list[dict] = []
+    for policy_path in sorted(tasks_root.glob("*/.runner/companion-application-policy.json")):
+        task_path = policy_path.parents[1]
+        if process_map_recorder.read_frontmatter(task_path).get("status") in TERMINAL:
+            continue
+        try:
+            policy = json.loads(policy_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            continue
+        boundary = policy.get("product_review_boundary") if isinstance(policy, dict) else None
+        if not isinstance(boundary, dict) or boundary.get("mode") != "unavailable":
+            continue
+        detail = str(boundary.get("detail") or "")
+        if "mail owner is missing" in detail:
+            reason = "программа отправки писем о проверке не найдена"
+        elif "check could not run" in detail:
+            reason = "программу проверки задачи не удалось запустить"
+        elif "owner is not runnable" in detail:
+            reason = "программа проверки задачи завершилась с ошибкой"
+        elif "returned no boolean decision" in detail:
+            reason = "программа проверки задачи не вернула решение"
+        else:
+            reason = "программа проверки или отправки письма не готова"
+        violations.append({
+            "kind": "product_review_boundary",
+            "text": (
+                f"{task_path.name}: система запросила обязательную проверку, "
+                f"но {reason}"
+            ),
+            "src": str(policy_path),
+        })
+    return violations
+
+
 def runner_contract_alarm(thread: str, stored: dict, moment: datetime,
                           announce: bool) -> tuple[list[dict], dict | None]:
-    """Whether this repository can still ask the runner what it asks it.
+    """Report broken runner names and unavailable mandatory task-review owners.
 
     The observation of every direction is built on names imported from
     `task-agent`. On 2026-08-08 one of them was renamed there, nothing here
@@ -791,6 +829,8 @@ def runner_contract_alarm(thread: str, stored: dict, moment: datetime,
     a mute button by other means. A *changed* set of violations is news at once.
     """
     violations = runner_contract.check()
+    if thread == "process":
+        violations = [*violations, *product_review_boundary_violations()]
     reminder = stored.get("runner_contract_reminder")
     print(runner_contract.report(violations, RUNNER_SCRIPTS), file=sys.stderr)
     if not violations:
@@ -799,13 +839,32 @@ def runner_contract_alarm(thread: str, stored: dict, moment: datetime,
         return [], None
     signature = json.dumps(sorted(item["text"] for item in violations))
     if announce and repeatable(reminder, signature, moment):
-        told = (f"[{thread}] наблюдение продакта держится на именах из task-agent, "
+        boundary = [item for item in violations if item.get("kind") == "product_review_boundary"]
+        contract = [item for item in violations if item.get("kind") != "product_review_boundary"]
+        if boundary and not contract:
+            subject = "Продакт: обязательная проверка задач отключилась"
+            told = (
+                "Обязательная проверка постановки или результата задачи сейчас не работает:\n\n"
+                + "\n".join(f"- {item['text']}\n  ({item['src']})" for item in boundary)
+                + "\n\nПока причина не устранена, система может пропустить задачу без проверки."
+            )
+        else:
+            subject = "Продакт: контракт с task_runner разошёлся"
+            told = (
+                f"[{thread}] наблюдение продакта держится на именах из task-agent, "
                 f"и они разошлись:\n\n"
-                + "\n".join(f"- {item['text']}\n  ({item['src']})" for item in violations)
+                + "\n".join(f"- {item['text']}\n  ({item['src']})" for item in contract)
                 + "\n\nПока это не починено, живые прогоны, простой и свежесть работы "
-                  "считаются кодом, который может отвечать ошибкой вместо ответа.")
-        deliver(thread, "alarm", "Продакт: контракт с task_runner разошёлся",
-                told, moment)
+                  "считаются кодом, который может отвечать ошибкой вместо ответа."
+            )
+            if boundary:
+                told += (
+                    "\n\nКроме того, обязательная проверка задач сейчас недоступна:\n\n"
+                    + "\n".join(
+                        f"- {item['text']}\n  ({item['src']})" for item in boundary
+                    )
+                )
+        deliver(thread, "alarm", subject, told, moment)
         reminder = {"at": moment.isoformat(), "signature": signature}
     return violations, reminder
 

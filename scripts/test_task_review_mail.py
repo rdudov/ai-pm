@@ -25,6 +25,10 @@ import task_review_mail  # noqa: E402
 
 
 def write_verbatim(task: Path, text: str = "original request") -> str:
+    task.mkdir(parents=True, exist_ok=True)
+    statement = task / "task.md"
+    if not statement.exists():
+        statement.write_text("# Example task\n", encoding="utf-8")
     path = task_review_mail.product_review.verbatim_path(task)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({
@@ -41,7 +45,36 @@ def seed_gmail_body(root: Path, source_id: str, text: str) -> Path:
     path = root / "inbox" / source_id / "body.txt"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
+    (path.parent / "metadata.json").write_text(
+        json.dumps({"date": "Wed, 26 Aug 2026 18:57:35 +0300"}),
+        encoding="utf-8",
+    )
     return path
+
+
+def write_completion_packet(
+    task: Path, name: str, repositories: dict[Path, list[str]]
+) -> tuple[Path, dict]:
+    task.mkdir(parents=True, exist_ok=True)
+    packet = task / name
+    result_files = {}
+    for repository, paths in repositories.items():
+        result_files[str(repository.resolve())] = [
+            {
+                "path": path,
+                "sha256": task_review_mail.product_review.file_sha256(repository / path),
+            }
+            for path in paths
+        ]
+    packet.write_text(
+        json.dumps({
+            "schema_version": 1,
+            "exact_candidate": {"result_files": result_files},
+        })
+        + "\n",
+        encoding="utf-8",
+    )
+    return packet, result_files
 
 
 def test_mandatory_mail_body_contains_verdict_and_reviewer_conclusion(
@@ -349,6 +382,32 @@ def test_delivery_receipt_requires_the_dedicated_kind_and_event(tmp_path: Path) 
         assert task_review_mail.delivery_receipt(task, "statement", result)["message_id"] == "accepted"
 
 
+def test_feedback_accepts_disclosed_statement_bootstrap_without_weakening_gate(
+    tmp_path: Path,
+) -> None:
+    task = tmp_path / "001-example"
+    task.mkdir()
+    bootstrap = {
+        "event_id": "reply:task-001:statement:old-digest",
+        "kind": "reply",
+        "decision_owner": "task_001_bootstrap_boundary",
+        "action": "send",
+        "delivered": True,
+        "message_id": "bootstrap-mail",
+    }
+    lookalike = {
+        **bootstrap,
+        "decision_owner": "composer",
+        "message_id": "lookalike-mail",
+    }
+    with mock.patch.object(
+        task_review_mail, "journal_rows", return_value=[bootstrap, lookalike]
+    ):
+        receipts = task_review_mail.delivered_stage_receipts(task, "statement")
+        assert [row["message_id"] for row in receipts] == ["bootstrap-mail"]
+        assert task_review_mail.delivery_receipt(task, "statement", {}) is None
+
+
 def test_feedback_binds_to_the_superseded_review_letter_it_answers(tmp_path: Path) -> None:
     task = tmp_path / "001-example"
     write_verbatim(task)
@@ -364,7 +423,9 @@ def test_feedback_binds_to_the_superseded_review_letter_it_answers(tmp_path: Pat
     old_event = f"task-statement:{task_review_mail.task_number(task)}:{'e' * 24}"
     inbox = tmp_path / "mail" / "inbox" / "incoming"
     inbox.mkdir(parents=True)
-    (inbox / "metadata.json").write_text(json.dumps({"date": "now"}), encoding="utf-8")
+    (inbox / "metadata.json").write_text(
+        json.dumps({"date": "Wed, 26 Aug 2026 18:57:35 +0300"}), encoding="utf-8"
+    )
     (inbox / "body.txt").write_text("Получил, спасибо.", encoding="utf-8")
     args = argparse.Namespace(
         task_dir=str(task), stage="statement", gmail_id="incoming",
@@ -391,7 +452,15 @@ def test_feedback_binds_to_the_superseded_review_letter_it_answers(tmp_path: Pat
 
     assert recorded["target_event_id"] == old_event
     assert recorded["target_message_id"] == "old-mail"
-    assert recorded["target_review"] == {}
+    assert recorded["target_review"] == {
+        "task_sha256": task_review_mail.product_review.statement_sha256(task / "task.md"),
+        "contract_sha256": None,
+        "candidate_states": None,
+        "result_states": None,
+        "verbatim_user_words_sha256": (
+            task_review_mail.product_review.verbatim_sha256(task)
+        ),
+    }
     assert recorded["preserves_review"] == {
         "verbatim_user_words_sha256": current_result["verbatim_user_words_sha256"]
     }
@@ -401,6 +470,142 @@ def test_feedback_binds_to_the_superseded_review_letter_it_answers(tmp_path: Pat
     assert recorded["verbatim_after_append_sha256"] == (
         task_review_mail.product_review.verbatim_sha256(task)
     )
+
+
+def test_exact_replay_reopens_legacy_defect_with_frozen_task_snapshot(
+    tmp_path: Path,
+) -> None:
+    task = tmp_path / "001-example"
+    write_verbatim(task)
+    packet_dir = task / "reviews"
+    packet_dir.mkdir()
+    old_task = "a" * 64
+    old_contract = "b" * 64
+    (packet_dir / "statement-review-packet-old.json").write_text(
+        json.dumps({"subject": {
+            "sha256": old_task,
+            "contract_sha256": old_contract,
+        }}),
+        encoding="utf-8",
+    )
+    old_event = f"reply:task-001:statement:{old_task[:12]}:{'c' * 12}"
+    feedback = {
+        "gmail_id": "incoming",
+        "stage": "statement",
+        "classification": "defect",
+        "target_event_id": old_event,
+        "target_message_id": "old-mail",
+        "target_review": {
+            "task_sha256": old_task,
+            "contract_sha256": old_contract,
+            "candidate_states": None,
+            "verbatim_user_words_sha256": "legacy-without-result-states",
+        },
+        "lesson_source_event": "gmail:incoming",
+        "resolution": {"resolved_by_event_id": "incorrectly-cleared"},
+    }
+    task_review_mail.write_feedback_records(task, "statement", [feedback])
+    mail = tmp_path / "mail"
+    seed_gmail_body(mail, "incoming", "Результат не тот.")
+    result = {
+        "task_sha256": "d" * 64,
+        "contract_sha256": "e" * 64,
+        "reviewed_at": "2026-08-26T20:00:00+00:00",
+    }
+    args = argparse.Namespace(
+        task_dir=str(task), stage="statement", gmail_id="incoming",
+        classification="defect", observation="o", cost="c", rule="r", owner="reviewer",
+    )
+    with mock.patch.object(
+        task_review_mail.product_review, "validate_result", return_value=(True, "ok", result)
+    ), mock.patch.object(
+        task_review_mail, "delivery_receipt", return_value=None
+    ), mock.patch.object(
+        task_review_mail, "delivered_stage_receipts",
+        return_value=[{"event_id": old_event, "message_id": "old-mail"}],
+    ), mock.patch.object(
+        task_review_mail, "authenticated_reply", return_value=True
+    ), mock.patch.object(
+        task_review_mail, "MAIL_STATE", mail
+    ), mock.patch.object(task_review_mail, "set_blocked") as blocked:
+        recorded = task_review_mail.record_feedback(args)
+
+    assert recorded["target_review"]["task_sha256"] == old_task
+    assert recorded["target_review"]["contract_sha256"] == old_contract
+    assert "resolution" not in recorded
+    blocked.assert_called_once_with(task.resolve())
+
+
+def test_completion_feedback_snapshots_current_candidate_not_reviewed_candidate(
+    tmp_path: Path,
+) -> None:
+    task = tmp_path / "001-example"
+    write_verbatim(task)
+    repository = tmp_path / "repository"
+    reviewed = {str(repository): "reviewed-state"}
+    with mock.patch.object(
+        task_review_mail.product_review,
+        "git_candidate_state",
+        return_value="current-state",
+    ), mock.patch.object(
+        task_review_mail,
+        "declared_result_state",
+        return_value={str(repository): [{"path": "owned.py", "sha256": "a" * 64}]},
+    ):
+        snapshot = task_review_mail.feedback_target_snapshot(
+            task, "completion", {"candidate_states": reviewed}
+        )
+    assert snapshot["candidate_states"] == {str(repository): "current-state"}
+    assert snapshot["result_states"] == {
+        str(repository): [{"path": "owned.py", "sha256": "a" * 64}]
+    }
+
+
+def test_completion_defect_records_current_declared_files_after_reviewed_bytes_move(
+    tmp_path: Path,
+) -> None:
+    task = tmp_path / "001-example"
+    write_verbatim(task)
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    owned = repository / "owned.py"
+    owned.write_text("reviewed result\n", encoding="utf-8")
+    packet, _manifest = write_completion_packet(
+        task, "completion.json", {repository: ["owned.py"]}
+    )
+    owned.write_text("result when the user complained\n", encoding="utf-8")
+    current_digest = task_review_mail.product_review.file_sha256(owned)
+    result = {
+        "packet": packet.name,
+        "candidate_states": {str(repository.resolve()): "reviewed-state"},
+    }
+    with pytest.raises(ValueError, match="differs from its packet"):
+        task_review_mail.declared_result_state(task, result)
+    mail = tmp_path / "mail"
+    seed_gmail_body(mail, "incoming", "Результат не тот, что я просил.")
+    args = argparse.Namespace(
+        task_dir=str(task), stage="completion", gmail_id="incoming",
+        classification="defect", observation="o", cost="c", rule="r", owner="reviewer",
+    )
+    with mock.patch.object(
+        task_review_mail.product_review, "validate_result", return_value=(False, "stale", result)
+    ), mock.patch.object(
+        task_review_mail, "feedback_receipt",
+        return_value={"event_id": "task-completion:001:old", "message_id": "old-mail"},
+    ), mock.patch.object(
+        task_review_mail.product_review, "git_candidate_state", return_value="current-state"
+    ), mock.patch.object(
+        task_review_mail, "MAIL_STATE", mail
+    ), mock.patch.object(lesson, "add") as add_lesson, mock.patch.object(
+        task_review_mail, "set_blocked"
+    ) as blocked:
+        recorded = task_review_mail.record_feedback(args)
+
+    assert recorded["target_review"]["result_states"] == {
+        str(repository.resolve()): [{"path": "owned.py", "sha256": current_digest}]
+    }
+    add_lesson.assert_called_once()
+    blocked.assert_called_once_with(task.resolve())
 
 
 def test_each_fresh_review_gets_a_new_retry_stable_mail_identity(tmp_path: Path) -> None:
@@ -567,7 +772,9 @@ def test_approval_cannot_overwrite_substantive_feedback_for_same_review(tmp_path
     ):
         inbox = tmp_path / "mail" / "inbox" / "incoming"
         inbox.mkdir(parents=True)
-        (inbox / "metadata.json").write_text(json.dumps({"date": "now"}), encoding="utf-8")
+        (inbox / "metadata.json").write_text(
+            json.dumps({"date": "Wed, 26 Aug 2026 18:57:35 +0300"}), encoding="utf-8"
+        )
         (inbox / "body.txt").write_text("Да, согласен.", encoding="utf-8")
         recorded = task_review_mail.record_feedback(args)
 
@@ -616,7 +823,9 @@ def test_later_reply_on_corrected_review_cannot_erase_unresolved_defect(
     )
     inbox = tmp_path / "mail" / "inbox" / "later-reply"
     inbox.mkdir(parents=True)
-    (inbox / "metadata.json").write_text(json.dumps({"date": "now"}), encoding="utf-8")
+    (inbox / "metadata.json").write_text(
+        json.dumps({"date": "Wed, 26 Aug 2026 18:57:35 +0300"}), encoding="utf-8"
+    )
     reply_text = (
         "Получил, спасибо."
         if classification == "approval"
@@ -739,7 +948,9 @@ def test_objection_cannot_be_labelled_as_approval(tmp_path: Path) -> None:
     }
     inbox = tmp_path / "mail" / "inbox" / "incoming"
     inbox.mkdir(parents=True)
-    (inbox / "metadata.json").write_text(json.dumps({"date": "now"}), encoding="utf-8")
+    (inbox / "metadata.json").write_text(
+        json.dumps({"date": "Wed, 26 Aug 2026 18:57:35 +0300"}), encoding="utf-8"
+    )
     (inbox / "body.txt").write_text("Стоп, это не то, что я просил.", encoding="utf-8")
     args = argparse.Namespace(
         task_dir=str(task), stage="completion", gmail_id="incoming",
@@ -779,6 +990,63 @@ def test_verbatim_message_append_is_idempotent_and_rejects_identity_rewrite(
     assert len(value["messages"]) == 2
 
 
+def test_verbatim_message_replay_corrects_time_from_authenticated_gmail_date(
+    tmp_path: Path,
+) -> None:
+    task = tmp_path / "001-example"
+    task.mkdir()
+    mail = tmp_path / "mail"
+    seed_gmail_body(mail, "incoming", "Точный ответ")
+    original = {
+        "channel": "gmail",
+        "source_id": "incoming",
+        "occurred_at": "2026-08-26T16:09:22+00:00",
+        "text": "Точный ответ",
+    }
+    task_review_mail.product_review.verbatim_path(task).write_text(
+        json.dumps({"schema_version": 1, "messages": [original]}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    with mock.patch.object(task_review_mail, "MAIL_STATE", mail):
+        value = task_review_mail.append_verbatim_message(
+            task,
+            channel="gmail",
+            source_id="incoming",
+            occurred_at="Wed, 26 Aug 2026 18:57:35 +0300",
+            text="Точный ответ",
+        )
+    assert value["messages"] == [{
+        **original,
+        "occurred_at": "2026-08-26T15:57:35+00:00",
+    }]
+
+
+def test_non_gmail_verbatim_message_rejects_time_rewrite(tmp_path: Path) -> None:
+    task = tmp_path / "001-example"
+    task.mkdir()
+    original = {
+        "channel": "product-owner-cli",
+        "source_id": "decision:20260822T085625Z",
+        "occurred_at": "2026-08-22T08:56:25+00:00",
+        "text": "Точная исходная просьба",
+    }
+    task_review_mail.product_review.verbatim_path(task).write_text(
+        json.dumps({"schema_version": 1, "messages": [original]}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        ValueError, match="verbatim user message identity already has different content"
+    ):
+        task_review_mail.append_verbatim_message(
+            task,
+            channel=original["channel"],
+            source_id=original["source_id"],
+            occurred_at="2025-01-01T00:00:00+00:00",
+            text=original["text"],
+        )
+
+
 def test_gmail_verbatim_keeps_exact_new_reply_and_excludes_quoted_thread(
     tmp_path: Path,
 ) -> None:
@@ -801,7 +1069,7 @@ def test_verbatim_message_can_be_consciously_excluded_with_a_reason(
     kwargs = {
         "channel": "gmail",
         "source_id": "noise-feedback",
-        "occurred_at": "2026-08-26T01:00:00+00:00",
+        "occurred_at": "2026-08-26T15:57:35+00:00",
         "text": "Эта жалоба относится к другому каналу",
         "excluded_reason": "Сообщение проверено и относится только к повтору в Telegram.",
     }
@@ -815,7 +1083,7 @@ def test_verbatim_message_can_be_consciously_excluded_with_a_reason(
     assert value["excluded_messages"] == [{
         "channel": "gmail",
         "source_id": "noise-feedback",
-        "occurred_at": "2026-08-26T01:00:00+00:00",
+        "occurred_at": "2026-08-26T15:57:35+00:00",
         "text": "Эта жалоба относится к другому каналу",
         "reason": "Сообщение проверено и относится только к повтору в Telegram.",
     }]
@@ -847,8 +1115,11 @@ def test_defect_resolution_requires_changed_task_lesson_held_out_and_fresh_mail(
                 "classification": "defect",
                 "target_event_id": target,
                 "target_review": {
-                    "task_sha256": old_result["task_sha256"],
-                    "contract_sha256": old_result["contract_sha256"],
+                        "task_sha256": old_result["task_sha256"],
+                        "contract_sha256": old_result["contract_sha256"],
+                        "candidate_states": None,
+                        "result_states": None,
+                        "verbatim_user_words_sha256": "v" * 64,
                 },
                 "lesson_source_event": "gmail:incoming",
             }
@@ -897,9 +1168,386 @@ def test_defect_resolution_requires_changed_task_lesson_held_out_and_fresh_mail(
         assert resolved["resolution"]["resolved_by_event_id"] == current_event
         assert not task_review_mail.unresolved_defect(task, "statement")
         later_event = task_review_mail.event_id(
-            task, "statement", {**current_result, "reviewed_at": "2026-08-26T12:00:00+00:00"}
+            task,
+            "statement",
+            {**current_result, "reviewed_at": "2026-08-26T12:00:00+00:00"},
         )
+        assert later_event != current_event
         assert not task_review_mail.unresolved_defect(task, "statement")
+
+
+def test_defect_resolution_refuses_a_missing_snapshot_instead_of_assuming_change(
+    tmp_path: Path,
+) -> None:
+    task = tmp_path / "001-example"
+    review_dir = task / "product-review"
+    review_dir.mkdir(parents=True)
+    result = {
+        "reviewed_at": "2026-08-26T11:00:00+00:00",
+        "task_sha256": "a" * 64,
+        "contract_sha256": "b" * 64,
+    }
+    task_review_mail.feedback_path(task, "statement").write_text(
+        json.dumps({
+            "classification": "defect",
+            "target_event_id": "historical-event",
+            "target_review": {},
+            "lesson_source_event": "gmail:incoming",
+        }),
+        encoding="utf-8",
+    )
+    args = argparse.Namespace(
+        task_dir=str(task), stage="statement",
+        held_out_evidence=str(review_dir / "unused.json"),
+    )
+    with mock.patch.object(
+        task_review_mail.product_review,
+        "validate_result",
+        return_value=(True, "ok", result),
+    ), mock.patch.object(
+        lesson, "source_event_applied", return_value=True
+    ), pytest.raises(ValueError, match="no complete task-state snapshot"):
+        task_review_mail.resolve_feedback(args)
+
+
+def test_completion_defect_resolution_refuses_a_different_repository_set(
+    tmp_path: Path,
+) -> None:
+    task = tmp_path / "001-example"
+    review_dir = task / "product-review"
+    review_dir.mkdir(parents=True)
+    previous_candidates = {"/a": "sha256:AAA", "/b": "sha256:BBB"}
+    current_result = {
+        "reviewed_at": "2026-08-26T11:00:00+00:00",
+        "packet_sha256": "a" * 64,
+        "report_sha256": "b" * 64,
+        "task_sha256": "c" * 64,
+        "contract_sha256": "d" * 64,
+        "candidate_states": {"/a": "sha256:AAA"},
+    }
+    target = "task-completion:001:old"
+    task_review_mail.feedback_path(task, "completion").write_text(
+        json.dumps({
+            "classification": "defect",
+            "target_event_id": target,
+            "target_review": {
+                "task_sha256": current_result["task_sha256"],
+                "contract_sha256": current_result["contract_sha256"],
+                "candidate_states": previous_candidates,
+                "result_states": {
+                    "/a": {"head": "abc", "entries": []},
+                    "/b": {"head": "abc", "entries": []},
+                },
+                "verbatim_user_words_sha256": "v" * 64,
+            },
+            "lesson_source_event": "gmail:incoming",
+        }),
+        encoding="utf-8",
+    )
+    held_out = review_dir / "completion-held-out.json"
+    held_out.write_text(json.dumps({
+        "schema_version": 1,
+        "target_event_id": target,
+        "caught_prior_defect": True,
+        "reviewer_owner_change": "completion review now checks the corrected result",
+    }), encoding="utf-8")
+    args = argparse.Namespace(
+        task_dir=str(task), stage="completion", held_out_evidence=str(held_out)
+    )
+
+    with mock.patch.object(
+        task_review_mail.product_review,
+        "validate_result",
+        return_value=(True, "ok", current_result),
+    ), mock.patch.object(
+        task_review_mail, "delivery_receipt", return_value={"message_id": "fresh-mail"}
+    ), mock.patch.object(
+        lesson, "source_event_applied", return_value=True
+    ), pytest.raises(ValueError, match="repository set differs"):
+        task_review_mail.resolve_feedback(args)
+
+
+def test_completion_defect_resolution_ignores_foreign_untracked_file(
+    tmp_path: Path,
+) -> None:
+    task = tmp_path / "001-example"
+    review_dir = task / "product-review"
+    review_dir.mkdir(parents=True)
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    subprocess.run(["git", "init", "-q", str(repository)], check=True)
+    (repository / "owned.py").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repository), "add", "owned.py"], check=True)
+    subprocess.run(
+        [
+            "git", "-C", str(repository), "-c", "user.name=Test",
+            "-c", "user.email=test@example.invalid", "commit", "-qm", "base",
+        ],
+        check=True,
+    )
+    (repository / "owned.py").write_text("task result\n", encoding="utf-8")
+    packet, _manifest = write_completion_packet(
+        task, "completion.json", {repository: ["owned.py"]}
+    )
+    old_result = {
+        "packet": packet.name,
+        "candidate_states": {
+            str(repository): task_review_mail.product_review.git_candidate_state(repository)
+        },
+    }
+    tracked = task_review_mail.declared_result_state(task, old_result)
+    candidate_before = task_review_mail.product_review.git_candidate_state(repository)
+    (repository / "foreign-note.txt").write_text("another task\n", encoding="utf-8")
+    candidate_after = task_review_mail.product_review.git_candidate_state(repository)
+    assert candidate_after != candidate_before
+    candidate = {str(repository): candidate_after}
+    current_result = {
+        "packet": packet.name,
+        "candidate_states": candidate,
+        "reviewed_at": "2026-08-26T11:00:00+00:00",
+    }
+    target = "task-completion:001:old"
+    task_review_mail.feedback_path(task, "completion").write_text(
+        json.dumps({
+            "classification": "defect",
+            "target_event_id": target,
+            "target_review": {
+                "task_sha256": "t" * 64,
+                "contract_sha256": "c" * 64,
+                "candidate_states": {str(repository): candidate_before},
+                "result_states": tracked,
+                "verbatim_user_words_sha256": "v" * 64,
+            },
+            "lesson_source_event": "gmail:incoming",
+        }),
+        encoding="utf-8",
+    )
+    args = argparse.Namespace(
+        task_dir=str(task), stage="completion", held_out_evidence=str(review_dir / "x.json")
+    )
+
+    with mock.patch.object(
+        task_review_mail.product_review, "validate_result", return_value=(True, "ok", current_result)
+    ), mock.patch.object(
+        task_review_mail.lesson, "source_event_applied", return_value=True
+    ), pytest.raises(ValueError, match="result itself has not changed"):
+        task_review_mail.resolve_feedback(args)
+
+
+@pytest.mark.parametrize("foreign_change", ["tracked_edit", "commit"])
+def test_completion_defect_resolution_ignores_foreign_tracked_movement(
+    tmp_path: Path, foreign_change: str
+) -> None:
+    task = tmp_path / "001-example"
+    review_dir = task / "product-review"
+    review_dir.mkdir(parents=True)
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    subprocess.run(["git", "init", "-q", str(repository)], check=True)
+    for name in ("owned.py", "foreign.py"):
+        (repository / name).write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repository), "add", "."], check=True)
+    subprocess.run(
+        [
+            "git", "-C", str(repository), "-c", "user.name=Test",
+            "-c", "user.email=test@example.invalid", "commit", "-qm", "base",
+        ],
+        check=True,
+    )
+    (repository / "owned.py").write_text("task result\n", encoding="utf-8")
+    packet, _manifest = write_completion_packet(
+        task, "completion-old.json", {repository: ["owned.py"]}
+    )
+    old_result = {
+        "packet": packet.name,
+        "candidate_states": {
+            str(repository): task_review_mail.product_review.git_candidate_state(repository)
+        },
+    }
+    previous_state = task_review_mail.declared_result_state(task, old_result)
+
+    (repository / "foreign.py").write_text("another task\n", encoding="utf-8")
+    if foreign_change == "commit":
+        subprocess.run(["git", "-C", str(repository), "add", "foreign.py"], check=True)
+        subprocess.run(
+            [
+                "git", "-C", str(repository), "-c", "user.name=Other",
+                "-c", "user.email=other@example.invalid", "commit", "-qm", "foreign",
+            ],
+            check=True,
+        )
+    current_result = {
+        **old_result,
+        "candidate_states": {
+            str(repository): task_review_mail.product_review.git_candidate_state(repository)
+        },
+        "reviewed_at": "2026-08-27T06:00:00+00:00",
+    }
+    target = "task-completion:001:old"
+    task_review_mail.feedback_path(task, "completion").write_text(
+        json.dumps({
+            "classification": "defect",
+            "target_event_id": target,
+            "target_review": {
+                "task_sha256": "t" * 64,
+                "contract_sha256": "c" * 64,
+                "candidate_states": old_result["candidate_states"],
+                "result_states": previous_state,
+                "verbatim_user_words_sha256": "v" * 64,
+            },
+            "lesson_source_event": "gmail:incoming",
+        }),
+        encoding="utf-8",
+    )
+    args = argparse.Namespace(
+        task_dir=str(task), stage="completion", held_out_evidence=str(review_dir / "x.json")
+    )
+    with mock.patch.object(
+        task_review_mail.product_review,
+        "validate_result",
+        return_value=(True, "ok", current_result),
+    ), mock.patch.object(
+        lesson, "source_event_applied", return_value=True
+    ), pytest.raises(ValueError, match="result itself has not changed"):
+        task_review_mail.resolve_feedback(args)
+
+
+def test_completion_defect_resolution_accepts_a_declared_new_result_file(
+    tmp_path: Path,
+) -> None:
+    task = tmp_path / "001-example"
+    review_dir = task / "product-review"
+    review_dir.mkdir(parents=True)
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    subprocess.run(["git", "init", "-q", str(repository)], check=True)
+    (repository / "owned.py").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repository), "add", "owned.py"], check=True)
+    subprocess.run(
+        [
+            "git", "-C", str(repository), "-c", "user.name=Test",
+            "-c", "user.email=test@example.invalid", "commit", "-qm", "base",
+        ],
+        check=True,
+    )
+    (repository / "owned.py").write_text("task result\n", encoding="utf-8")
+    old_packet, _manifest = write_completion_packet(
+        task, "completion-old.json", {repository: ["owned.py"]}
+    )
+    old_result = {
+        "packet": old_packet.name,
+        "candidate_states": {
+            str(repository): task_review_mail.product_review.git_candidate_state(repository)
+        },
+    }
+    previous_state = task_review_mail.declared_result_state(task, old_result)
+    (repository / "correction.py").write_text("actual correction\n", encoding="utf-8")
+    new_packet, _manifest = write_completion_packet(
+        task, "completion-new.json", {repository: ["owned.py", "correction.py"]}
+    )
+    current_result = {
+        "packet": new_packet.name,
+        "candidate_states": {
+            str(repository): task_review_mail.product_review.git_candidate_state(repository)
+        },
+        "reviewed_at": "2026-08-27T06:00:00+00:00",
+    }
+    target = "task-completion:001:old"
+    task_review_mail.feedback_path(task, "completion").write_text(
+        json.dumps({
+            "classification": "defect",
+            "target_event_id": target,
+            "target_review": {
+                "task_sha256": "t" * 64,
+                "contract_sha256": "c" * 64,
+                "candidate_states": old_result["candidate_states"],
+                "result_states": previous_state,
+                "verbatim_user_words_sha256": "v" * 64,
+            },
+            "lesson_source_event": "gmail:incoming",
+        }),
+        encoding="utf-8",
+    )
+    held_out = review_dir / "completion-held-out.json"
+    held_out.write_text(json.dumps({
+        "schema_version": 1,
+        "target_event_id": target,
+        "caught_prior_defect": True,
+        "reviewer_owner_change": "completion review checks declared result files",
+    }), encoding="utf-8")
+    args = argparse.Namespace(
+        task_dir=str(task), stage="completion", held_out_evidence=str(held_out)
+    )
+    with mock.patch.object(
+        task_review_mail.product_review,
+        "validate_result",
+        return_value=(True, "ok", current_result),
+    ), mock.patch.object(
+        task_review_mail, "delivery_receipt", return_value={"message_id": "fresh-mail"}
+    ), mock.patch.object(
+        lesson, "source_event_applied", return_value=True
+    ):
+        resolved = task_review_mail.resolve_feedback(args)
+    assert resolved["resolution"]["message_id"] == "fresh-mail"
+
+
+@pytest.mark.parametrize(
+    ("result_files", "candidate_key", "message"),
+    [
+        (None, "REPOSITORY", "no result-file manifest"),
+        ({"REPOSITORY": []}, "REPOSITORY", "no declared result files"),
+        ({"relative": []}, "relative", "repository path is not absolute"),
+        (
+            {"REPOSITORY": [{"path": "missing.py", "sha256": "a" * 64}]},
+            "REPOSITORY",
+            "unreadable",
+        ),
+    ],
+)
+def test_completion_result_manifest_refuses_ambiguous_inputs(
+    tmp_path: Path, result_files: dict | None, candidate_key: str, message: str
+) -> None:
+    task = tmp_path / "001-example"
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    packet = task / "completion.json"
+    packet.parent.mkdir()
+    absolute_candidate = str(repository.resolve())
+    if isinstance(result_files, dict):
+        result_files = {
+            absolute_candidate if key == "REPOSITORY" else key: value
+            for key, value in result_files.items()
+        }
+    packet.write_text(json.dumps({
+        "exact_candidate": (
+            {"result_files": result_files} if result_files is not None else {}
+        ),
+    }), encoding="utf-8")
+    candidate_path = (
+        candidate_key if candidate_key == "relative" else absolute_candidate
+    )
+    result = {"packet": packet.name, "candidate_states": {candidate_path: "state"}}
+    with pytest.raises(ValueError, match=message):
+        task_review_mail.declared_result_state(task, result)
+
+
+def test_completion_result_manifest_order_is_not_a_result_change(tmp_path: Path) -> None:
+    task = tmp_path / "001-example"
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    for name in ("a.py", "b.py"):
+        (repository / name).write_text(name, encoding="utf-8")
+    packet, _manifest = write_completion_packet(
+        task, "completion.json", {repository: ["b.py", "a.py"]}
+    )
+    result = {
+        "packet": packet.name,
+        "candidate_states": {str(repository.resolve()): "state"},
+    }
+    assert [
+        item["path"]
+        for item in task_review_mail.declared_result_state(task, result)[str(repository)]
+    ] == ["a.py", "b.py"]
 
 
 def test_two_resolved_defects_stay_discharged_after_later_review(tmp_path: Path) -> None:
@@ -940,7 +1588,9 @@ def test_duplicate_defect_feedback_does_not_reblock(tmp_path: Path) -> None:
     }])
     inbox = tmp_path / "mail" / "inbox" / "incoming"
     inbox.mkdir(parents=True)
-    (inbox / "metadata.json").write_text(json.dumps({"date": "now"}), encoding="utf-8")
+    (inbox / "metadata.json").write_text(
+        json.dumps({"date": "Wed, 26 Aug 2026 18:57:35 +0300"}), encoding="utf-8"
+    )
     (inbox / "body.txt").write_text("Повтор того же замечания.", encoding="utf-8")
     args = argparse.Namespace(
         task_dir=str(task), stage="completion", gmail_id="incoming",
