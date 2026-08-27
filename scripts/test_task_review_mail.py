@@ -472,70 +472,6 @@ def test_feedback_binds_to_the_superseded_review_letter_it_answers(tmp_path: Pat
     )
 
 
-def test_exact_replay_reopens_legacy_defect_with_frozen_task_snapshot(
-    tmp_path: Path,
-) -> None:
-    task = tmp_path / "001-example"
-    write_verbatim(task)
-    packet_dir = task / "reviews"
-    packet_dir.mkdir()
-    old_task = "a" * 64
-    old_contract = "b" * 64
-    (packet_dir / "statement-review-packet-old.json").write_text(
-        json.dumps({"subject": {
-            "sha256": old_task,
-            "contract_sha256": old_contract,
-        }}),
-        encoding="utf-8",
-    )
-    old_event = f"reply:task-001:statement:{old_task[:12]}:{'c' * 12}"
-    feedback = {
-        "gmail_id": "incoming",
-        "stage": "statement",
-        "classification": "defect",
-        "target_event_id": old_event,
-        "target_message_id": "old-mail",
-        "target_review": {
-            "task_sha256": old_task,
-            "contract_sha256": old_contract,
-            "candidate_states": None,
-            "verbatim_user_words_sha256": "legacy-without-result-states",
-        },
-        "lesson_source_event": "gmail:incoming",
-        "resolution": {"resolved_by_event_id": "incorrectly-cleared"},
-    }
-    task_review_mail.write_feedback_records(task, "statement", [feedback])
-    mail = tmp_path / "mail"
-    seed_gmail_body(mail, "incoming", "Результат не тот.")
-    result = {
-        "task_sha256": "d" * 64,
-        "contract_sha256": "e" * 64,
-        "reviewed_at": "2026-08-26T20:00:00+00:00",
-    }
-    args = argparse.Namespace(
-        task_dir=str(task), stage="statement", gmail_id="incoming",
-        classification="defect", observation="o", cost="c", rule="r", owner="reviewer",
-    )
-    with mock.patch.object(
-        task_review_mail.product_review, "validate_result", return_value=(True, "ok", result)
-    ), mock.patch.object(
-        task_review_mail, "delivery_receipt", return_value=None
-    ), mock.patch.object(
-        task_review_mail, "delivered_stage_receipts",
-        return_value=[{"event_id": old_event, "message_id": "old-mail"}],
-    ), mock.patch.object(
-        task_review_mail, "authenticated_reply", return_value=True
-    ), mock.patch.object(
-        task_review_mail, "MAIL_STATE", mail
-    ), mock.patch.object(task_review_mail, "set_blocked") as blocked:
-        recorded = task_review_mail.record_feedback(args)
-
-    assert recorded["target_review"]["task_sha256"] == old_task
-    assert recorded["target_review"]["contract_sha256"] == old_contract
-    assert "resolution" not in recorded
-    blocked.assert_called_once_with(task.resolve())
-
-
 def test_completion_feedback_snapshots_current_candidate_not_reviewed_candidate(
     tmp_path: Path,
 ) -> None:
@@ -1127,6 +1063,8 @@ def test_defect_resolution_requires_changed_task_lesson_held_out_and_fresh_mail(
         encoding="utf-8",
     )
     held_out = review_dir / "statement-held-out.json"
+    probe_source = tmp_path / "statement_probe.py"
+    probe_source.write_text("def test_prior_defect(): pass\n", encoding="utf-8")
     held_out.write_text(
         json.dumps(
             {
@@ -1134,6 +1072,11 @@ def test_defect_resolution_requires_changed_task_lesson_held_out_and_fresh_mail(
                 "target_event_id": target,
                 "caught_prior_defect": True,
                 "reviewer_owner_change": "statement-review instruction now checks the actor",
+                "probe_source": str(probe_source),
+                "probe_function": "test_prior_defect",
+                "probe_function_sha256": task_review_mail.probe_function_sha256(
+                    probe_source, "test_prior_defect"
+                ),
             }
         ),
         encoding="utf-8",
@@ -1174,6 +1117,82 @@ def test_defect_resolution_requires_changed_task_lesson_held_out_and_fresh_mail(
         )
         assert later_event != current_event
         assert not task_review_mail.unresolved_defect(task, "statement")
+        probe_source.write_text("def test_prior_defect(): assert False\n", encoding="utf-8")
+        assert task_review_mail.unresolved_defect(task, "statement")
+
+
+def test_resolution_written_before_the_probe_binding_stays_resolved(
+    tmp_path: Path,
+) -> None:
+    """The shape the previous revision wrote, field for field, must stay readable."""
+    task = tmp_path / "001-example"
+    review_dir = task / "product-review"
+    review_dir.mkdir(parents=True)
+    evidence = review_dir / "statement-held-out.json"
+    evidence.write_text(json.dumps({"caught_prior_defect": True}), encoding="utf-8")
+    task_review_mail.write_feedback_records(task, "statement", [{
+        "classification": "defect",
+        "lesson_source_event": "gmail:incoming",
+        "resolution": {
+            "resolved_by_event_id": "task-statement:1246:c4d1134a8e4b6a4bc7c82f9d",
+            "resolved_at": "2026-08-27T12:45:34.496686+00:00",
+            "held_out_evidence": evidence.name,
+            "held_out_sha256": task_review_mail.product_review.file_sha256(evidence),
+            "message_id": "1a04340fc8845cdf",
+        },
+    }])
+    with mock.patch.object(lesson, "source_event_applied", return_value=True):
+        assert not task_review_mail.unresolved_defect(task, "statement")
+        evidence.write_text(json.dumps({"caught_prior_defect": False}), encoding="utf-8")
+        assert task_review_mail.unresolved_defect(task, "statement")
+
+
+def test_probe_binding_survives_unrelated_edits_to_its_shared_test_module(
+    tmp_path: Path,
+) -> None:
+    task = tmp_path / "001-example"
+    review_dir = task / "product-review"
+    review_dir.mkdir(parents=True)
+    evidence = review_dir / "statement-held-out.json"
+    evidence.write_text("{}\n", encoding="utf-8")
+    probe_source = tmp_path / "test_product_review.py"
+    probe_source.write_text(
+        "def test_other_case():\n"
+        "    assert True\n"
+        "\n"
+        "\n"
+        "def test_prior_defect():\n"
+        "    assert goal_drift_is_refused()\n",
+        encoding="utf-8",
+    )
+    task_review_mail.write_feedback_records(task, "statement", [{
+        "classification": "defect",
+        "lesson_source_event": "gmail:incoming",
+        "resolution": {
+            "resolved_by_event_id": "corrected",
+            "held_out_evidence": evidence.name,
+            "held_out_sha256": task_review_mail.product_review.file_sha256(evidence),
+            "probe_source": str(probe_source),
+            "probe_function": "test_prior_defect",
+            "probe_function_sha256": task_review_mail.probe_function_sha256(
+                probe_source, "test_prior_defect"
+            ),
+        },
+    }])
+    with mock.patch.object(lesson, "source_event_applied", return_value=True):
+        assert not task_review_mail.unresolved_defect(task, "statement")
+        probe_source.write_text(
+            probe_source.read_text(encoding="utf-8") + "\n\ndef test_added_later():\n    pass\n",
+            encoding="utf-8",
+        )
+        assert not task_review_mail.unresolved_defect(task, "statement")
+        probe_source.write_text(
+            probe_source.read_text(encoding="utf-8").replace(
+                "assert goal_drift_is_refused()", "pass"
+            ),
+            encoding="utf-8",
+        )
+        assert task_review_mail.unresolved_defect(task, "statement")
 
 
 def test_defect_resolution_refuses_a_missing_snapshot_instead_of_assuming_change(
@@ -1245,11 +1264,18 @@ def test_completion_defect_resolution_refuses_a_different_repository_set(
         encoding="utf-8",
     )
     held_out = review_dir / "completion-held-out.json"
+    probe_source = tmp_path / "completion_probe.py"
+    probe_source.write_text("def test_prior_defect(): pass\n", encoding="utf-8")
     held_out.write_text(json.dumps({
         "schema_version": 1,
         "target_event_id": target,
         "caught_prior_defect": True,
         "reviewer_owner_change": "completion review now checks the corrected result",
+        "probe_source": str(probe_source),
+        "probe_function": "test_prior_defect",
+        "probe_function_sha256": task_review_mail.probe_function_sha256(
+            probe_source, "test_prior_defect"
+        ),
     }), encoding="utf-8")
     args = argparse.Namespace(
         task_dir=str(task), stage="completion", held_out_evidence=str(held_out)
@@ -1469,11 +1495,18 @@ def test_completion_defect_resolution_accepts_a_declared_new_result_file(
         encoding="utf-8",
     )
     held_out = review_dir / "completion-held-out.json"
+    probe_source = tmp_path / "completion_probe.py"
+    probe_source.write_text("def test_prior_defect(): pass\n", encoding="utf-8")
     held_out.write_text(json.dumps({
         "schema_version": 1,
         "target_event_id": target,
         "caught_prior_defect": True,
         "reviewer_owner_change": "completion review checks declared result files",
+        "probe_source": str(probe_source),
+        "probe_function": "test_prior_defect",
+        "probe_function_sha256": task_review_mail.probe_function_sha256(
+            probe_source, "test_prior_defect"
+        ),
     }), encoding="utf-8")
     args = argparse.Namespace(
         task_dir=str(task), stage="completion", held_out_evidence=str(held_out)
@@ -1555,6 +1588,8 @@ def test_two_resolved_defects_stay_discharged_after_later_review(tmp_path: Path)
     review_dir = task / "product-review"
     review_dir.mkdir(parents=True)
     records = []
+    probe_source = tmp_path / "probe.py"
+    probe_source.write_text("def test_prior_defect(): pass\n", encoding="utf-8")
     for number in (1, 2):
         evidence = review_dir / f"held-out-{number}.json"
         evidence.write_text("{}\n", encoding="utf-8")
@@ -1565,6 +1600,11 @@ def test_two_resolved_defects_stay_discharged_after_later_review(tmp_path: Path)
                 "resolved_by_event_id": f"corrected-{number}",
                 "held_out_evidence": evidence.name,
                 "held_out_sha256": task_review_mail.product_review.file_sha256(evidence),
+                "probe_source": str(probe_source),
+                "probe_function": "test_prior_defect",
+                "probe_function_sha256": task_review_mail.probe_function_sha256(
+                    probe_source, "test_prior_defect"
+                ),
             },
         })
     task_review_mail.write_feedback_records(task, "statement", records)

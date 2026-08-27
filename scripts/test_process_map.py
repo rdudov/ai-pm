@@ -1787,7 +1787,7 @@ class RunnerContractIsWatched(unittest.TestCase):
         self.assertNotIn("контракт с task_runner разошёлся", subject)
         self.assertIsNotNone(reminder)
 
-    def test_a_terminal_task_does_not_keep_the_boundary_alarm_alive(self):
+    def test_a_terminal_boundary_failure_is_reported_once(self):
         tasks = Path(self._ledger.name) / "tasks"
         task = tasks / "1246-example"
         policy = task / ".runner" / "companion-application-policy.json"
@@ -1801,8 +1801,21 @@ class RunnerContractIsWatched(unittest.TestCase):
         (task / "task.md").write_text(
             '---\nid: 1246\nstatus: "completed"\n---\n# Done\n', encoding="utf-8"
         )
-        with mock.patch.object(tick.product_memory, "tasks_repo", return_value=tasks.parent):
+        moment = datetime(2026, 8, 27, 3, 0, tzinfo=timezone.utc)
+        with mock.patch.object(tick.product_memory, "tasks_repo", return_value=tasks.parent), \
+                mock.patch.object(tick.runner_contract, "check", return_value=[]), \
+                mock.patch.object(tick, "deliver", return_value={"delivered": True}) as delivered:
+            found, _reminder = tick.runner_contract_alarm(
+                "process", {}, moment, announce=True
+            )
+            self.assertEqual(len(found), 1)
+            self.assertTrue(found[0]["terminal"])
+            self.assertEqual(delivered.call_count, 1)
             self.assertEqual(tick.product_review_boundary_violations(), [])
+        saved = json.loads(policy.read_text(encoding="utf-8"))
+        self.assertEqual(
+            saved["product_review_boundary"]["alarm_reported_at"], moment.isoformat()
+        )
 
     def test_the_direction_state_file_carries_the_result_of_the_check(self):
         # «Проверка была и прошла» and «проверки никто не делал» are different

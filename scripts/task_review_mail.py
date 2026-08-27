@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import json
 import re
@@ -176,6 +177,52 @@ def write_feedback_records(task_dir: Path, stage: str, records: list[dict]) -> N
     )
 
 
+def probe_function_sha256(source: Path, function: str) -> str:
+    """Digest one named probe function of a test module.
+
+    The probe lives in a module other tasks keep editing, so the resolution binds
+    the function that catches the defect rather than the whole file's bytes.
+    """
+    try:
+        text = source.read_text(encoding="utf-8")
+        module = ast.parse(text)
+    except (OSError, UnicodeError, SyntaxError) as exc:
+        raise ValueError(f"held-out probe source is unreadable: {source}") from exc
+    definitions = [
+        node
+        for node in module.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == function
+    ]
+    if len(definitions) != 1:
+        raise ValueError(f"held-out probe function is not uniquely defined: {function}")
+    node = definitions[0]
+    first = min([node.lineno, *(item.lineno for item in node.decorator_list)])
+    body = "".join(text.splitlines(keepends=True)[first - 1 : node.end_lineno])
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+def probe_binding(value: dict) -> tuple[Path, str, str] | None:
+    """Read the probe fields of a resolution or of held-out evidence.
+
+    A record written before this binding existed carries none of them and keeps
+    the meaning it was written with; a partial binding is an error.
+    """
+    fields = ("probe_source", "probe_function", "probe_function_sha256")
+    present = [name for name in fields if value.get(name) is not None]
+    if not present:
+        return None
+    source, function, digest = (str(value.get(name) or "") for name in fields)
+    if (
+        not source
+        or not Path(source).is_absolute()
+        or not function
+        or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+    ):
+        raise ValueError("held-out probe binding is incomplete")
+    return Path(source), function, digest
+
+
 def defect_is_unresolved(task_dir: Path, record: dict) -> bool:
     if record.get("classification") != "defect":
         return False
@@ -190,8 +237,14 @@ def defect_is_unresolved(task_dir: Path, record: dict) -> bool:
         return True
     evidence = task_dir / "product-review" / evidence_name
     try:
-        return resolution.get("held_out_sha256") != product_review.file_sha256(evidence)
-    except OSError:
+        if resolution.get("held_out_sha256") != product_review.file_sha256(evidence):
+            return True
+        binding = probe_binding(resolution)
+        if binding is None:
+            return False
+        source, function, digest = binding
+        return probe_function_sha256(source, function) != digest
+    except (OSError, ValueError):
         return True
 
 
@@ -554,59 +607,6 @@ def feedback_snapshot_is_complete(value: object) -> bool:
     return isinstance(value, dict) and FEEDBACK_SNAPSHOT_FIELDS <= value.keys()
 
 
-def legacy_statement_feedback_snapshot(task_dir: Path, feedback: dict) -> dict:
-    """Recover the one pre-snapshot statement record from its frozen review packet."""
-    target_event = str(feedback.get("target_event_id") or "")
-    match = re.fullmatch(
-        rf"reply:task-{re.escape(task_number(task_dir))}:statement:([0-9a-f]{{12,64}}):[0-9a-f]+",
-        target_event,
-    )
-    if match is None:
-        raise ValueError("the recorded defect has no complete task-state snapshot")
-    task_prefix = match.group(1)
-    matches: list[dict] = []
-    for packet_path in sorted((task_dir / "reviews").glob("statement-review-packet-*.json")):
-        try:
-            packet = json.loads(packet_path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError):
-            continue
-        subject = packet.get("subject") if isinstance(packet, dict) else None
-        if (
-            isinstance(subject, dict)
-            and str(subject.get("sha256") or "").startswith(task_prefix)
-            and "contract_sha256" in subject
-        ):
-            matches.append(subject)
-    if len(matches) != 1:
-        raise ValueError("the recorded defect has no unique frozen task-state snapshot")
-    verbatim = product_review.load_verbatim_record(task_dir)
-    gmail_id = str(feedback.get("gmail_id") or "")
-    without_feedback = {
-        **verbatim,
-        "messages": [
-            item for item in verbatim["messages"]
-            if not (item.get("channel") == "gmail" and item.get("source_id") == gmail_id)
-        ],
-    }
-    if "excluded_messages" in verbatim:
-        without_feedback["excluded_messages"] = [
-            item for item in verbatim["excluded_messages"]
-            if not (item.get("channel") == "gmail" and item.get("source_id") == gmail_id)
-        ]
-    verbatim_digest = hashlib.sha256(
-        json.dumps(
-            without_feedback, sort_keys=True, separators=(",", ":"), ensure_ascii=False
-        ).encode("utf-8")
-    ).hexdigest()
-    return {
-        "task_sha256": matches[0]["sha256"],
-        "contract_sha256": matches[0]["contract_sha256"],
-        "candidate_states": None,
-        "result_states": None,
-        "verbatim_user_words_sha256": verbatim_digest,
-    }
-
-
 def record_feedback(args: argparse.Namespace) -> dict:
     task_dir = Path(args.task_dir).resolve()
     _passed, _detail, result = product_review.validate_result(
@@ -657,18 +657,6 @@ def record_feedback(args: argparse.Namespace) -> dict:
     )
     verbatim_after_append = product_review.verbatim_sha256(task_dir)
     if existing is not None:
-        if (
-            args.stage == "statement"
-            and existing.get("classification") == "defect"
-            and not feedback_snapshot_is_complete(existing.get("target_review"))
-            and str(existing.get("target_event_id") or "").startswith(
-                f"reply:task-{task_number(task_dir)}:statement:"
-            )
-        ):
-            existing["target_review"] = legacy_statement_feedback_snapshot(task_dir, existing)
-            existing.pop("resolution", None)
-            write_feedback_records(task_dir, args.stage, records)
-            set_blocked(task_dir)
         return existing
     target_event = str(receipt["event_id"])
     target_review = feedback_target_snapshot(task_dir, args.stage, result)
@@ -779,11 +767,20 @@ def resolve_feedback(args: argparse.Namespace) -> dict:
         and held_out["reviewer_owner_change"].strip()
     ):
         raise ValueError("held-out evidence does not prove the prior defect is now caught")
+    binding = probe_binding(held_out)
+    if binding is None:
+        raise ValueError("held-out evidence names no probe function to bind")
+    probe_source, probe_function, probe_digest = binding
+    if probe_function_sha256(probe_source, probe_function) != probe_digest:
+        raise ValueError("held-out evidence is not bound to its exact probe function")
     feedback["resolution"] = {
         "resolved_by_event_id": current_event,
         "resolved_at": datetime.now(timezone.utc).isoformat(),
         "held_out_evidence": relative.name,
         "held_out_sha256": product_review.file_sha256(evidence),
+        "probe_source": str(probe_source),
+        "probe_function": probe_function,
+        "probe_function_sha256": probe_digest,
         "message_id": receipt["message_id"],
     }
     write_feedback_records(task_dir, args.stage, records)

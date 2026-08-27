@@ -775,14 +775,15 @@ def product_review_boundary_violations() -> list[dict]:
     violations: list[dict] = []
     for policy_path in sorted(tasks_root.glob("*/.runner/companion-application-policy.json")):
         task_path = policy_path.parents[1]
-        if process_map_recorder.read_frontmatter(task_path).get("status") in TERMINAL:
-            continue
+        terminal = process_map_recorder.read_frontmatter(task_path).get("status") in TERMINAL
         try:
             policy = json.loads(policy_path.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, json.JSONDecodeError):
             continue
         boundary = policy.get("product_review_boundary") if isinstance(policy, dict) else None
         if not isinstance(boundary, dict) or boundary.get("mode") != "unavailable":
+            continue
+        if terminal and boundary.get("alarm_reported_at"):
             continue
         detail = str(boundary.get("detail") or "")
         if "mail owner is missing" in detail:
@@ -802,8 +803,29 @@ def product_review_boundary_violations() -> list[dict]:
                 f"но {reason}"
             ),
             "src": str(policy_path),
+            "policy_path": str(policy_path),
+            "terminal": terminal,
         })
     return violations
+
+
+def remember_reported_boundary_alarms(violations: list[dict], moment: datetime) -> None:
+    """Receipt terminal boundary failures once in their existing policy record."""
+    for item in violations:
+        if item.get("kind") != "product_review_boundary":
+            continue
+        policy_path = Path(str(item.get("policy_path") or ""))
+        try:
+            policy = json.loads(policy_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            continue
+        boundary = policy.get("product_review_boundary") if isinstance(policy, dict) else None
+        if not isinstance(boundary, dict) or boundary.get("mode") != "unavailable":
+            continue
+        boundary["alarm_reported_at"] = moment.isoformat()
+        policy_path.write_text(
+            json.dumps(policy, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
 
 
 def runner_contract_alarm(thread: str, stored: dict, moment: datetime,
@@ -864,7 +886,9 @@ def runner_contract_alarm(thread: str, stored: dict, moment: datetime,
                         f"- {item['text']}\n  ({item['src']})" for item in boundary
                     )
                 )
-        deliver(thread, "alarm", subject, told, moment)
+        delivery = deliver(thread, "alarm", subject, told, moment)
+        if delivery.get("delivered") is True or delivery.get("action") == "drop":
+            remember_reported_boundary_alarms(boundary, moment)
         reminder = {"at": moment.isoformat(), "signature": signature}
     return violations, reminder
 
