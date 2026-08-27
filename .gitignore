@@ -44,3 +44,14 @@ logs/
 .pytest_cache/
 __pycache__/
 *.pyc
+
+# Mail and messenger runtime state of this installation, including a live
+# Telegram session file. Nothing here is a record of decision, and a re-login
+# must not look like a change to reviewed work.
+.state/
+
+# Scratch this checkout accumulates while work runs: renders, probe output and
+# the note a child leaves at the root. Unignored scratch also enters the digest
+# that binds a reviewed candidate, so an unrelated write would invalidate it.
+tmp/
+/trace.md

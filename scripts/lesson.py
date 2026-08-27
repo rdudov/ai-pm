@@ -22,6 +22,20 @@ INBOX = HOME / "lessons" / "inbox.json"
 ARCHIVE = HOME / "lessons" / "applied.md"
 
 
+def source_event_applied(source_event: str) -> bool:
+    try:
+        archived = ARCHIVE.read_text(encoding="utf-8")
+    except OSError:
+        archived = ""
+    return f"<!-- source-event:{source_event} -->" in archived
+
+
+def source_event_seen(items: list[dict], source_event: str) -> bool:
+    if any(item.get("source_event") == source_event for item in items):
+        return True
+    return source_event_applied(source_event)
+
+
 def load() -> list[dict]:
     if not INBOX.is_file():
         return []
@@ -38,6 +52,9 @@ def save(items: list[dict]) -> None:
 
 def add(args: argparse.Namespace) -> int:
     items = load()
+    if args.source_event and source_event_seen(items, args.source_event):
+        print(f"событие {args.source_event} уже создало урок; повтор не записан")
+        return 0
     identifier = max((item["id"] for item in items), default=0) + 1
     items.append({
         "id": identifier,
@@ -46,6 +63,7 @@ def add(args: argparse.Namespace) -> int:
         "cost": args.cost,
         "rule": args.rule,
         "owner_candidate": args.owner,
+        "source_event": args.source_event,
     })
     save(items)
     print(f"урок {identifier} записан; он останется открытым, пока не будет применён в владельце")
@@ -80,6 +98,9 @@ def close(args: argparse.Namespace) -> int:
     ARCHIVE.parent.mkdir(parents=True, exist_ok=True)
     with ARCHIVE.open("a", encoding="utf-8") as handle:
         handle.write(
+            (f"\n<!-- source-event:{lesson['source_event']} -->\n"
+             if lesson.get("source_event") else "")
+            +
             f"\n## {lesson['date']} — {lesson['rule']}\n\n"
             f"- Наблюдение: {lesson['observation']}\n"
             f"- Цена: {lesson['cost']}\n"
@@ -100,6 +121,7 @@ def main() -> int:
     capture.add_argument("--cost", required=True, help="чего это стоило: время, авария, доверие")
     capture.add_argument("--rule", required=True, help="какое правило из этого следует")
     capture.add_argument("--owner", help="предполагаемый владелец: скилл, док, правило, память")
+    capture.add_argument("--source-event", help="устойчивая identity исходного события для идемпотентности")
     capture.set_defaults(func=add)
 
     listing = sub.add_parser("list", help="показать входящие уроки")
