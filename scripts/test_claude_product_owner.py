@@ -287,18 +287,17 @@ class ProductOwnerModelRouterTests(unittest.TestCase):
                          "codex_weekly_remaining_unavailable:claude_remaining=31%")
         self.assertEqual(observation.codex_error["kind"], "codex_observation")
 
-    def test_codex_observation_failure_is_visible_before_claude_exec(self):
+    def test_codex_observation_failure_is_visible_before_the_engine_starts(self):
         stderr = StringIO()
         with (mock.patch("claude_product_owner.codex_budget.latest",
                          side_effect=OSError("sessions unreadable")),
               mock.patch("claude_product_owner.fetch_usage", return_value={
                   "seven_day": {"utilization": 69},
               }),
-              mock.patch("claude_product_owner.os.chdir"),
-              mock.patch("claude_product_owner.os.execvpe",
-                         side_effect=RuntimeError("exec boundary")),
+              mock.patch("claude_product_owner.run_background_engine",
+                         side_effect=RuntimeError("engine boundary")),
               redirect_stderr(stderr),
-              self.assertRaisesRegex(RuntimeError, "exec boundary")):
+              self.assertRaisesRegex(RuntimeError, "engine boundary")):
             router.main(["--entry", "print"])
         self.assertIn(
             "product-owner: route selected; Claude "
@@ -306,18 +305,17 @@ class ProductOwnerModelRouterTests(unittest.TestCase):
             stderr.getvalue(),
         )
 
-    def test_observed_claude_comparison_is_visible_before_exec(self):
+    def test_observed_claude_comparison_is_visible_before_the_engine_starts(self):
         stderr = StringIO()
         with (mock.patch("claude_product_owner.codex_budget.latest",
                          return_value=observed_codex(31)),
               mock.patch("claude_product_owner.fetch_usage", return_value={
                   "seven_day": {"utilization": 18},
               }),
-              mock.patch("claude_product_owner.os.chdir"),
-              mock.patch("claude_product_owner.os.execvpe",
-                         side_effect=RuntimeError("exec boundary")),
+              mock.patch("claude_product_owner.run_background_engine",
+                         side_effect=RuntimeError("engine boundary")),
               redirect_stderr(stderr),
-              self.assertRaisesRegex(RuntimeError, "exec boundary")):
+              self.assertRaisesRegex(RuntimeError, "engine boundary")):
             router.main(["--entry", "print"])
         self.assertIn(
             "product-owner: route selected; Claude "
@@ -325,15 +323,14 @@ class ProductOwnerModelRouterTests(unittest.TestCase):
             stderr.getvalue(),
         )
 
-    def test_unavailable_claude_observation_is_visible_before_exec(self):
+    def test_unavailable_claude_observation_is_visible_before_the_engine_starts(self):
         stderr = StringIO()
         with (mock.patch("claude_product_owner.fetch_usage",
                          side_effect=OSError("offline")),
-              mock.patch("claude_product_owner.os.chdir"),
-              mock.patch("claude_product_owner.os.execvpe",
-                         side_effect=RuntimeError("exec boundary")),
+              mock.patch("claude_product_owner.run_background_engine",
+                         side_effect=RuntimeError("engine boundary")),
               redirect_stderr(stderr),
-              self.assertRaisesRegex(RuntimeError, "exec boundary")):
+              self.assertRaisesRegex(RuntimeError, "engine boundary")):
             router.main(["--entry", "print"])
         self.assertIn(
             "product-owner: route selected; Claude (usage_unavailable)",
@@ -497,6 +494,158 @@ class ProductOwnerModelRouterTests(unittest.TestCase):
                                return_value=[]):
             self.assertNotIn("--add-dir", claude_command("opus", "print", []))
             self.assertNotIn("--add-dir", codex_command("print", []))
+
+
+# Both envelopes below were printed by Claude Code 2.1.247 under
+# `--output-format json`, and are quoted whole rather than summarised: a
+# shortened fixture would let this file agree with a reading of the client the
+# client never gave. The refusal came from a stub API answering 403 with the
+# verbatim message of the 27 August 2026 incident; the same shape came back
+# from that stub answering 401 and from the real API answering 401 to a bad
+# key. The control is an ordinary answered request. Task 1315 keeps how they
+# were taken and how to take them again.
+REFUSED_BEFORE_ANY_MOVE = json.loads("""
+{
+  "is_error": true, "duration_api_ms": 0, "num_turns": 1,
+  "stop_reason": "stop_sequence", "total_cost_usd": 0,
+  "session_id": "59033547-a616-44ec-8ea0-d0cce58aa527",
+  "usage": {
+    "input_tokens": 0, "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0, "output_tokens": 0,
+    "output_tokens_details": {"thinking_tokens": 0},
+    "server_tool_use": {"web_search_requests": 0, "web_fetch_requests": 0},
+    "service_tier": "standard", "inference_geo": "", "iterations": [],
+    "cache_creation": {"ephemeral_1h_input_tokens": 0,
+                       "ephemeral_5m_input_tokens": 0},
+    "speed": "standard"
+  },
+  "modelUsage": {}, "permission_denials": [], "terminal_reason": "api_error",
+  "fast_mode_state": "off", "fast_mode_disabled_reason": "sdk_opt_in_required",
+  "subtype": "success", "api_error_status": 403,
+  "result": "Failed to authenticate. API Error: 403 Your organization has disabled Claude subscription access for Claude Code",
+  "type": "result", "duration_ms": 333,
+  "uuid": "f3b2d3b3-79b3-413e-9c40-b7580fd3b405", "queued_turn_count": 0
+}
+""")
+
+ANSWERED = json.loads("""
+{
+  "is_error": false, "duration_api_ms": 3641, "num_turns": 1,
+  "stop_reason": "end_turn", "total_cost_usd": 0.145144,
+  "session_id": "d6f4eac2-e7c7-4e8b-a736-26584b2a3601",
+  "usage": {
+    "input_tokens": 2, "cache_creation_input_tokens": 6397,
+    "cache_read_input_tokens": 16023, "output_tokens": 4,
+    "output_tokens_details": {"thinking_tokens": 0},
+    "server_tool_use": {"web_search_requests": 0, "web_fetch_requests": 0},
+    "service_tier": "standard", "inference_geo": "not_available",
+    "cache_creation": {"ephemeral_1h_input_tokens": 6397,
+                       "ephemeral_5m_input_tokens": 0},
+    "speed": "standard"
+  },
+  "modelUsage": {
+    "claude-fable-5": {"inputTokens": 2, "outputTokens": 4,
+                       "cacheReadInputTokens": 16023,
+                       "cacheCreationInputTokens": 6397,
+                       "costUSD": 0.144183,
+                       "canonicalModel": "claude-fable-5"}
+  },
+  "permission_denials": [], "terminal_reason": "completed",
+  "subtype": "success", "api_error_status": null, "result": "ок",
+  "type": "result", "duration_ms": 2716,
+  "uuid": "3b47c4d7-388e-4441-bbe8-9b62810b0686", "queued_turn_count": 0
+}
+""")
+
+
+class EngineNeverMovedTests(unittest.TestCase):
+    """The one fact the door cannot see for itself, decided where it is known."""
+
+    def test_the_refusal_that_lost_a_request_is_recognised(self):
+        self.assertTrue(router.engine_never_moved(REFUSED_BEFORE_ANY_MOVE))
+
+    def test_an_answered_request_is_not_a_missing_move(self):
+        self.assertFalse(router.engine_never_moved(ANSWERED))
+
+    def test_the_count_of_turns_is_not_what_decides(self):
+        # `num_turns` reads 1 for the refusal and 0 for `/usage`, which asks
+        # nothing of the model: it is the wrong way round for this question and
+        # is deliberately not consulted.
+        self.assertEqual(REFUSED_BEFORE_ANY_MOVE["num_turns"], 1)
+        self.assertTrue(router.engine_never_moved(REFUSED_BEFORE_ANY_MOVE))
+
+    def test_a_refusal_after_the_model_has_worked_is_not_repeatable(self):
+        # The case the whole test exists to exclude: the provider refuses turn
+        # seven of a session that has already created a task or sent a message.
+        # Repeating that request would repeat what it did.
+        worked_then_refused = {
+            **REFUSED_BEFORE_ANY_MOVE,
+            "num_turns": 7,
+            "usage": {**REFUSED_BEFORE_ANY_MOVE["usage"], "input_tokens": 1801},
+            "modelUsage": {"claude-opus-5": {"inputTokens": 1801}},
+        }
+        self.assertFalse(router.engine_never_moved(worked_then_refused))
+
+    def test_an_answer_that_is_not_an_envelope_decides_nothing(self):
+        for value in (None, "", [], {"result": "ок"}):
+            self.assertFalse(router.engine_never_moved(value))
+
+
+class BackgroundEngineTests(unittest.TestCase):
+    """What the caller of the background entry gets back, and what it means."""
+
+    def run_engine(self, returncode: int, stdout: str, stderr: str = ""):
+        completed = subprocess.CompletedProcess([], returncode, stdout, stderr)
+        out, err = StringIO(), StringIO()
+        with (mock.patch("claude_product_owner.subprocess.run",
+                         return_value=completed) as run,
+              redirect_stdout(out), redirect_stderr(err)):
+            code = router.run_background_engine(["claude", "--print"], {})
+        return code, out.getvalue(), err.getvalue(), run
+
+    def test_a_refused_start_is_reported_as_a_temporary_failure(self):
+        code, out, err, _ = self.run_engine(
+            1, json.dumps(REFUSED_BEFORE_ANY_MOVE))
+        self.assertEqual(code, router.ENGINE_NEVER_MOVED_EXIT)
+        self.assertIn("движок не ответил", err)
+        self.assertIn("403", err)
+
+    def test_the_caller_still_reads_the_plain_answer_on_stdout(self):
+        # `thread_tick` and `daily_standup` parse this stdout. Reading the
+        # envelope must not put the envelope in front of them.
+        code, out, _, run = self.run_engine(0, json.dumps(ANSWERED))
+        self.assertEqual(code, 0)
+        self.assertEqual(out, "ок\n")
+        self.assertEqual(run.call_args.args[0][-2:], ["--output-format", "json"])
+
+    def test_a_run_that_left_no_envelope_is_passed_through_unchanged(self):
+        # A crash mid-work prints no envelope, and inventing a verdict for it is
+        # exactly how a request with effects would get repeated.
+        # Byte for byte, because that is what replacing this process with the
+        # engine used to produce.
+        code, out, _, _ = self.run_engine(1, "half an answer", "boom\n")
+        self.assertEqual(code, 1)
+        self.assertEqual(out, "half an answer")
+
+    def test_the_reserved_code_is_never_repeated_by_accident(self):
+        code, _, _, _ = self.run_engine(
+            router.ENGINE_NEVER_MOVED_EXIT, "not json at all")
+        self.assertEqual(code, 1)
+
+    def test_the_interactive_entry_still_hands_the_terminal_over(self):
+        with (mock.patch("claude_product_owner.codex_budget.latest",
+                         return_value=observed_codex(81)),
+              mock.patch("claude_product_owner.fetch_usage", return_value={
+                  "seven_day": {"utilization": 18},
+              }),
+              mock.patch("claude_product_owner.os.chdir"),
+              mock.patch("claude_product_owner.os.execvpe",
+                         side_effect=RuntimeError("exec boundary")),
+              mock.patch("claude_product_owner.run_background_engine") as engine,
+              redirect_stderr(StringIO()),
+              self.assertRaisesRegex(RuntimeError, "exec boundary")):
+            router.main(["--entry", "interactive"])
+        engine.assert_not_called()
 
 
 if __name__ == "__main__":
