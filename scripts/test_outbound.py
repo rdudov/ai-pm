@@ -152,6 +152,12 @@ class ComposerSelectsBeforeText(unittest.TestCase):
         self.assertIn("номер задачи", text)
         self.assertIn("верни ровно `SILENT`", text)
 
+    def test_a_letter_separates_the_current_user_change_from_future_work(self):
+        text = " ".join(tick.verdict_block().split())
+        self.assertIn("что уже изменилось для пользователя сейчас", text)
+        self.assertIn("в работающем продукте пока ничего не изменилось", text)
+        self.assertIn("будущую установку или проверку назови отдельно", text)
+
     def test_a_letter_says_in_plain_words_what_it_wants_from_the_reader(self):
         text = tick.verdict_block()
         self.assertIn("что нужно от пользователя", text)
