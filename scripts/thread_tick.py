@@ -76,10 +76,11 @@ import outbound  # noqa: E402
 import plain_russian  # noqa: E402
 import product_goal  # noqa: E402
 import product_memory  # noqa: E402
+import process_map_recorder  # noqa: E402
 import startup_context  # noqa: E402
 import runner_contract  # noqa: E402
 from process_map_schema import run_entrypoint  # noqa: E402
-from process_map_state import RUNNER_SCRIPTS, tunable  # noqa: E402
+from process_map_state import RUNNER_SCRIPTS, TERMINAL, query_tasks, tunable  # noqa: E402
 from process_map_state import THREAD_STATE as STATE_DIR  # noqa: E402
 from thread_state import HOME, REPO, build  # noqa: E402
 
@@ -701,7 +702,8 @@ def deliver(thread: str, kind: str, subject: str, body: str, moment: datetime,
             raw_message: bytes | None = None,
             names_instructions: list[dict] | None = None,
             event_id: str | None = None,
-            selected_by: str = "delivery_door") -> dict:
+            selected_by: str = "delivery_door",
+            night_batch: dict | None = None) -> dict:
     """Send one already-routed Gmail message and receipt its exact event."""
     if (kind == "reply") != bool(reply_to_message_id):
         raise ValueError("kind='reply' and reply_to_message_id must be supplied together")
@@ -718,12 +720,41 @@ def deliver(thread: str, kind: str, subject: str, body: str, moment: datetime,
             event_id = f"{kind}:{thread}:{digest}"
     with outbound.Ledger() as ledger:
         entry = ledger.thread(thread)
-        duplicate = outbound.event_delivered_anywhere(ledger.data, event_id)
+        duplicate = (
+            all(outbound.event_delivered_anywhere(ledger.data, item["event_id"])
+                for item in night_batch["events"])
+            if night_batch is not None else
+            outbound.event_delivered_anywhere(ledger.data, event_id)
+        )
         if names_instructions and not outbound.unnamed_instructions(entry, names_instructions):
             duplicate = True
+        window = outbound.night_window(moment)
+        if (not duplicate and night_batch is None and window is not None
+                and kind in outbound.NIGHT_BATCH_KINDS):
+            outbound.remember_night_event(
+                entry, window=window, event_id=event_id, subject=subject,
+                body=body, kind=kind, attachments=attachments, now=moment,
+                selected_by=selected_by)
+            record = {
+                "at": moment.isoformat(), "thread": thread, "kind": kind,
+                "event_id": event_id, "channel": "gmail", "subject": subject,
+                "action": "defer", "reason": f"статус накоплен до конца ночного окна {window}",
+                "delivered": None, "message_id": None,
+                "reply_to_message_id": reply_to_message_id,
+                "decision_owner": selected_by,
+                "composer_selected": selected_by == "composer",
+                "night_window": window,
+            }
+            ledger.record(record)
+            return {**record, "src": "state/outbound.json — накопитель ночного окна; "
+                    "state/outbound-journal.jsonl — все решения доставки подряд"}
         action = "drop" if duplicate else "send"
         reason = ("это событие уже доставлено" if duplicate else
                   f"канал Gmail выбран до текста: {selected_by}")
+        if duplicate and night_batch is not None:
+            outbound.discard_night_events(
+                entry, night_batch,
+                {item["event_id"] for item in night_batch["events"]})
         delivered = None
         message_id = None
         if action == "send":
@@ -738,9 +769,15 @@ def deliver(thread: str, kind: str, subject: str, body: str, moment: datetime,
                 action = "fail"
                 reason = FAILED_SEND.get(kind, "отправка не удалась; событие не отмечено доставленным")
             else:
-                outbound.remember_delivery(
-                    entry, event_id=event_id, subject=subject, body=body,
-                    kind=kind, now=moment, message_id=message_id)
+                if night_batch is not None:
+                    named_event_ids = outbound.named_night_event_ids(night_batch, body)
+                    outbound.finish_night_batch(
+                        entry, night_batch, now=moment, message_id=message_id,
+                        named_event_ids=named_event_ids)
+                else:
+                    outbound.remember_delivery(
+                        entry, event_id=event_id, subject=subject, body=body,
+                        kind=kind, now=moment, message_id=message_id)
             if delivered and names_instructions:
                 outbound.remember_instructions(entry, names_instructions, moment)
         record = {"at": moment.isoformat(), "thread": thread, "kind": kind,
@@ -752,8 +789,106 @@ def deliver(thread: str, kind: str, subject: str, body: str, moment: datetime,
                   "decision_owner": selected_by,
                   "composer_selected": selected_by == "composer"}
         ledger.record(record)
+        if delivered and night_batch is not None:
+            for item in night_batch["events"]:
+                if item["event_id"] not in named_event_ids:
+                    continue
+                ledger.record({
+                    "at": moment.isoformat(), "thread": thread,
+                    "kind": item["kind"], "event_id": item["event_id"],
+                    "channel": "gmail", "subject": item["subject"],
+                    "action": "send", "reason": "доставлено в одном ночном письме направления",
+                    "delivered": True, "message_id": message_id,
+                    "reply_to_message_id": None,
+                    "decision_owner": item.get("selected_by"),
+                    "composer_selected": item.get("selected_by") == "composer",
+                    "delivery_mode": "night_digest",
+                    "night_digest_event_id": event_id,
+                })
     return {**record, "src": "state/outbound.json — успешные event_id; "
             "state/outbound-journal.jsonl — все попытки доставки подряд"}
+
+
+def mechanical_night_batch(batch: dict) -> tuple[dict, set[str]]:
+    """Keep the latest status per work and name the older snapshot events."""
+    latest = {}
+    for item in batch["events"]:
+        event_id = str(item.get("event_id") or "")
+        number = outbound.night_event_task_number(event_id)
+        subject = str(item.get("subject") or "").strip()
+        key = (("task", number) if number is not None else
+               ("subject", subject) if subject else ("event", event_id))
+        latest[key] = item
+    selected = list(latest.values())
+    selected_ids = {item.get("event_id") for item in selected}
+    superseded = {
+        item.get("event_id") for item in batch["events"]
+        if item.get("event_id") not in selected_ids
+    }
+    return {**batch, "events": selected}, superseded
+
+
+def mechanical_night_digest(title: str, batch: dict, report: dict, moment: datetime,
+                            task_rows: list[dict] | None = None) -> tuple[str, str]:
+    """Build the bounded fallback from each work's latest observed status."""
+    current = {}
+    for section in ("live_runs", "needs_attention", "ready_to_start",
+                    "decided_not_done", "can_pick_up", "queued_by_plan",
+                    "backlog", "waiting_user"):
+        for item in report.get(section, []):
+            if isinstance(item, dict) and isinstance(item.get("id"), int):
+                current[item["id"]] = item
+    for item in task_rows or []:
+        if isinstance(item, dict) and isinstance(item.get("id"), int):
+            current[item["id"]] = {**current.get(item["id"], {}), **item}
+    local = moment.astimezone(outbound.MOSCOW).isoformat()
+    lines = [f"Ночной итог направления «{title}».",
+             f"Состояние зафиксировано {local}."]
+    for item in batch["events"]:
+        event_id = str(item.get("event_id") or "")
+        number = outbound.night_event_task_number(event_id)
+        if number is not None:
+            state = current.get(number, {})
+            heading = f"Задача {number}: {state.get('title') or item.get('subject') or 'без названия'}"
+            status = state.get("status") or "финальное состояние из ночной записи"
+            detail = (state.get("status_detail") or
+                      ((state.get("run") or {}).get("current_step")
+                       if isinstance(state.get("run"), dict) else None))
+            lines.extend(["", heading, f"Финальное состояние: {status}."])
+            if detail:
+                lines.append(f"Текущий шаг: {detail}.")
+            lines.append(f"Последний отчёт за ночь: {str(item.get('body') or '').strip()}")
+        else:
+            heading = f"Работа: {item.get('subject') or event_id} [{event_id}]"
+            lines.extend([
+                "", heading,
+                f"Последний отчёт за ночь: {str(item.get('body') or '').strip()}",
+            ])
+    return f"Продакт: {title} — итог ночи", "\n".join(lines)
+
+
+def record_night_failure(thread: str, batch: dict) -> dict:
+    with outbound.Ledger() as ledger:
+        entry = ledger.thread(thread)
+        outbound.note_night_composer_failure(entry, batch)
+        return outbound.pending_night_batch(entry) or batch
+
+
+def night_digest_attachments(composed: dict, batch: dict | None) -> list[str]:
+    """Attach queued files only for work the digest body actually names."""
+    named = (outbound.named_night_event_ids(batch, composed["body"])
+             if batch is not None else set())
+    omitted_paths = {
+        path for item in (batch or {}).get("events", [])
+        if item.get("event_id") not in named
+        for path in item.get("attachments", [])
+    }
+    return list(dict.fromkeys(
+        [path for path in composed["attachments"] if path not in omitted_paths] + [
+            path for item in (batch or {}).get("events", [])
+            if item.get("event_id") in named
+            for path in item.get("attachments", [])
+        ]))
 
 
 def deliver_idle(thread: str, title: str, report: dict, reasons: list[dict],
@@ -768,9 +903,46 @@ def deliver_idle(thread: str, title: str, report: dict, reasons: list[dict],
         body, moment)
 
 
+def product_review_boundary_violations() -> list[dict]:
+    """Return enforced review boundaries that degraded to unavailable owners."""
+    tasks_root = product_memory.tasks_repo() / "tasks"
+    violations: list[dict] = []
+    for policy_path in sorted(tasks_root.glob("*/.runner/companion-application-policy.json")):
+        task_path = policy_path.parents[1]
+        if process_map_recorder.read_frontmatter(task_path).get("status") in TERMINAL:
+            continue
+        try:
+            policy = json.loads(policy_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            continue
+        boundary = policy.get("product_review_boundary") if isinstance(policy, dict) else None
+        if not isinstance(boundary, dict) or boundary.get("mode") != "unavailable":
+            continue
+        detail = str(boundary.get("detail") or "")
+        if "mail owner is missing" in detail:
+            reason = "программа отправки писем о проверке не найдена"
+        elif "check could not run" in detail:
+            reason = "программу проверки задачи не удалось запустить"
+        elif "owner is not runnable" in detail:
+            reason = "программа проверки задачи завершилась с ошибкой"
+        elif "returned no boolean decision" in detail:
+            reason = "программа проверки задачи не вернула решение"
+        else:
+            reason = "программа проверки или отправки письма не готова"
+        violations.append({
+            "kind": "product_review_boundary",
+            "text": (
+                f"{task_path.name}: система запросила обязательную проверку, "
+                f"но {reason}"
+            ),
+            "src": str(policy_path),
+        })
+    return violations
+
+
 def runner_contract_alarm(thread: str, stored: dict, moment: datetime,
                           announce: bool) -> tuple[list[dict], dict | None]:
-    """Whether this repository can still ask the runner what it asks it.
+    """Report broken runner names and unavailable mandatory task-review owners.
 
     The observation of every direction is built on names imported from
     `task-agent`. On 2026-08-08 one of them was renamed there, nothing here
@@ -791,6 +963,8 @@ def runner_contract_alarm(thread: str, stored: dict, moment: datetime,
     a mute button by other means. A *changed* set of violations is news at once.
     """
     violations = runner_contract.check()
+    if thread == "process":
+        violations = [*violations, *product_review_boundary_violations()]
     reminder = stored.get("runner_contract_reminder")
     print(runner_contract.report(violations, RUNNER_SCRIPTS), file=sys.stderr)
     if not violations:
@@ -799,13 +973,32 @@ def runner_contract_alarm(thread: str, stored: dict, moment: datetime,
         return [], None
     signature = json.dumps(sorted(item["text"] for item in violations))
     if announce and repeatable(reminder, signature, moment):
-        told = (f"[{thread}] наблюдение продакта держится на именах из task-agent, "
+        boundary = [item for item in violations if item.get("kind") == "product_review_boundary"]
+        contract = [item for item in violations if item.get("kind") != "product_review_boundary"]
+        if boundary and not contract:
+            subject = "Продакт: обязательная проверка задач отключилась"
+            told = (
+                "Обязательная проверка постановки или результата задачи сейчас не работает:\n\n"
+                + "\n".join(f"- {item['text']}\n  ({item['src']})" for item in boundary)
+                + "\n\nПока причина не устранена, система может пропустить задачу без проверки."
+            )
+        else:
+            subject = "Продакт: контракт с task_runner разошёлся"
+            told = (
+                f"[{thread}] наблюдение продакта держится на именах из task-agent, "
                 f"и они разошлись:\n\n"
-                + "\n".join(f"- {item['text']}\n  ({item['src']})" for item in violations)
+                + "\n".join(f"- {item['text']}\n  ({item['src']})" for item in contract)
                 + "\n\nПока это не починено, живые прогоны, простой и свежесть работы "
-                  "считаются кодом, который может отвечать ошибкой вместо ответа.")
-        deliver(thread, "alarm", "Продакт: контракт с task_runner разошёлся",
-                told, moment)
+                  "считаются кодом, который может отвечать ошибкой вместо ответа."
+            )
+            if boundary:
+                told += (
+                    "\n\nКроме того, обязательная проверка задач сейчас недоступна:\n\n"
+                    + "\n".join(
+                        f"- {item['text']}\n  ({item['src']})" for item in boundary
+                    )
+                )
+        deliver(thread, "alarm", subject, told, moment)
         reminder = {"at": moment.isoformat(), "signature": signature}
     return violations, reminder
 
@@ -962,11 +1155,26 @@ def verdict_block() -> str:
 - `kind=question` означает, что нужен выбор пользователя; `kind=report` — что
   изменилось, что пользователь может, либо закончилась заказанная работа.
   Прогон, коммит и движение репозитория отдельным письмом не становятся;
+- «Цена» называет ровно две вещи: чем усложнился продукт и какие прямые деньги
+  мы потратили. Усложнение — новая часть, новое состояние, новая настройка,
+  новый постоянный процесс, новое место отказа, новая обязанность человека.
+  Деньги — чужое оборудование, платный вызов модели, подписка, железо,
+  брокерская комиссия. Наши прогоны, круги проверки и токены в письмо не идут:
+  они живут в задаче и на техническом табло. Нет ни усложнения, ни трат — так и
+  напиши: «Продукт не усложнился, денег не потратили»;
+- Круги правок и замечаний в письмо не пересказывай. Письмо называет результат
+  и путь к записям кругов в карточке задачи. Номера кругов, имена проверяющих и
+  историю замечаний в текст не выноси;
+- С 23:00 до 07:00 по Москве обычные письма со статусом работ не уходят по одному.
+  Направление копит их и в конце окна отправляет одно письмо: что сделано за
+  ночь и финальное состояние каждой работы, подробно. Ответ на письмо
+  пользователя уходит сразу, как готов, в любой час. Письма с заключением по
+  постановке и закрытию задачи тоже уходят сразу;
 {plain_russian.as_bullet()}."""
 
 
 def prompt(report: dict, events: list[str], reasons: list[dict],
-           said: list[dict], startup: str = "") -> str:
+           said: list[dict], startup: str = "", night_batch: dict | None = None) -> str:
     # Shown only when there is something observed to show. A heading over an
     # empty list reads as «причин нет», which is a different claim.
     seen = ("\nЧто наблюдение говорит о простое (это не приговор, а то, что видно с диска):\n"
@@ -979,6 +1187,23 @@ def prompt(report: dict, events: list[str], reasons: list[dict],
 Историческую подробность по хешу открывай адресно только для события этого тика.
 {startup}
 """ if bounded else plan_block() + startup)
+    night_block = ""
+    if night_batch is not None:
+        night_event = outbound.night_digest_event_id(
+            report["thread"], night_batch["window"])
+        night_block = f"""
+Ночное окно {night_batch['window']} по Москве закончилось. Ниже лежат статусы,
+которые почтовый путь этого направления удержал до утра:
+{json.dumps(night_batch['events'], ensure_ascii=False, indent=2)}
+
+Сейчас верни ровно одно итоговое письмо `kind=report` с
+`event_id={night_event}`. Назови каждую работу из накопителя и её финальное
+состояние на момент этого тика. Для события с номером задачи назови этот номер
+из `event_id`; для события без номера задачи дословно назови его `subject`.
+Если текущий срез не показывает задачу целиком, открой её карточку по номеру из
+`event_id`; не выдавай ночной промежуточный текст за финальное состояние.
+Не склеивай события разных направлений.
+"""
     return f"""Ты продакт-агент на фоновом пробуждении треда «{report['title']}».
 {startup_block}
 {heard_block(said)}
@@ -988,6 +1213,7 @@ def prompt(report: dict, events: list[str], reasons: list[dict],
 {seen}
 Наблюдаемое состояние треда (собрано механически, не со слов исполнителя):
 {json.dumps(report, ensure_ascii=False, indent=2)}
+{night_block}
 
 Сделай ровно четыре шага и ничего сверх них:
 1. Прочитай артефакты только тех задач, которых касаются события выше.
@@ -1081,6 +1307,15 @@ def main() -> int:
     long_lived_processes = persisted_process_inventory(report, stored)
 
     events = transitions(previous, current) if previous else ["первый запуск треда"]
+
+    night_batch = None
+    if outbound.night_window(moment) is None:
+        with outbound.Ledger() as ledger:
+            night_batch = outbound.pending_night_batch(ledger.thread(args.thread))
+    if night_batch is not None:
+        events.append(
+            f"закончилось ночное окно {night_batch['window']}: накоплено "
+            f"{len(night_batch['events'])} статусов для одного итогового письма")
 
     # Before the idle test and before the wake-up decision: a goal is the memory
     # this process does not have, and «что стоит по цели» is a reason to wake up
@@ -1189,6 +1424,53 @@ def main() -> int:
 
     state_path.write_text(json.dumps(record(None, not woke), ensure_ascii=False, indent=2))
 
+    mail = []
+
+    def maybe_send_night_fallback(batch: dict, *, count_failure: bool,
+                                  force: bool = False) -> int | None:
+        refreshed = record_night_failure(args.thread, batch) if count_failure else batch
+        if not force and refreshed.get("composer_failures", 0) < 2:
+            return None
+        digest_batch, superseded = mechanical_night_batch(refreshed)
+        try:
+            task_rows = query_tasks(["--status", "all"], limit=None)
+        except Exception:  # the already-built report remains the bounded fallback
+            task_rows = []
+        subject, body = mechanical_night_digest(
+            report["title"], digest_batch, report, moment,
+            task_rows=task_rows)
+        receipt = deliver(
+            args.thread, "report", subject, body, moment,
+            event_id=outbound.night_digest_event_id(args.thread, refreshed["window"]),
+            selected_by="mechanical_night_fallback", night_batch=digest_batch)
+        settled = receipt.get("delivered") is True or receipt.get("action") == "drop"
+        if settled and superseded:
+            with outbound.Ledger() as ledger:
+                entry = ledger.thread(args.thread)
+                outbound.discard_night_events(entry, refreshed, superseded)
+                for item in refreshed["events"]:
+                    if item.get("event_id") not in superseded:
+                        continue
+                    ledger.record({
+                        "at": moment.isoformat(), "thread": args.thread,
+                        "kind": item["kind"], "event_id": item["event_id"],
+                        "channel": "gmail", "subject": item["subject"],
+                        "action": "drop",
+                        "reason": "заменено последним состоянием этой работы в ночном итоге",
+                        "delivered": None, "message_id": receipt.get("message_id"),
+                        "reply_to_message_id": None,
+                        "decision_owner": "mechanical_night_fallback",
+                        "composer_selected": False,
+                    })
+        mail.append(receipt)
+        try:
+            state = json.loads(state_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            state = record(None, True)
+        state["mail"] = mail
+        state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2))
+        return verdict if settled else 1
+
     # Письмо об актуальной зарегистрированной инструкции внешнему исполнителю.
     # Здесь, а не внутри разбуженного продакта: дверь наблюдает файл, последний
     # записанный круг независимой проверки, завершение ребёнка и отсутствие
@@ -1196,7 +1478,6 @@ def main() -> int:
     # готовую редакцию — `deliver` под замком реестра проверяет, не назвал ли её
     # уже соседний тик, — и своим письмом, поэтому чужие письма направления
     # остаются ровно такими, какими были.
-    mail = []
     with outbound.Ledger() as ledger:
         letter = outbound.instruction_letter(args.thread, ledger.thread(args.thread))
     if letter is not None:
@@ -1205,6 +1486,12 @@ def main() -> int:
             f"Продакт: {report['title']} — путь к зарегистрированной инструкции для внешнего исполнителя",
             letter["body"], moment, names_instructions=letter["names"],
             event_id=letter["event_id"], selected_by="instruction_door"))
+
+    if night_batch is not None:
+        fallback_result = maybe_send_night_fallback(
+            night_batch, count_failure=False, force=session_holds)
+        if fallback_result is not None:
+            return fallback_result
 
     if not woke:
         if mail:
@@ -1227,7 +1514,8 @@ def main() -> int:
     result = subprocess.run(
         [str(CLAUDE_PRODUCT_OWNER), "--entry", "print"],
         input=prompt(report, events, reasons, said,
-                     startup_context.render(startup_context.packet((args.thread, report)))),
+                     startup_context.render(startup_context.packet((args.thread, report))),
+                     night_batch=night_batch),
         env=environment,
         capture_output=True, text=True, cwd=HOME, timeout=WAKE_TIMEOUT,
     )
@@ -1239,6 +1527,11 @@ def main() -> int:
         deliver(args.thread, "wake_failure",
                 f"Продакт: пробуждение треда «{report['title']}» не отработало",
                 failure, moment)
+        if night_batch is not None:
+            fallback_result = maybe_send_night_fallback(
+                night_batch, count_failure=True)
+            if fallback_result is not None:
+                return fallback_result
         return 1
 
     try:
@@ -1249,7 +1542,39 @@ def main() -> int:
             state_path, record(None, True), message, error,
             retry_snapshot=previous)
         print(failure, file=sys.stderr)
+        if night_batch is not None:
+            fallback_result = maybe_send_night_fallback(
+                night_batch, count_failure=True)
+            if fallback_result is not None:
+                return fallback_result
         return 1
+    if night_batch is not None:
+        expected = outbound.night_digest_event_id(args.thread, night_batch["window"])
+        if composed is None or composed["kind"] != "report" or composed["event_id"] != expected:
+            error = ValueError(
+                f"night digest must be one report with event_id {expected}")
+            persist_composer_failure(
+                state_path, record(None, True), message, error,
+                retry_snapshot=previous)
+            print(f"[{args.thread}] составитель не собрал итог ночного окна: {error}",
+                  file=sys.stderr)
+            fallback_result = maybe_send_night_fallback(
+                night_batch, count_failure=True)
+            if fallback_result is not None:
+                return fallback_result
+            return 1
+        if not outbound.named_night_event_ids(night_batch, composed["body"]):
+            error = ValueError("night digest does not name any queued work")
+            persist_composer_failure(
+                state_path, record(None, True), message, error,
+                retry_snapshot=previous)
+            print(f"[{args.thread}] составитель не назвал ни одной работы ночного окна",
+                  file=sys.stderr)
+            fallback_result = maybe_send_night_fallback(
+                night_batch, count_failure=True)
+            if fallback_result is not None:
+                return fallback_result
+            return 1
     message_body = composed["body"] if composed else ""
 
     # What the wake-up came to, observed rather than believed: the same
@@ -1268,10 +1593,12 @@ def main() -> int:
         args.thread, goals["objects"], (after or {}).get("live", []), message_body, moment)
 
     if composed:
+        attachments = night_digest_attachments(composed, night_batch)
         mail.append(deliver(
             args.thread, composed["kind"], composed["subject"], composed["body"],
-            moment, attachments=composed["attachments"],
-            event_id=composed["event_id"], selected_by="composer"))
+            moment, attachments=attachments,
+            event_id=composed["event_id"], selected_by="composer",
+            night_batch=night_batch))
     elif idle and not (after or {}).get("live"):
         # The owner was woken because the direction is standing still and said
         # nothing. Silence is what the user complained about in as many words —

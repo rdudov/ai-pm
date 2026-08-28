@@ -13,15 +13,20 @@ import json
 import os
 import re
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 HOME = Path(__file__).resolve().parent.parent
 LEDGER = HOME / "state" / "outbound.json"
 KEEP_LETTERS = 50
 KEEP_INSTRUCTIONS = 50
 IDLE_LETTER_SECONDS = 6 * 60 * 60
+MOSCOW = ZoneInfo("Europe/Moscow")
+NIGHT_START = time(23, 0)
+NIGHT_END = time(7, 0)
+NIGHT_BATCH_KINDS = frozenset({"report"})
 
 EXTERNAL_INSTRUCTION = re.compile(r"(?:^|[-_])instruction\.md$", re.IGNORECASE)
 HANDOFF_HEADING = "Актуальная инструкция внешнему исполнителю:"
@@ -56,6 +61,133 @@ def remember_delivery(entry: dict, *, event_id: str, subject: str, body: str,
     entry.setdefault("delivered_events", {})[event_id] = {
         "at": now.isoformat(), "kind": kind, "message_id": message_id,
     }
+
+
+def night_window(moment: datetime) -> str | None:
+    """Return the Moscow date on which the active night window ends."""
+    local = moment.astimezone(MOSCOW)
+    if local.time() >= NIGHT_START:
+        return (local.date() + timedelta(days=1)).isoformat()
+    if local.time() < NIGHT_END:
+        return local.date().isoformat()
+    return None
+
+
+def night_digest_event_id(thread: str, window: str) -> str:
+    return f"night:{thread}:{window}"
+
+
+def remember_night_event(entry: dict, *, window: str, event_id: str,
+                         subject: str, body: str, kind: str,
+                         attachments: list[str] | None, now: datetime,
+                         selected_by: str) -> None:
+    """Keep one work-status event in the existing per-direction mail record."""
+    batches = entry.setdefault("night_batches", {})
+    stored = batches.setdefault(window, {"events": [], "composer_failures": 0})
+    if isinstance(stored, list):
+        stored = {"events": stored, "composer_failures": 0}
+        batches[window] = stored
+    events = stored.setdefault("events", [])
+    if any(item.get("event_id") == event_id for item in events):
+        return
+    events.append({
+        "at": now.isoformat(), "event_id": event_id, "subject": subject,
+        "body": body, "kind": kind, "attachments": list(attachments or []),
+        "selected_by": selected_by,
+    })
+
+
+def pending_night_batch(entry: dict) -> dict | None:
+    """Return the oldest non-empty night window for this direction."""
+    batches = entry.get("night_batches", {})
+    if not isinstance(batches, dict):
+        return None
+    for window in sorted(batches):
+        stored = batches.get(window)
+        events = stored if isinstance(stored, list) else stored.get("events", [])
+        if isinstance(events, list) and events:
+            failures = 0 if isinstance(stored, list) else stored.get("composer_failures", 0)
+            return {"window": window, "events": events,
+                    "composer_failures": failures if isinstance(failures, int) else 0}
+    return None
+
+
+def note_night_composer_failure(entry: dict, batch: dict) -> int:
+    """Count one failed composition attempt in the existing window record."""
+    batches = entry.setdefault("night_batches", {})
+    stored = batches.get(batch["window"])
+    if isinstance(stored, list):
+        stored = {"events": stored, "composer_failures": 0}
+        batches[batch["window"]] = stored
+    if not isinstance(stored, dict):
+        return 0
+    failures = stored.get("composer_failures", 0)
+    stored["composer_failures"] = (failures if isinstance(failures, int) else 0) + 1
+    return stored["composer_failures"]
+
+
+def night_event_task_number(event_id: str) -> int | None:
+    match = re.search(r"(?:^task-(?:statement|completion):|:task-)(\d+)(?=:|$)", event_id)
+    return int(match.group(1)) if match else None
+
+
+def named_night_event_ids(batch: dict, body: str) -> set[str]:
+    """Bind receipts only to work explicitly named by the delivered body."""
+    named = set()
+    for item in batch["events"]:
+        event_id = str(item.get("event_id") or "")
+        number = night_event_task_number(event_id)
+        if number is not None:
+            present = re.search(rf"(?<!\d){number}(?!\d)", body) is not None
+        else:
+            subject = str(item.get("subject") or "").strip()
+            present = bool((subject and subject in body) or (event_id and event_id in body))
+        if present:
+            named.add(event_id)
+    return named
+
+
+def finish_night_batch(entry: dict, batch: dict, *, now: datetime,
+                       message_id: str | None, named_event_ids: set[str]) -> None:
+    """Receipt named events and retain both omitted and concurrently added work."""
+    batches = entry.setdefault("night_batches", {})
+    stored = batches.get(batch["window"])
+    if isinstance(stored, list):
+        stored = {"events": stored, "composer_failures": 0}
+        batches[batch["window"]] = stored
+    if not isinstance(stored, dict):
+        return
+    events = stored.get("events", [])
+    for item in events:
+        if item.get("event_id") not in named_event_ids:
+            continue
+        entry.setdefault("delivered_events", {})[item["event_id"]] = {
+            "at": now.isoformat(), "kind": item["kind"],
+            "message_id": message_id,
+            "delivery_mode": "night_digest",
+        }
+    discard_night_events(entry, batch, named_event_ids)
+    stored = batches.get(batch["window"])
+    if not isinstance(stored, dict):
+        return
+    stored["composer_failures"] = 0
+
+
+def discard_night_events(entry: dict, batch: dict, event_ids: set[str]) -> None:
+    """Remove events that no longer owe a night-digest delivery."""
+    batches = entry.setdefault("night_batches", {})
+    stored = batches.get(batch["window"])
+    if isinstance(stored, list):
+        stored = {"events": stored, "composer_failures": 0}
+        batches[batch["window"]] = stored
+    if not isinstance(stored, dict):
+        return
+    stored["events"] = [
+        item for item in stored.get("events", [])
+        if item.get("event_id") not in event_ids
+    ]
+    if not stored["events"]:
+        batches.pop(batch["window"], None)
 
 
 def last_of_kind(entry: dict, kind: str) -> datetime | None:
@@ -274,8 +406,10 @@ class Ledger:
 
     def thread(self, name: str) -> dict:
         entry = self.data["threads"].setdefault(
-            name, {"letters": [], "delivered_events": {}, "instructions": []})
+            name, {"letters": [], "delivered_events": {}, "instructions": [],
+                   "night_batches": {}})
         entry.setdefault("letters", [])
         entry.setdefault("delivered_events", {})
         entry.setdefault("instructions", [])
+        entry.setdefault("night_batches", {})
         return entry

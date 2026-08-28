@@ -158,6 +158,15 @@ class ComposerSelectsBeforeText(unittest.TestCase):
         self.assertIn("«От вас ничего не требуется»", text)
         self.assertIn("Поле `kind` технического конверта", text)
 
+    def test_letter_contract_carries_price_review_and_night_rules(self):
+        text = tick.verdict_block()
+        self.assertIn("Продукт не усложнился, денег не потратили", text)
+        self.assertIn("Круги правок и замечаний в письмо не пересказывай", text)
+        self.assertIn("С 23:00 до 07:00 по Москве", text)
+        self.assertIn(
+            "Ответ на письмо\n  пользователя уходит сразу, как готов, в любой час",
+            text)
+
     def test_late_russian_text_rules_are_gone(self):
         source = Path(outbound.__file__).read_text(encoding="utf-8")
         for old_owner in ("def asks_user", "def already_heard", "def same_question",
@@ -287,6 +296,451 @@ class DirectDelivery(unittest.TestCase):
             row = json.loads(Path(home, "outbound-journal.jsonl").read_text())
         self.assertEqual(row["event_id"], "report:task-1280:accepted")
         self.assertEqual(row["channel"], "gmail")
+
+
+class NightDigest(unittest.TestCase):
+    NIGHT = datetime(2026, 8, 27, 22, 0, tzinfo=timezone.utc)  # 01:00 Moscow
+    MORNING = datetime(2026, 8, 28, 4, 1, tzinfo=timezone.utc)  # 07:01 Moscow
+
+    def test_moscow_window_has_exact_boundaries(self):
+        self.assertIsNone(outbound.night_window(
+            datetime(2026, 8, 27, 19, 59, tzinfo=timezone.utc)))
+        self.assertEqual(outbound.night_window(
+            datetime(2026, 8, 27, 20, 0, tzinfo=timezone.utc)), "2026-08-28")
+        self.assertEqual(outbound.night_window(
+            datetime(2026, 8, 28, 3, 59, tzinfo=timezone.utc)), "2026-08-28")
+        self.assertIsNone(outbound.night_window(
+            datetime(2026, 8, 28, 4, 0, tzinfo=timezone.utc)))
+
+    def test_work_status_waits_but_reply_from_user_mail_goes_at_once(self):
+        with tempfile.TemporaryDirectory() as home, \
+                mock.patch.object(outbound, "LEDGER", Path(home) / "outbound.json"), \
+                mock.patch.object(tick, "send_mail", return_value="gmail-reply") as send:
+            held = tick.deliver(
+                "process", "report", "Статус", "Работа закончена", self.NIGHT,
+                event_id="report:task-1318:done", selected_by="composer")
+            reply = tick.deliver(
+                "process", "reply", "Re: письмо", "Принял, отвечаю", self.NIGHT,
+                reply_to_message_id="gmail-incoming")
+        self.assertEqual(held["action"], "defer")
+        self.assertEqual(reply["action"], "send")
+        send.assert_called_once()
+
+    def test_task_letters_and_idle_go_at_once_during_the_night(self):
+        with tempfile.TemporaryDirectory() as home, \
+                mock.patch.object(outbound, "LEDGER", Path(home) / "outbound.json"), \
+                mock.patch.object(tick, "send_mail", return_value="gmail-now") as send:
+            receipts = [
+                tick.deliver(
+                    "process", kind, kind, "Готово", self.NIGHT,
+                    event_id=f"{kind}:1:accepted")
+                for kind in ("task_statement", "task_completion", "idle")
+            ]
+            with outbound.Ledger() as ledger:
+                pending = outbound.pending_night_batch(ledger.thread("process"))
+        self.assertEqual([item["action"] for item in receipts], ["send"] * 3)
+        self.assertEqual(send.call_count, 3)
+        self.assertIsNone(pending)
+
+    def test_each_direction_keeps_its_own_window(self):
+        with tempfile.TemporaryDirectory() as home, \
+                mock.patch.object(outbound, "LEDGER", Path(home) / "outbound.json"), \
+                mock.patch.object(tick, "send_mail") as send:
+            tick.deliver("process", "report", "P", "one", self.NIGHT,
+                         event_id="report:task-1318:process")
+            tick.deliver("product", "report", "Q", "two", self.NIGHT,
+                         event_id="report:task-1318:product")
+            with outbound.Ledger() as ledger:
+                process = outbound.pending_night_batch(ledger.thread("process"))
+                product = outbound.pending_night_batch(ledger.thread("product"))
+        send.assert_not_called()
+        self.assertEqual([item["event_id"] for item in process["events"]],
+                         ["report:task-1318:process"])
+        self.assertEqual([item["event_id"] for item in product["events"]],
+                         ["report:task-1318:product"])
+
+    def test_one_digest_receipts_every_status_and_cannot_repeat(self):
+        with tempfile.TemporaryDirectory() as home:
+            ledger_path = Path(home) / "outbound.json"
+            with mock.patch.object(outbound, "LEDGER", ledger_path), \
+                    mock.patch.object(tick, "send_mail", return_value="gmail-night") as send:
+                tick.deliver(
+                    "process", "report", "Task 1", "Первое состояние",
+                    self.NIGHT, attachments=["/tmp/task-1.html"],
+                    event_id="report:task-1:accepted",
+                    selected_by="composer")
+                tick.deliver(
+                    "process", "report", "Task 2", "Второе состояние",
+                    self.NIGHT, event_id="report:task-2:accepted",
+                    selected_by="composer")
+                with outbound.Ledger() as ledger:
+                    batch = outbound.pending_night_batch(ledger.thread("process"))
+                digest_id = outbound.night_digest_event_id("process", batch["window"])
+                sent = tick.deliver(
+                    "process", "report", "Ночной итог",
+                    "Задача 1 — принята. Задача 2 — принята.",
+                    self.MORNING, attachments=["/tmp/task-1.html"],
+                    event_id=digest_id, selected_by="composer", night_batch=batch)
+                repeated = tick.deliver(
+                    "process", "report", "Ночной итог", "Повтор",
+                    self.MORNING, event_id=digest_id, selected_by="composer",
+                    night_batch=batch)
+                with outbound.Ledger() as ledger:
+                    entry = ledger.thread("process")
+                    remaining = outbound.pending_night_batch(entry)
+                    delivered = entry["delivered_events"]
+            self.assertEqual(sent["action"], "send")
+            self.assertEqual(repeated["action"], "drop")
+            self.assertEqual(send.call_count, 1)
+            self.assertIsNone(remaining)
+            self.assertEqual(delivered["report:task-1:accepted"]["message_id"],
+                             "gmail-night")
+            self.assertEqual(delivered["report:task-2:accepted"]["message_id"],
+                             "gmail-night")
+            rows = [json.loads(line) for line in
+                    (Path(home) / "outbound-journal.jsonl").read_text().splitlines()]
+            receipts = [row for row in rows if row.get("delivery_mode") == "night_digest"]
+            self.assertEqual({row["event_id"] for row in receipts},
+                             {"report:task-1:accepted", "report:task-2:accepted"})
+
+    def test_digest_receipts_only_named_work_and_retains_the_rest(self):
+        with tempfile.TemporaryDirectory() as home:
+            ledger_path = Path(home) / "outbound.json"
+            with mock.patch.object(outbound, "LEDGER", ledger_path), \
+                    mock.patch.object(tick, "send_mail", return_value="gmail-partial"):
+                for number in (1, 2):
+                    tick.deliver(
+                        "process", "report", f"Task {number}", "accepted",
+                        self.NIGHT, event_id=f"report:task-{number}:accepted")
+                with outbound.Ledger() as ledger:
+                    batch = outbound.pending_night_batch(ledger.thread("process"))
+                tick.deliver(
+                    "process", "report", "Ночной итог", "Задача 1 — принята.",
+                    self.MORNING,
+                    event_id=outbound.night_digest_event_id("process", batch["window"]),
+                    selected_by="composer", night_batch=batch)
+                with outbound.Ledger() as ledger:
+                    entry = ledger.thread("process")
+                    pending = outbound.pending_night_batch(entry)
+            self.assertIn("report:task-1:accepted", entry["delivered_events"])
+            self.assertNotIn("report:task-2:accepted", entry["delivered_events"])
+            self.assertEqual([item["event_id"] for item in pending["events"]],
+                             ["report:task-2:accepted"])
+
+    def test_dropped_digest_discards_events_already_delivered_elsewhere(self):
+        with tempfile.TemporaryDirectory() as home:
+            ledger_path = Path(home) / "outbound.json"
+            with mock.patch.object(outbound, "LEDGER", ledger_path), \
+                    mock.patch.object(tick, "send_mail", return_value="gmail-direct") as send:
+                tick.deliver(
+                    "process", "report", "Task 1", "done", self.NIGHT,
+                    event_id="report:task-1:done")
+                with outbound.Ledger() as ledger:
+                    entry = ledger.thread("process")
+                    batch = outbound.pending_night_batch(entry)
+                    outbound.remember_delivery(
+                        entry, event_id="report:task-1:done", subject="Task 1",
+                        body="done", kind="report", now=self.MORNING,
+                        message_id="gmail-direct")
+                result = tick.deliver(
+                    "process", "report", "Ночной итог", "Задача 1 — готова.",
+                    self.MORNING,
+                    event_id=outbound.night_digest_event_id("process", batch["window"]),
+                    selected_by="composer", night_batch=batch)
+                with outbound.Ledger() as ledger:
+                    pending = outbound.pending_night_batch(ledger.thread("process"))
+        self.assertEqual(result["action"], "drop")
+        send.assert_not_called()
+        self.assertIsNone(pending)
+
+    def test_finishing_snapshot_does_not_remove_a_concurrent_event(self):
+        with tempfile.TemporaryDirectory() as home:
+            ledger_path = Path(home) / "outbound.json"
+            with mock.patch.object(outbound, "LEDGER", ledger_path), \
+                    mock.patch.object(tick, "send_mail", return_value="gmail-night"):
+                tick.deliver("process", "report", "Task 1", "done", self.NIGHT,
+                             event_id="report:task-1:done")
+                with outbound.Ledger() as ledger:
+                    batch = outbound.pending_night_batch(ledger.thread("process"))
+                tick.deliver("process", "report", "Task 2", "done", self.NIGHT,
+                             event_id="report:task-2:done")
+                tick.deliver(
+                    "process", "report", "Ночной итог", "Задача 1 — готова.",
+                    self.MORNING,
+                    event_id=outbound.night_digest_event_id("process", batch["window"]),
+                    selected_by="composer", night_batch=batch)
+                with outbound.Ledger() as ledger:
+                    pending = outbound.pending_night_batch(ledger.thread("process"))
+            self.assertEqual([item["event_id"] for item in pending["events"]],
+                             ["report:task-2:done"])
+
+    def test_second_composer_failure_is_recorded_in_the_same_window(self):
+        entry = {"night_batches": {}}
+        outbound.remember_night_event(
+            entry, window="2026-08-28", event_id="report:task-1:done",
+            subject="Task 1", body="done", kind="report", attachments=[],
+            now=self.NIGHT, selected_by="composer")
+        batch = outbound.pending_night_batch(entry)
+        self.assertEqual(outbound.note_night_composer_failure(entry, batch), 1)
+        self.assertEqual(outbound.note_night_composer_failure(entry, batch), 2)
+        self.assertEqual(outbound.pending_night_batch(entry)["composer_failures"], 2)
+
+    def test_mechanical_fallback_names_each_work_and_current_state(self):
+        batch = {"window": "2026-08-28", "events": [
+            {"event_id": "task-completion:1:accepted", "subject": "Task 1",
+             "body": "Принята", "kind": "task_completion"},
+            {"event_id": "report:task-2:done", "subject": "Task 2",
+             "body": "Готова", "kind": "report"},
+        ]}
+        report = {"needs_attention": [{"id": 1, "title": "Первая",
+                                         "status": "blocked", "run": None}],
+                  "ready_to_start": [{"id": 2, "title": "Вторая",
+                                       "status": "planned"}]}
+        _subject, body = tick.mechanical_night_digest(
+            "Контур", batch, report, self.MORNING,
+            task_rows=[{"id": 1, "title": "Первая", "status": "completed",
+                        "status_detail": "accepted"}])
+        self.assertIn("Задача 1: Первая", body)
+        self.assertIn("Финальное состояние: completed", body)
+        self.assertIn("Текущий шаг: accepted", body)
+        self.assertIn("Задача 2: Вторая", body)
+        self.assertIn("Финальное состояние: planned", body)
+
+    def test_numberless_work_has_a_prompt_name_and_real_fallback_state(self):
+        subject = "Продакт: MOEX — торговля остановлена"
+        status = "Что произошло\n\nОстановлена после обнаружения собственного выхода."
+        event_id = "report:moex:halt-after-own-exit-cause-found"
+        batch = {"window": "2026-08-28", "events": [{
+            "event_id": event_id, "subject": subject, "body": status,
+            "kind": "report", "attachments": [], "selected_by": "composer",
+        }]}
+        prompt = tick.prompt(
+            {"thread": "moex", "title": "MOEX", "live_runs": [],
+             "ready_to_start": [], "decided_not_done": [], "can_pick_up": []},
+            [], [], [], night_batch=batch)
+        self.assertIn("для события без номера задачи дословно назови его `subject`", prompt)
+        self.assertEqual(outbound.named_night_event_ids(batch, subject), {event_id})
+        _subject, body = tick.mechanical_night_digest(
+            "MOEX", batch, {}, self.MORNING)
+        self.assertIn(f"Работа: {subject} [{event_id}]", body)
+        self.assertNotIn("Финальное состояние:", body)
+        self.assertIn(f"Последний отчёт за ночь: {status}", body)
+        self.assertEqual(body.count(status), 1)
+        self.assertNotIn("финальное состояние из ночной записи", body)
+
+    def test_mechanical_digest_uses_latest_production_shaped_event_per_work(self):
+        numberless_id = "report:moex:halt-after-own-exit-cause-found"
+        events = [
+            {"event_id": "report:task-1305:halt", "subject": "1305",
+             "body": "Что произошло\n\nНашли остановку.", "kind": "report"},
+            {"event_id": "report:task-1305:accepted", "subject": "1305",
+             "body": "Что изменилось\n\nЗащиты установлены.", "kind": "report"},
+            {"event_id": numberless_id, "subject": "MOEX: торговля остановлена",
+             "body": "Что произошло\n\nReplay начат.", "kind": "report"},
+            {"event_id": "report:moex:halt-after-own-exit-cause-fixed",
+             "subject": "MOEX: торговля остановлена",
+             "body": "Что произошло\n\nReplay остановлен.", "kind": "report"},
+        ]
+        batch = {"window": "2026-08-28", "events": events,
+                 "composer_failures": 0}
+        digest_batch, superseded = tick.mechanical_night_batch(batch)
+        _subject, body = tick.mechanical_night_digest(
+            "MOEX", digest_batch, {}, self.MORNING,
+            task_rows=[{"id": 1305, "title": "Защиты", "status": "completed"}])
+        self.assertEqual(
+            [item["event_id"] for item in digest_batch["events"]],
+            ["report:task-1305:accepted",
+             "report:moex:halt-after-own-exit-cause-fixed"])
+        self.assertEqual(superseded,
+                         {"report:task-1305:halt", numberless_id})
+        self.assertNotIn("Нашли остановку", body)
+        self.assertNotIn("Replay начат", body)
+        self.assertEqual(body.count("Защиты установлены"), 1)
+        self.assertEqual(body.count("Replay остановлен"), 1)
+        self.assertNotIn("Финальное состояние: Что произошло", body)
+
+    def test_mechanical_delivery_drops_superseded_without_receipting_it(self):
+        report = {
+            "thread": "product", "title": "Продукт", "live_runs": [],
+            "needs_attention": [], "ready_to_start": [], "decided_not_done": [],
+            "can_pick_up": [], "queued_by_plan": [], "backlog": [],
+            "waiting_user": [],
+        }
+        snapshot = {"live": [], "pickup": [], "ready": [], "decided": [],
+                    "plan_queue": []}
+        with tempfile.TemporaryDirectory() as home:
+            root = Path(home)
+            ledger_path = root / "outbound.json"
+            state_dir = root / "threads"
+            with mock.patch.object(outbound, "LEDGER", ledger_path), \
+                    mock.patch.object(tick, "send_mail", return_value="gmail-night"):
+                for event_id, body in (
+                        ("report:task-1318:first", "Первый отчёт"),
+                        ("report:task-1318:last", "Защиты установлены"),
+                        ("report:product:release", "Релиз направления")):
+                    tick.deliver("product", "report", event_id, body, self.NIGHT,
+                                 event_id=event_id)
+            frozen = type("FrozenDatetime", (datetime,),
+                          {"now": staticmethod(lambda tz=None: self.MORNING)})
+            patches = (
+                mock.patch.object(outbound, "LEDGER", ledger_path),
+                mock.patch.object(tick, "STATE_DIR", state_dir),
+                mock.patch.object(tick, "datetime", frozen),
+                mock.patch.object(sys, "argv", ["thread_tick.py", "product"]),
+                mock.patch.object(tick, "runner_contract_alarm", return_value=([], None)),
+                mock.patch.object(tick, "build", return_value=report),
+                mock.patch.object(tick, "snapshot", return_value=snapshot),
+                mock.patch.object(tick, "persisted_process_inventory", return_value=[]),
+                mock.patch.object(tick, "process_observation", return_value={}),
+                mock.patch.object(tick, "goal_watch", return_value={
+                    "transitions": [], "standing": [], "reminder": None,
+                    "panel": [], "objects": []}),
+                mock.patch.object(tick, "standing_events", return_value=([], None, None)),
+                mock.patch.object(tick, "startable", return_value=0),
+                mock.patch.object(tick, "idle_reasons", return_value=[]),
+                mock.patch.object(tick, "yielded", return_value=None),
+                mock.patch.object(tick, "queue", return_value={}),
+                mock.patch.object(tick, "outcome", return_value="проверено"),
+                mock.patch.object(tick, "started_runs", return_value=[]),
+                mock.patch.object(tick.goal_session, "watchdog", return_value={
+                    "mode": "session", "holds": True, "detail": "живая сессия"}),
+                mock.patch.object(outbound, "instruction_letter", return_value=None),
+                mock.patch.object(tick, "query_tasks", return_value=[{
+                    "id": 1318, "title": "Ночная почта", "status": "completed"}]),
+                mock.patch.object(tick, "send_mail", return_value="gmail-night"),
+            )
+            with contextlib.ExitStack() as stack:
+                entered = [stack.enter_context(patch) for patch in patches]
+                rc = tick.main()
+                sent_body = entered[-1].call_args.args[1]
+            with mock.patch.object(outbound, "LEDGER", ledger_path), \
+                    outbound.Ledger() as ledger:
+                entry = ledger.thread("product")
+                pending = outbound.pending_night_batch(entry)
+            rows = [json.loads(line) for line in
+                    (root / "outbound-journal.jsonl").read_text().splitlines()]
+        self.assertEqual(rc, 0)
+        self.assertIsNone(pending)
+        self.assertNotIn("Первый отчёт", sent_body)
+        self.assertEqual(sent_body.count("Защиты установлены"), 1)
+        self.assertEqual(sent_body.count("Релиз направления"), 1)
+        self.assertNotIn("report:task-1318:first", entry["delivered_events"])
+        self.assertIn("report:task-1318:last", entry["delivered_events"])
+        self.assertIn("report:product:release", entry["delivered_events"])
+        superseded = [row for row in rows
+                      if row.get("event_id") == "report:task-1318:first"]
+        self.assertEqual(superseded[-1]["action"], "drop")
+        self.assertIsNone(superseded[-1]["delivered"])
+
+    def test_digest_attaches_files_only_for_work_named_in_its_body(self):
+        batch = {"window": "2026-08-28", "events": [
+            {"event_id": "report:task-1:done", "attachments": ["/tmp/one.html"]},
+            {"event_id": "report:task-2:done", "attachments": ["/tmp/two.html"]},
+        ]}
+        files = tick.night_digest_attachments(
+            {"body": "Задача 1 — готова.",
+             "attachments": ["/tmp/cover.html", "/tmp/two.html"]},
+            batch)
+        self.assertEqual(files, ["/tmp/cover.html", "/tmp/one.html"])
+
+    def test_live_goal_session_flushes_pending_window_mechanically(self):
+        report = {
+            "thread": "product", "title": "Продукт", "live_runs": [],
+            "needs_attention": [], "ready_to_start": [], "decided_not_done": [],
+            "can_pick_up": [], "queued_by_plan": [], "backlog": [],
+            "waiting_user": [],
+        }
+        snapshot = {"live": [], "pickup": [], "ready": [], "decided": [],
+                    "plan_queue": []}
+        with tempfile.TemporaryDirectory() as home:
+            root = Path(home)
+            ledger_path = root / "outbound.json"
+            state_dir = root / "threads"
+            with mock.patch.object(outbound, "LEDGER", ledger_path), \
+                    mock.patch.object(tick, "send_mail", return_value="gmail-night"):
+                tick.deliver(
+                    "product", "report", "Задача 1318 — правки", "готова к ревью",
+                    self.NIGHT, event_id="report:task-1318:rework")
+
+            frozen = type(
+                "FrozenDatetime", (datetime,),
+                {"now": staticmethod(lambda tz=None: self.MORNING)})
+            patches = (
+                mock.patch.object(outbound, "LEDGER", ledger_path),
+                mock.patch.object(tick, "STATE_DIR", state_dir),
+                mock.patch.object(tick, "datetime", frozen),
+                mock.patch.object(sys, "argv", ["thread_tick.py", "product"]),
+                mock.patch.object(tick, "runner_contract_alarm",
+                                  return_value=([], None)),
+                mock.patch.object(tick, "build", return_value=report),
+                mock.patch.object(tick, "snapshot", return_value=snapshot),
+                mock.patch.object(tick, "persisted_process_inventory", return_value=[]),
+                mock.patch.object(tick, "process_observation", return_value={}),
+                mock.patch.object(tick, "goal_watch", return_value={
+                    "transitions": [], "standing": [], "reminder": None,
+                    "panel": [], "objects": []}),
+                mock.patch.object(tick, "standing_events", return_value=([], None, None)),
+                mock.patch.object(tick, "startable", return_value=0),
+                mock.patch.object(tick, "idle_reasons", return_value=[]),
+                mock.patch.object(tick, "yielded", return_value=None),
+                mock.patch.object(tick, "queue", return_value={}),
+                mock.patch.object(tick, "outcome", return_value="проверено"),
+                mock.patch.object(tick, "started_runs", return_value=[]),
+                mock.patch.object(tick.goal_session, "watchdog", return_value={
+                    "mode": "session", "holds": True, "detail": "живая сессия"}),
+                mock.patch.object(outbound, "instruction_letter", return_value=None),
+                mock.patch.object(tick, "query_tasks", return_value=[{
+                    "id": 1318, "title": "Ночная почта", "status": "in_review",
+                    "status_detail": "кандидат готов"}]),
+                mock.patch.object(tick, "send_mail", return_value="gmail-night"),
+            )
+            with contextlib.ExitStack() as stack:
+                entered = [stack.enter_context(patch) for patch in patches]
+                rc = tick.main()
+                send = entered[-1]
+            with mock.patch.object(outbound, "LEDGER", ledger_path), \
+                    outbound.Ledger() as ledger:
+                entry = ledger.thread("product")
+                pending = outbound.pending_night_batch(entry)
+        self.assertEqual(rc, 0)
+        send.assert_called_once()
+        self.assertIsNone(pending)
+        self.assertIn("report:task-1318:rework", entry["delivered_events"])
+
+    def test_failed_digest_keeps_the_window_for_retry(self):
+        with tempfile.TemporaryDirectory() as home:
+            ledger_path = Path(home) / "outbound.json"
+            with mock.patch.object(outbound, "LEDGER", ledger_path), \
+                    mock.patch.object(tick, "send_mail", return_value=None):
+                tick.deliver(
+                    "process", "report", "Task", "Состояние", self.NIGHT,
+                    event_id="report:task-1:done", selected_by="composer")
+                with outbound.Ledger() as ledger:
+                    batch = outbound.pending_night_batch(ledger.thread("process"))
+                result = tick.deliver(
+                    "process", "report", "Ночной итог", "Финальное состояние",
+                    self.MORNING,
+                    event_id=outbound.night_digest_event_id("process", batch["window"]),
+                    selected_by="composer", night_batch=batch)
+                with outbound.Ledger() as ledger:
+                    pending = outbound.pending_night_batch(ledger.thread("process"))
+        self.assertEqual(result["action"], "fail")
+        self.assertEqual(pending["events"][0]["event_id"], "report:task-1:done")
+
+    def test_morning_prompt_demands_one_final_state_digest(self):
+        batch = {"window": "2026-08-28", "events": [{
+            "event_id": "report:task-1:done", "subject": "Task 1",
+            "body": "Промежуточный статус", "kind": "report",
+            "attachments": [], "selected_by": "composer",
+        }]}
+        text = tick.prompt(
+            {"thread": "process", "title": "Контур", "live_runs": [],
+             "ready_to_start": [], "decided_not_done": [], "can_pick_up": []},
+            [], [], [], night_batch=batch)
+        self.assertIn("event_id=night:process:2026-08-28", text)
+        self.assertIn("финальное\nсостояние", text)
+        self.assertIn("открой её карточку", text)
+        self.assertIn("Не склеивай события разных направлений", text)
 
 
 class LedgerRecovery(unittest.TestCase):
