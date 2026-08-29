@@ -66,6 +66,15 @@ def test_the_live_rules_file_is_clean():
     assert rules_guard.guard() == []
 
 
+def test_repeat_work_rule_requires_full_fallback_and_primary_records():
+    text = rules_guard.RULES.read_text(encoding="utf-8")
+    assert "нулевой ответ по точной фразе не" in text
+    assert "полный поиск по текстам задач" in text
+    for name in ("task.md", "findings.md", "verification.md", "sources.md"):
+        assert f"`{name}`" in text
+    assert "до запуска исполнителя" in text
+
+
 def test_every_section_of_the_predecessor_has_exactly_one_owner():
     rows, problems = rules_guard.inventory()
     assert problems == []
