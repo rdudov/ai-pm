@@ -296,6 +296,21 @@ class GoalStore(unittest.TestCase):
         self.assertFalse(goals.standing("process", [101]))
         self.assertTrue(goals.standing("process", [100]))
 
+    def test_a_stable_blocker_does_not_wake_a_model_without_an_actionable_task(self):
+        goal = self.opened()
+        goals.pause(goal["id"], "ждём внешний пакет", "решение пользователя")
+        goals.add_corrective(goal["id"], 101, "эффект", "критерий")
+
+        self.assertEqual(goals.standing("process", [], []), [])
+        self.assertTrue(goals.standing("process", [], [101]))
+        self.assertEqual(goals.standing("process", [101], [101]), [])
+
+    def test_a_paused_goal_without_a_pending_repair_does_not_wake_a_model(self):
+        goal = self.opened()
+        goals.pause(goal["id"], "ждём пользователя", "письмо пользователя")
+
+        self.assertEqual(goals.standing("process", [], []), [])
+
     def test_the_projection_matches_the_contract_the_board_is_promised(self):
         goal = self.opened()
         goals.pause(goal["id"], "причина", "источник")
@@ -356,19 +371,21 @@ class TickReadsGoals(unittest.TestCase):
 
     def test_a_standing_goal_wakes_the_owner_and_is_written_to_the_state_file(self):
         moment = datetime.now(timezone.utc)
-        watch = tick.goal_watch("process", {"live_runs": []}, {}, moment)
+        report = {"live_runs": [], "ready_to_start": [{"id": 100}]}
+        watch = tick.goal_watch("process", report, {}, moment)
         self.assertTrue(watch["standing"])
         self.assertEqual([item["id"] for item in watch["panel"]], [self.goal["id"]])
 
     def test_the_same_standing_goal_is_not_repeated_inside_the_interval(self):
         moment = datetime.now(timezone.utc)
-        first = tick.goal_watch("process", {"live_runs": []}, {}, moment)
+        report = {"live_runs": [], "ready_to_start": [{"id": 100}]}
+        first = tick.goal_watch("process", report, {}, moment)
         stored = {"goal_reminder": first["reminder"],
                   "goals": first["panel"]}
-        again = tick.goal_watch("process", {"live_runs": []}, stored,
+        again = tick.goal_watch("process", report, stored,
                                 moment + timedelta(seconds=30))
         self.assertFalse(again["standing"])
-        later = tick.goal_watch("process", {"live_runs": []}, stored,
+        later = tick.goal_watch("process", report, stored,
                                 moment + timedelta(seconds=tick.GOAL_REMIND_SECONDS + 1))
         self.assertTrue(later["standing"])
 

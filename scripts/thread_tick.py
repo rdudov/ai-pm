@@ -382,12 +382,19 @@ def goal_watch(thread: str, report: dict, stored: dict, moment: datetime) -> dic
     нет»: an unreadable goal is the case where silence costs the most.
     """
     previous = {str(goal.get("id")): goal for goal in stored.get("goals") or []}
+    live_ids = {item["id"] for item in report["live_runs"]}
+    actionable_ids = {
+        item["id"]
+        for field in ("can_pick_up", "ready_to_start", "decided_not_done",
+                      "queued_by_plan")
+        for item in (report.get(field) or [])
+    }
     try:
         for goal in product_goal.active(thread):
             product_goal.apply_observed(goal["id"])
         panel = product_goal.panel(thread)
         waiting = product_goal.standing(
-            thread, [item["id"] for item in report["live_runs"]])
+            thread, list(live_ids), list(actionable_ids))
     except (product_goal.GoalError, OSError, ValueError) as error:
         return {"transitions": [f"долговечные цели направления не читаются: {error}"],
                 "standing": [], "reminder": stored.get("goal_reminder"), "panel": [],
@@ -414,9 +421,10 @@ def goal_watch(thread: str, report: dict, stored: dict, moment: datetime) -> dic
     # Сами стоячие цели, а не только фразы о них. Частота повторения решает, что
     # сказать пользователю; обязательный исход пробуждения решается по факту
     # стояния, иначе замолчавший повтор снимал бы и проверку.
-    live_ids = {item["id"] for item in report["live_runs"]}
     objects = [goal for goal in panel
-               if goal.get("waiting_on") and not set(goal["waiting_on"]) & live_ids]
+               if goal.get("waiting_on")
+               and not set(goal["waiting_on"]) & live_ids
+               and set(goal["waiting_on"]) & actionable_ids]
     return {"transitions": transitions_seen, "standing": standing_now,
             "reminder": reminder, "panel": panel, "objects": objects}
 

@@ -681,7 +681,8 @@ def panel(thread: str | None = None) -> list[dict]:
     return [projection(goal) for goal in active(thread)]
 
 
-def standing(thread: str, live_run_ids: list[int]) -> list[str]:
+def standing(thread: str, live_run_ids: list[int],
+             actionable_task_ids: list[int] | None = None) -> list[str]:
     """Goals that are owed something and have no live run doing it.
 
     The tick wakes on transitions and on two standing states; a goal with nothing
@@ -690,10 +691,23 @@ def standing(thread: str, live_run_ids: list[int]) -> list[str]:
     либо записывает конкретный внешний блокер».
     """
     said = []
+    live = set(live_run_ids)
+    actionable = (set(actionable_task_ids)
+                  if actionable_task_ids is not None else None)
     for goal in active(thread):
         waiting = live_tasks(goal)
-        if set(waiting) & set(live_run_ids):
+        if set(waiting) & live:
             continue
+        # A stable blocked task or an explicit external wait has no safe move
+        # for a model to make.  Its transition was already news once; waking
+        # every twenty minutes after that only rereads the same context.  The
+        # old two-argument call keeps the historical diagnostic behaviour for
+        # readers that do not know which tasks are actionable.
+        if actionable is not None:
+            if waiting and not set(waiting) & actionable:
+                continue
+            if not waiting and goal.get("state") == PAUSED and not goal.get("unreadable"):
+                continue
         where = ("основная задача" if goal.get("state") != PAUSED
                  else "корректирующие задачи")
         said.append(
