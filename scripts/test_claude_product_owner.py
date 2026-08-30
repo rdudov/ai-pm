@@ -1,11 +1,13 @@
 import json
 import subprocess
+import tempfile
 import unittest
 from unittest import mock
 import urllib.error
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timezone
 from io import StringIO
+from pathlib import Path
 
 import claude_product_owner as router
 import plain_russian
@@ -43,6 +45,12 @@ def observed_codex(remaining: float) -> dict:
 
 class ProductOwnerModelRouterTests(unittest.TestCase):
     def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        lock = mock.patch.object(router, "AUTH_REFRESH_LOCK",
+                                 Path(temporary.name) / "claude-quota-refresh.lock")
+        lock.start()
+        self.addCleanup(lock.stop)
         patcher = mock.patch("claude_product_owner.codex_budget.latest",
                              return_value=observed_codex(81))
         patcher.start()

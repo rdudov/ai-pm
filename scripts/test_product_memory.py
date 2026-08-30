@@ -205,8 +205,10 @@ def test_snapshot_missing_a_required_section_is_a_defect(store: Path):
 
 
 def test_an_edited_retired_monolith_is_reported_not_synced_back(store: Path,
-                                                                tmp_path: Path):
+                                                                tmp_path: Path,
+                                                                monkeypatch):
     """The rollback copy may not quietly become a second editable truth."""
+    monkeypatch.setattr(memory, "HOME", tmp_path)
     legacy = memory.HOME / "products" / "demo" / "product.md"
     manifest = {"products": {"demo": {
         "source": "products/demo/product.md",

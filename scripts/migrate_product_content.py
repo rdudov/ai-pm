@@ -254,8 +254,8 @@ def migrate(base: Path, source_root: Path, stamp: str) -> dict:
 
         manifest["products"][slug] = record
 
-    # The rules file and the readme are archived as they stood, so the semantic
-    # inventory of AGENTS.md can be checked against a frozen predecessor.
+    # Keep the rules file and readme with the migration snapshot so the source
+    # state remains recoverable and auditable after the live documents evolve.
     for name in ("AGENTS.md", "README.md"):
         path = HOME / name
         if path.is_file():

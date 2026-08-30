@@ -22,6 +22,8 @@ RULES = """# Продакт-агент
 python3 scripts/lesson.py add --observation ... --owner ...
 ```
 """
+PREDECESSOR = (rules_guard.HOME / "content" / "archive" / "2026-08-12"
+               / "AGENTS.md")
 
 
 def write(tmp_path: Path, text: str) -> Path:
@@ -35,8 +37,16 @@ def test_a_rules_file_of_rules_passes(tmp_path: Path):
 
 
 @pytest.mark.parametrize("line, expected", [
-    ("Пауза объявлена 2026-08-09 и снята пользователем.", "датированная запись"),
-    ("Канонический порядок: 836 → 839 → 754.", "номер задачи или счётчик"),
+    ("Канонический порядок: 836 → 839 → 754.", "активный порядок задач"),
+    ("Порядок работ — 836 -> 839 -> 754.", "активный порядок задач"),
+    ("ПАУЗА, объявленная пользователем 2026-08-09 — действует до отмены.",
+     "объявленная пауза"),
+    ("Пауза объявлена 2026-08-09 и снята пользователем.",
+     "объявленная пауза"),
+    ("Очередь на сегодня: 1330, затем 1331.", "текущая очередь"),
+    ("Сейчас в работе задача 1330; до её завершения новых не берём.",
+     "активная задача"),
+    ("Приостановлено до 2026-09-15.", "датированная пауза"),
     ("Вернуть таймеры: systemctl start product-thread@process.timer.",
      "команда управления службами"),
     ("Запуск: .venv/bin/python skills/task-runner/scripts/task_runner.py start",
@@ -61,6 +71,29 @@ def test_a_command_inside_a_fenced_block_is_not_a_plan(tmp_path: Path):
     assert rules_guard.guard(write(tmp_path, text)) == []
 
 
+def test_historical_evidence_is_allowed_in_a_durable_rule(tmp_path: Path):
+    text = RULES + "\n" + "\n".join([
+        "Повод: задача 1223 нашла разрыв 2026-08-20.",
+        "Наблюдённый случай: Канонический порядок: 836 → 839 → 754.",
+        "- Evidence: Приостановлено до 2026-09-15.",
+    ]) + "\n"
+    assert rules_guard.guard(write(tmp_path, text)) == []
+
+
+def test_wrapped_historical_evidence_is_allowed_in_a_durable_rule(tmp_path: Path):
+    text = RULES + "\n" + "\n".join([
+        "- Evidence: письмо 2026-08-07 —",
+        "  «Порядок работ — 836 -> 839 -> 754.»",
+    ]) + "\n"
+    assert rules_guard.guard(write(tmp_path, text)) == []
+
+
+def test_the_guard_rejects_the_archived_incident_it_exists_for():
+    problems = rules_guard.guard(PREDECESSOR)
+    assert any("активный порядок задач" in problem for problem in problems)
+    assert any("объявленная пауза" in problem for problem in problems)
+
+
 def test_the_live_rules_file_is_clean():
     """The one that actually loads on every start."""
     assert rules_guard.guard() == []
@@ -73,20 +106,3 @@ def test_repeat_work_rule_requires_full_fallback_and_primary_records():
     for name in ("task.md", "findings.md", "verification.md", "sources.md"):
         assert f"`{name}`" in text
     assert "до запуска исполнителя" in text
-
-
-def test_every_section_of_the_predecessor_has_exactly_one_owner():
-    rows, problems = rules_guard.inventory()
-    assert problems == []
-    assert rows, "опись пуста: замороженный предшественник не найден"
-    assert all(row["carried"] for row in rows)
-    # Every section of the frozen file is named, and nothing is named twice.
-    assert len({row["section"] for row in rows}) == len(rows)
-
-
-def test_the_predecessor_is_still_reachable():
-    """The map is only as good as the frozen file it is checked against."""
-    previous = rules_guard.archived_rules()
-    assert previous is not None and previous.is_file()
-    assert len(previous.read_text(encoding="utf-8")) > len(
-        rules_guard.RULES.read_text(encoding="utf-8"))

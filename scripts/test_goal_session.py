@@ -443,6 +443,9 @@ class OneConversation(unittest.TestCase):
         self.addCleanup(self.restore_env)
         self.sessions, session.SESSIONS = session.SESSIONS, self.root / "sessions"
         self.addCleanup(lambda: setattr(session, "SESSIONS", self.sessions))
+        self.ledger, session.outbound.LEDGER = (
+            session.outbound.LEDGER, self.root / "outbound.json")
+        self.addCleanup(lambda: setattr(session.outbound, "LEDGER", self.ledger))
         opened = goals.open_goal("process", "результат", ["условие"], 1094)
         goals.add_signal(opened["id"], "manual_bypass", "обход", "trace.md задачи 1094")
 

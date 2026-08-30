@@ -266,7 +266,10 @@ def run_alive(runner: dict) -> tuple[bool, str | None]:
         return False, None
     if namespace_state != "local":
         return False, "личность процесса ненаблюдаема: другое пространство имён PID"
-    if RUNNER.process_is_live(runner.get("pid"), runner.get("process_identity")):
+    identity = runner.get("process_identity")
+    if not isinstance(identity, str) or not identity:
+        return False, None
+    if RUNNER.process_is_live(runner.get("pid"), identity):
         return True, "pid и стартовый тик ядра совпали с .runner/runner.json"
     return False, None
 

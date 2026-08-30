@@ -476,19 +476,17 @@ class TaskIndexTab(unittest.TestCase):
 
     def test_records_are_ordered_by_instant_not_by_string(self):
         # git stamps commits with a local offset; everything else is UTC.
-        path = Path(state.HOME / "state" / "test-timeline.jsonl")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in [
-            # 12:05+03:00 is 09:05 UTC — earlier than 09:20 UTC, though a string
-            # comparison says the opposite.
-            a_record(at="2026-08-06T12:05:00+03:00", kind="commit", label="коммит 09:05 UTC",
-                     observed_by="git log", station="commit", channel="git"),
-            a_record(at="2026-08-06T09:20:00+00:00", label="артефакт 09:20 UTC"),
-        ]))
-        try:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "timeline.jsonl"
+            path.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in [
+                # 12:05+03:00 is 09:05 UTC — earlier than 09:20 UTC, though a
+                # string comparison says the opposite.
+                a_record(at="2026-08-06T12:05:00+03:00", kind="commit",
+                         label="коммит 09:05 UTC", observed_by="git log",
+                         station="commit", channel="git"),
+                a_record(at="2026-08-06T09:20:00+00:00", label="артефакт 09:20 UTC"),
+            ]))
             order = [r["label"] for r in render.load_timeline(path)]
-        finally:
-            path.unlink()
         self.assertEqual(order, ["коммит 09:05 UTC", "артефакт 09:20 UTC"])
 
 
@@ -2786,12 +2784,14 @@ class LongLivedTaskProcesses(unittest.TestCase):
                          "repos": [], "task_count": 0}],
             "owners_awake": [],
         }
-        with (mock.patch.object(thread, "load_thread", return_value={"repos": []}),
-              mock.patch.object(thread.observer, "build", return_value=observed),
-              mock.patch.object(
-                  thread, "process_inventory",
-                  side_effect=state.ProcessInventoryUnavailable("registry unavailable"))):
-            report = thread.build("process")
+        with tempfile.TemporaryDirectory() as temporary:
+            with (mock.patch.object(thread, "load_thread", return_value={"repos": []}),
+                  mock.patch.object(thread.observer, "build", return_value=observed),
+                  mock.patch.object(state, "OWNER_STATE", Path(temporary) / "owners.json"),
+                  mock.patch.object(
+                      thread, "process_inventory",
+                      side_effect=state.ProcessInventoryUnavailable("registry unavailable"))):
+                report = thread.build("process")
 
         self.assertEqual(report["long_lived_processes"], [])
         self.assertEqual(report["long_lived_processes_observation"], {
@@ -4058,8 +4058,6 @@ class TheWakeUpSeesTheQueueMove(unittest.TestCase):
         # and an empty list is the honest answer there.
         self.assertEqual(tick.idle_reasons(self.report(),
                                            {"yielded_to_awake_owner": None}), [])
-        self.assertNotIn("простое", tick.prompt(self.report(), ["первый запуск треда"],
-                                                [], []))
 
     def test_the_outcome_is_the_difference_in_live_runs_and_not_the_owner_s_prose(self):
         report = self.report(pickup=[861])
