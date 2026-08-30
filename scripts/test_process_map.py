@@ -54,9 +54,9 @@ def a_question(**over) -> dict:
 def asked_question(**over) -> dict:
     """A question that was actually put to the user, with the mark that says so."""
     return a_question(owner="user", asked_at="2026-08-05", channel="email",
-                      ref="18f0000000000001",
+                      ref="msg0000000000001",
                       asked_src="пометка «спрошено у пользователя 2026-08-05, "
-                                "письмо 18f0000000000001» в самой строке",
+                                "письмо msg0000000000001» в самой строке",
                       note=None, **over)
 
 
@@ -1022,12 +1022,12 @@ class WaitingMeansWaitingOnTheUser(unittest.TestCase):
     def test_a_question_marked_as_asked_belongs_to_the_user(self):
         entry = state.question_entry(
             "Сколько ставок брать в первый заход? Спрошено у пользователя 2026-08-05, "
-            "письмо `18f0000000000001`.", self.NO_MAILBOX)
+            "письмо `msg0000000000001`.", self.NO_MAILBOX)
         self.assertEqual(entry["owner"], "user")
         self.assertEqual(entry["asked_at"], "2026-08-05")
         self.assertEqual(entry["channel"], "email")
-        self.assertEqual(entry["ref"], "18f0000000000001")
-        self.assertIn("18f0000000000001", entry["asked_src"])
+        self.assertEqual(entry["ref"], "msg0000000000001")
+        self.assertIn("msg0000000000001", entry["asked_src"])
 
     def test_a_telegram_question_carries_its_message_too(self):
         entry = state.question_entry(
@@ -1044,44 +1044,44 @@ class WaitingMeansWaitingOnTheUser(unittest.TestCase):
         вычеркнуть строку.» The observation is a letter of his in the same thread,
         dated no earlier than the question.
         """
-        mail = {"threads": {"18f0000000000001": "продакт продукт"},
+        mail = {"threads": {"msg0000000000001": "продакт продукт"},
                 "replies": {"продакт продукт":
                             state.datetime(2026, 8, 6, 8, 31, tzinfo=state.timezone.utc)},
                 "sent_known": True}
         entry = state.question_entry(
-            "Сколько ставок брать? Спрошено у пользователя 2026-08-05, письмо 18f0000000000001.",
+            "Сколько ставок брать? Спрошено у пользователя 2026-08-05, письмо msg0000000000001.",
             mail)
         self.assertEqual(entry["owner"], "product")
         self.assertIn("в том же треде", entry["answer_src"])
         self.assertIn("незаписанным", entry["note"])
 
     def test_a_letter_older_than_the_question_is_not_an_answer_to_it(self):
-        mail = {"threads": {"18f0000000000001": "продакт продукт"},
+        mail = {"threads": {"msg0000000000001": "продакт продукт"},
                 "replies": {"продакт продукт":
                             state.datetime(2026, 8, 1, 8, 31, tzinfo=state.timezone.utc)},
                 "sent_known": True}
         entry = state.question_entry(
-            "Сколько ставок брать? Спрошено у пользователя 2026-08-05, письмо 18f0000000000001.",
+            "Сколько ставок брать? Спрошено у пользователя 2026-08-05, письмо msg0000000000001.",
             mail)
         self.assertEqual(entry["owner"], "user")
 
     def test_a_letter_earlier_the_same_day_is_not_an_answer_to_a_later_question(self):
         """The exact live case of finding HIGH-1 of review 826.
 
-        The three questions went out in `18f0000000000003` at 2026-08-06
-        16:28:48 UTC. The letter counted as their answer, `18f0000000000002`,
+        The three questions went out in `msg0000000000003` at 2026-08-06
+        16:28:48 UTC. The letter counted as their answer, `msg0000000000002`,
         was sent at 14:00:02 UTC — 2 hours 28 minutes *earlier*, and it asked
         about a forgotten document. A day is not fine enough to tell those
         apart; the send instant is.
         """
-        mail = {"threads": {"18f0000000000003": "продакт продукт"},
+        mail = {"threads": {"msg0000000000003": "продакт продукт"},
                 "replies": {"продакт продукт":
                             state.datetime(2026, 8, 6, 14, 0, 2, tzinfo=state.timezone.utc)},
-                "sent_at": {"18f0000000000003":
+                "sent_at": {"msg0000000000003":
                             state.datetime(2026, 8, 6, 16, 28, 48, tzinfo=state.timezone.utc)},
                 "sent_known": True}
         entry = state.question_entry(
-            "Сколько ставок брать? Спрошено у пользователя 2026-08-06, письмо 18f0000000000003.",
+            "Сколько ставок брать? Спрошено у пользователя 2026-08-06, письмо msg0000000000003.",
             mail)
         self.assertEqual(entry["owner"], "user")
         self.assertIsNone(entry["answer_src"])
@@ -1091,14 +1091,14 @@ class WaitingMeansWaitingOnTheUser(unittest.TestCase):
     def test_a_letter_later_the_same_day_is_the_answer(self):
         # The positive control of the same pair: same day, same thread, but
         # afterwards — that one really does take the question out of the area.
-        mail = {"threads": {"18f0000000000003": "продакт продукт"},
+        mail = {"threads": {"msg0000000000003": "продакт продукт"},
                 "replies": {"продакт продукт":
                             state.datetime(2026, 8, 6, 18, 5, tzinfo=state.timezone.utc)},
-                "sent_at": {"18f0000000000003":
+                "sent_at": {"msg0000000000003":
                             state.datetime(2026, 8, 6, 16, 28, 48, tzinfo=state.timezone.utc)},
                 "sent_known": True}
         entry = state.question_entry(
-            "Сколько ставок брать? Спрошено у пользователя 2026-08-06, письмо 18f0000000000003.",
+            "Сколько ставок брать? Спрошено у пользователя 2026-08-06, письмо msg0000000000003.",
             mail)
         self.assertEqual(entry["owner"], "product")
         self.assertIn("позже вопроса", entry["answer_src"])
@@ -1107,12 +1107,12 @@ class WaitingMeansWaitingOnTheUser(unittest.TestCase):
         # Equal is not later. An answer written before it could be read is not
         # an answer, and the boundary is where a day-wide rule used to swallow it.
         instant = state.datetime(2026, 8, 6, 16, 28, 48, tzinfo=state.timezone.utc)
-        mail = {"threads": {"18f0000000000003": "продакт продукт"},
+        mail = {"threads": {"msg0000000000003": "продакт продукт"},
                 "replies": {"продакт продукт": instant},
-                "sent_at": {"18f0000000000003": instant},
+                "sent_at": {"msg0000000000003": instant},
                 "sent_known": True}
         entry = state.question_entry(
-            "Сколько ставок брать? Спрошено у пользователя 2026-08-06, письмо 18f0000000000003.",
+            "Сколько ставок брать? Спрошено у пользователя 2026-08-06, письмо msg0000000000003.",
             mail)
         self.assertEqual(entry["owner"], "user")
 
@@ -1127,13 +1127,13 @@ class WaitingMeansWaitingOnTheUser(unittest.TestCase):
         """
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            self._store(root / "inbox" / "18f0000000000002", {
-                "message_id": "18f0000000000002",
+            self._store(root / "inbox" / "msg0000000000002", {
+                "message_id": "msg0000000000002",
                 "subject": "Продакт: Продукт",
                 "from": "user@example.com", "to": "owner@example.com",
                 "date": "Thu, 06 Aug 2026 17:00:02 +0300", "attachments": []})
-            self._store(root / "sent" / "18f0000000000003", {
-                "message_id": "18f0000000000003",
+            self._store(root / "sent" / "msg0000000000003", {
+                "message_id": "msg0000000000003",
                 "subject": "Re: Продакт: Продукт",
                 "from": "owner@example.com", "to": "user@example.com",
                 "date": "Thu, 06 Aug 2026 12:28:48 -0400", "attachments": []})
@@ -1143,16 +1143,16 @@ class WaitingMeansWaitingOnTheUser(unittest.TestCase):
                 mail = state.mailbox()
                 entry = state.question_entry(
                     "Сколько ставок брать? Спрошено у пользователя 2026-08-06, "
-                    "письмо 18f0000000000003.", mail)
+                    "письмо msg0000000000003.", mail)
             finally:
                 state.MAIL_INBOX, state.MAIL_SENT = original
 
         # The reply prefix must not split the thread, or the two letters would
         # never be compared at all and the question would stay the user's for
         # the wrong reason.
-        self.assertEqual(mail["threads"]["18f0000000000003"],
-                         mail["threads"]["18f0000000000002"])
-        self.assertEqual(mail["sent_at"]["18f0000000000003"],
+        self.assertEqual(mail["threads"]["msg0000000000003"],
+                         mail["threads"]["msg0000000000002"])
+        self.assertEqual(mail["sent_at"]["msg0000000000003"],
                          state.datetime(2026, 8, 6, 16, 28, 48, tzinfo=state.timezone.utc))
         self.assertEqual(entry["owner"], "user")
         self.assertIsNone(entry["answer_src"])
@@ -1160,20 +1160,20 @@ class WaitingMeansWaitingOnTheUser(unittest.TestCase):
     def test_without_a_stored_outgoing_letter_the_marked_day_still_decides(self):
         # The fallback is unchanged behaviour, not a new rule: with no letter on
         # disk the mark carries a date and nothing finer, and the board says so.
-        mail = {"threads": {"18f0000000000001": "продакт продукт"},
+        mail = {"threads": {"msg0000000000001": "продакт продукт"},
                 "replies": {"продакт продукт":
                             state.datetime(2026, 8, 6, 8, 31, tzinfo=state.timezone.utc)},
                 "sent_at": {},
                 "sent_known": True}
         entry = state.question_entry(
-            "Сколько ставок брать? Спрошено у пользователя 2026-08-05, письмо 18f0000000000001.",
+            "Сколько ставок брать? Спрошено у пользователя 2026-08-05, письмо msg0000000000001.",
             mail)
         self.assertEqual(entry["owner"], "product")
         self.assertIn("не раньше вопроса", entry["answer_src"])
 
     def test_an_unresolvable_thread_says_so_instead_of_claiming_silence(self):
         entry = state.question_entry(
-            "Спрошено у пользователя 2026-08-05, письмо 18f0000000000001. Так что решаем?",
+            "Спрошено у пользователя 2026-08-05, письмо msg0000000000001. Так что решаем?",
             self.NO_MAILBOX)
         self.assertEqual(entry["owner"], "user")
         self.assertIn("не найдено в почтовом хранилище", entry["note"])
@@ -1190,13 +1190,13 @@ class WaitingMeansWaitingOnTheUser(unittest.TestCase):
         """
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            self._store(root / "sent" / "18f0000000000003", {
-                "message_id": "18f0000000000003",
+            self._store(root / "sent" / "msg0000000000003", {
+                "message_id": "msg0000000000003",
                 "subject": "Продакт: Продукт",
                 "from": "owner@example.com", "to": "user@example.com",
                 "date": "Thu, 06 Aug 2026 09:12:00 +0300", "attachments": []})
-            self._store(root / "inbox" / "18f0000000000004", {
-                "message_id": "18f0000000000004",
+            self._store(root / "inbox" / "msg0000000000004", {
+                "message_id": "msg0000000000004",
                 "subject": "Re: Продакт: Продукт",
                 "from": "user@example.com", "to": "owner@example.com",
                 "date": "Thu, 06 Aug 2026 10:40:00 +0300", "attachments": []})
@@ -1206,12 +1206,12 @@ class WaitingMeansWaitingOnTheUser(unittest.TestCase):
                 mail = state.mailbox()
                 entry = state.question_entry(
                     "Сколько ставок брать? Спрошено у пользователя 2026-08-06, "
-                    "письмо 18f0000000000003.", mail)
+                    "письмо msg0000000000003.", mail)
             finally:
                 state.MAIL_INBOX, state.MAIL_SENT = original
 
         self.assertTrue(mail["sent_known"])
-        self.assertEqual(mail["threads"]["18f0000000000003"],
+        self.assertEqual(mail["threads"]["msg0000000000003"],
                          state.thread_key("Продакт: Продукт"))
         self.assertEqual(entry["owner"], "product")
         self.assertIn("в том же треде", entry["answer_src"])
@@ -3351,7 +3351,7 @@ class DoneButNeverShown(unittest.TestCase):
         """
         task = self.like_783()
         (task / "product-owner-delivery.md").write_text(
-            "# Доставка пользователю\n- 2026-08-06, письмо `18f0000000000005`\n")
+            "# Доставка пользователю\n- 2026-08-06, письмо `msg0000000000005`\n")
         hand = state.handoff(task)
         self.assertTrue(hand["delivered"])
         self.assertIn("product-owner-delivery.md", hand["delivered_src"])

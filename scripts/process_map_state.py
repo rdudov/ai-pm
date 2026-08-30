@@ -1730,8 +1730,8 @@ def mailbox() -> dict:
     a letter that arrived two hours *before* the question from one that answered
     it. The instant is already in the stored metadata; keeping it here is what
     lets `answer_observed` require an answer that came afterwards (finding HIGH-1
-    of review 826: the questions of `18f0000000000003` went out at 16:28:48 UTC
-    and `18f0000000000002`, sent 2 h 28 min earlier about a forgotten document,
+    of review 826: the questions of `msg0000000000003` went out at 16:28:48 UTC
+    and `msg0000000000002`, sent 2 h 28 min earlier about a forgotten document,
     was read as their answer).
     """
     threads: dict[str, str] = {}

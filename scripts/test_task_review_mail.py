@@ -1138,7 +1138,7 @@ def test_resolution_written_before_the_probe_binding_stays_resolved(
             "resolved_at": "2026-08-27T12:45:34.496686+00:00",
             "held_out_evidence": evidence.name,
             "held_out_sha256": task_review_mail.product_review.file_sha256(evidence),
-            "message_id": "1a04340fc8845cdf",
+            "message_id": "msg000000000006",
         },
     }])
     with mock.patch.object(lesson, "source_event_applied", return_value=True):
