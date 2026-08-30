@@ -336,7 +336,7 @@ class Anonymisation(unittest.TestCase):
     SECRET = SECRET
 
     def test_paths_mail_and_numeric_ids_do_not_survive(self):
-        clean = schema.scrub({"detail": self.SECRET, "dir": "316-identify-max-user-100200300"})
+        clean = schema.scrub({"detail": self.SECRET, "dir": "316-identify-assistant-user-100200300"})
         self.assertNotIn("/opt/projects", clean["detail"])
         self.assertNotIn("@gmail.com", clean["detail"])
         self.assertNotIn("100200300", clean["detail"])
@@ -499,10 +499,10 @@ class PrivacyNegativeControl(unittest.TestCase):
         # The old scrub excluded titles from cleaning altogether, so a real chat
         # identifier went out inside a real task name, in a file stamped
         # «ОБЕЗЛИЧЕНО». The title keeps its meaning; its content gets cleaned.
-        clean = schema.scrub({"title": "Identify Max telegram_user_100200300",
+        clean = schema.scrub({"title": "Identify Assistant telegram_user_100200300",
                              "task_title": "Отчёт в /opt/projects/example-product на owner@example.com"})
         self.assertNotIn("100200300", clean["title"])
-        self.assertIn("Identify Max", clean["title"])
+        self.assertIn("Identify Assistant", clean["title"])
         self.assertNotIn("/opt/projects", clean["task_title"])
         self.assertNotIn("@gmail.com", clean["task_title"])
         self.assertIn("Отчёт", clean["task_title"])
@@ -925,7 +925,7 @@ class WaitingForAPerson(unittest.TestCase):
 
     STILL_WAITING = [
         "Публиковать ли перенос коммитов на уровень продукта?",
-        "Кто четыре внешних пользователя Max и что им нужно?",
+        "Кто четыре внешних пользователя клиентского помощника и что им нужно?",
     ]
 
     def test_none_of_the_six_named_tasks_waits_for_a_person(self):
@@ -983,7 +983,7 @@ class WaitingMeansWaitingOnTheUser(unittest.TestCase):
 
     The user counted it by hand on the live state of 2026-08-06: sixteen entries
     stood under «ждёт решения человека», and three of them were his. The rest
-    were our own product decisions, questions to an executor about the Max
+    were our own product decisions, questions to an executor about the client
     environment, a repair shipped in `e12e511`, and questions he had already
     answered in writing — while the contour's own letters told him nothing was
     required of him. These tests hold the two observations that now bound it.
@@ -2260,7 +2260,7 @@ class DecisionTakenAndNotCarriedOut(unittest.TestCase):
 
 CATALOGUE = [
     {"id": 736, "title": "надо исправить task_index — она присылает задачи task-agent",
-     "slug": "736-max-task-index"},
+     "slug": "736-bot-task-index"},
     {"id": 713, "title": "Ревью кода клиента силами Claude: старый код и кандидаты на рефакторинг",
      "slug": "713-client"},
     {"id": 394, "title": "Move `/task` workflow ownership into the client",
@@ -2330,7 +2330,7 @@ class WhatNeedsPlanning(unittest.TestCase):
 
     def test_a_line_referencing_a_task_number_is_not_an_unkept_promise(self):
         self.assertEqual(unplanned(
-            "2026-08-05 — **`/task_index` в Max: код починен, но не выкачен (736)**"), [])
+            "2026-08-05 — **`/task_index` в клиенте: код починен, но не выкачен (736)**"), [])
 
     def test_a_line_naming_an_existing_task_in_words_is_not_an_unkept_promise(self):
         """First direction of the finding: the area invented work already planned.
@@ -2649,7 +2649,7 @@ class ThreadTaskSelection(unittest.TestCase):
     """Направление забирает свои задачи, а не всё, что похоже по буквам."""
 
     CONFIG = {"threads": {
-        "client": {"title": "Клиент (бот и приложение)", "task_search": ["max"]},
+        "client": {"title": "Клиент (бот и приложение)", "task_search": ["bot"]},
         "platform": {"title": "Платформа",
                           "projects": ["example-platform"]},
     }}
@@ -2657,14 +2657,14 @@ class ThreadTaskSelection(unittest.TestCase):
     def test_a_declared_project_outranks_another_direction_s_search_term(self):
         """#1172 «…забирает разумный максимум…» — задача Платформа.
 
-        Её слаг `1172-…-takes-max-at-once` совпадает с поисковой страховкой
+        Её слаг `1172-…-robot-takes-at-once` содержит поисковую страховку
         «Клиента», и до круга 7 эта колонка называла живой прогон «Платформы»
         своей текущей работой (ревью круга 6). Связь с проектом одна, и она
         решает.
         """
-        deep = {"id": 1172, "path": "tasks/1172-…-takes-max-at-once",
+        deep = {"id": 1172, "path": "tasks/1172-…-robot-takes-at-once",
                 "projects": ["data/projects/example-platform/status.md"]}
-        unlinked = {"id": 1171, "path": "tasks/1171-max-runtime", "projects": []}
+        unlinked = {"id": 1171, "path": "tasks/1171-bot-runtime", "projects": []}
 
         def queried(args, limit=60):
             return [deep] if args[0] == "--project" else [deep, unlinked]
@@ -2679,7 +2679,7 @@ class ThreadTaskSelection(unittest.TestCase):
 
     def test_a_thread_keeps_a_search_hit_linked_to_its_own_project(self):
         """Страховка не отменяется связью: она отменяется только чужой связью."""
-        thread = {"task_search": ["max"], "projects": ["example-platform"]}
+        thread = {"task_search": ["bot"], "projects": ["example-platform"]}
         task = {"id": 1172, "path": "tasks/1172",
                 "projects": ["data/projects/example-platform/status.md"]}
         with (mock.patch.object(state, "load_config", return_value=self.CONFIG),
