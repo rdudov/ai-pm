@@ -3310,7 +3310,9 @@ class DoneButNeverShown(unittest.TestCase):
         box = self.task / "deliverables"
         box.mkdir()
         (box / "product-portfolio-history-sources-2026-08-06.html").write_text("x" * 441097)
-        (box / "manifest.json").write_text("[]")
+        (box / "manifest.json").write_text(json.dumps({
+            "deliverables": ["product-portfolio-history-sources-2026-08-06.html"]
+        }))
         pipeline = self.task / "dev-pipeline"
         pipeline.mkdir()
         (pipeline / "notification-receipts.jsonl").write_text(
@@ -3327,6 +3329,14 @@ class DoneButNeverShown(unittest.TestCase):
         self.assertEqual(hand["bytes"], 441097)
         self.assertEqual(state.board_area("completed", [], False, None, undelivered=True),
                          "undelivered")
+
+    def test_a_blocked_task_with_a_registered_document_is_not_hidden_as_stuck(self):
+        hand = state.handoff(self.like_783())
+        self.assertFalse(hand["delivered"])
+        self.assertEqual(
+            state.board_area("blocked", ["blocked"], False, None,
+                             undelivered=True),
+            "undelivered")
 
     def test_lifecycle_receipts_are_not_delivery_of_a_document(self):
         # Every receipt in the whole repository is a lifecycle event, so «квитанция

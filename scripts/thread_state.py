@@ -287,6 +287,7 @@ def build(name: str) -> dict:
         # more than forty minutes and then several at once.
         "undelivered": [
             {"id": task["id"], "title": task["title"],
+             "path": task["path"],
              "age_seconds": task["board"]["age_seconds"],
              "document": (task["detail"]["handoff"] or {}).get("name"),
              "src": (task["detail"]["handoff"] or {}).get("delivered_src")}

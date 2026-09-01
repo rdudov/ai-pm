@@ -293,9 +293,77 @@ def startable(report: dict) -> int:
 
 
 def overdue_undelivered(report: dict) -> list[dict]:
-    """Finished tasks whose document has waited longer than the threshold."""
+    """Tasks whose ready document has waited longer than the threshold."""
     return [item for item in report["undelivered"]
             if (item["age_seconds"] or 0) >= UNDELIVERED_SECONDS]
+
+
+def registered_undelivered(report: dict) -> list[dict]:
+    """Exact registered files the held-document door may attach.
+
+    The board decides that a task owes a document. This last mechanical check
+    decides which exact bytes may leave: the file is directly inside
+    `deliverables/`, its basename is registered in `manifest.json`, and it can
+    still be read while its digest is computed. An unregistered draft stays on
+    disk and gets another look next tick.
+    """
+    found = []
+    for item in overdue_undelivered(report):
+        task_path = item.get("path")
+        if not isinstance(task_path, str):
+            continue
+        task_dir = REPO / task_path
+        box = task_dir / "deliverables"
+        try:
+            manifest = json.loads((box / "manifest.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, ValueError):
+            continue
+        names = manifest.get("deliverables") if isinstance(manifest, dict) else None
+        if not isinstance(names, list):
+            continue
+        registered = {name for name in names
+                      if isinstance(name, str) and Path(name).name == name}
+        document = item.get("document")
+        relative = Path(document) if isinstance(document, str) else None
+        if (relative is None or len(relative.parts) != 2
+                or relative.parts[0] != "deliverables"
+                or relative.name not in registered):
+            continue
+        path = task_dir / relative
+        digest = hashlib.sha256()
+        try:
+            with path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1 << 20), b""):
+                    digest.update(chunk)
+        except OSError:
+            continue
+        found.append({
+            "task": item.get("id"), "title": item.get("title"),
+            "name": str(relative), "path": str(path.resolve()),
+            "sha256": digest.hexdigest(),
+        })
+    return found
+
+
+def deliver_undelivered(thread: str, title: str, report: dict,
+                        moment: datetime) -> list[dict]:
+    """Attach each overdue registered document through the existing door."""
+    receipts = []
+    for item in registered_undelivered(report):
+        body = (
+            f"Над чем работаем\n\n- Задача {item['task']}: {item['title']}.\n\n"
+            "Готовый документ оставался на диске и ещё не был доставлен.\n\n"
+            f"Документ: {Path(item['name']).name}\n"
+            f"sha256: {item['sha256']}\n\n"
+            "Файл приложен к письму. Дошло, читается?"
+        )
+        receipts.append(deliver(
+            thread, "document",
+            f"Продакт: {title} — готовый документ {Path(item['name']).name}",
+            body, moment, attachments=[item["path"]],
+            event_id=f"document:{thread}:{item['task']}:{item['sha256']}",
+            selected_by="undelivered_door"))
+    return receipts
 
 
 def repeatable(previous: dict | None, signature: str, now: datetime,
@@ -1299,6 +1367,12 @@ def main() -> int:
             f"Продакт: {report['title']} — путь к зарегистрированной инструкции для внешнего исполнителя",
             letter["body"], moment, names_instructions=letter["names"],
             event_id=letter["event_id"], selected_by="instruction_door"))
+
+    # A held document is the same kind of mechanical event as a registered
+    # external instruction: exact files and an exact event identity are known
+    # before the model writes anything. Send it here so a composed report — or
+    # `SILENT` — cannot suppress the file, and keep every send in `deliver`.
+    mail.extend(deliver_undelivered(args.thread, report["title"], report, moment))
 
     if not woke:
         if mail:

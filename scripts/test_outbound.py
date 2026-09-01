@@ -481,6 +481,73 @@ class ExternalInstruction(unittest.TestCase):
         self.assertIn("не читается", noise.getvalue())
 
 
+class HeldDocumentDoor(unittest.TestCase):
+    def report(self, home: str, *, registered: bool = True) -> tuple[dict, Path, str]:
+        task = Path(home) / "tasks" / "1316-ready-document"
+        box = task / "deliverables"
+        box.mkdir(parents=True)
+        document = box / "fanera.html"
+        document.write_text("<html>готовый ответ</html>\n", encoding="utf-8")
+        names = [document.name] if registered else []
+        (box / "manifest.json").write_text(
+            json.dumps({"deliverables": names}), encoding="utf-8")
+        digest = hashlib.sha256(document.read_bytes()).hexdigest()
+        return ({
+            "title": "Процессный контур",
+            "undelivered": [{
+                "id": 1316, "title": "Ответ про фанеру",
+                "path": "tasks/1316-ready-document",
+                "age_seconds": tick.UNDELIVERED_SECONDS + 1,
+                "document": "deliverables/fanera.html",
+                "src": "квитанции нет",
+            }],
+        }, document, digest)
+
+    def test_silent_composer_cannot_suppress_the_mechanical_document_letter(self):
+        with tempfile.TemporaryDirectory() as home:
+            report, document, digest = self.report(home)
+            ledger = Path(home) / "outbound.json"
+            with mock.patch.object(tick, "REPO", Path(home)), \
+                    mock.patch.object(outbound, "LEDGER", ledger), \
+                    mock.patch.object(tick, "send_mail", return_value="gmail-document") as send:
+                receipts = tick.deliver_undelivered(
+                    "process", report["title"], report, AT)
+                composed_message = tick.parse_composed_message("SILENT")
+        self.assertIsNone(composed_message)
+        self.assertEqual(receipts[0]["action"], "send")
+        self.assertEqual(receipts[0]["event_id"], f"document:process:1316:{digest}")
+        self.assertIn(document.name, send.call_args.args[1])
+        self.assertIn(digest, send.call_args.args[1])
+        self.assertEqual(send.call_args.kwargs["attachments"], [str(document.resolve())])
+
+    def test_the_same_document_revision_is_not_mailed_twice(self):
+        with tempfile.TemporaryDirectory() as home:
+            report, _document, _digest = self.report(home)
+            ledger = Path(home) / "outbound.json"
+            with mock.patch.object(tick, "REPO", Path(home)), \
+                    mock.patch.object(outbound, "LEDGER", ledger), \
+                    mock.patch.object(tick, "send_mail", return_value="gmail-document") as send:
+                first = tick.deliver_undelivered("process", report["title"], report, AT)
+                second = tick.deliver_undelivered(
+                    "process", report["title"], report, AT + timedelta(minutes=20))
+        self.assertEqual(first[0]["action"], "send")
+        self.assertEqual(second[0]["action"], "drop")
+        self.assertEqual(send.call_count, 1)
+
+    def test_an_unregistered_draft_does_not_leave(self):
+        with tempfile.TemporaryDirectory() as home:
+            report, _document, _digest = self.report(home, registered=False)
+            with mock.patch.object(tick, "REPO", Path(home)):
+                self.assertEqual(tick.registered_undelivered(report), [])
+
+    def test_the_document_door_runs_before_the_composer(self):
+        source = Path(tick.__file__).read_text(encoding="utf-8")
+        main = source[source.index("def main("):]
+        self.assertLess(
+            main.index("mail.extend(deliver_undelivered"),
+            main.index("[str(CLAUDE_PRODUCT_OWNER), \"--entry\", \"print\"]"))
+
+
 class Sender(unittest.TestCase):
     def test_reply_mode_reaches_the_existing_gmail_client(self):
         completed = subprocess.CompletedProcess(

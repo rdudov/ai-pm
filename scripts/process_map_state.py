@@ -1252,12 +1252,19 @@ def board_area(status: str | None, flags: list[str], asked_user: bool,
         # of review 826). Every terminal status still counts as «Сделано» here,
         # exactly as before; only the undelivered claim narrows.
         return "undelivered" if undelivered and status == "completed" else "done"
-    # The user owing an answer comes first: it is the whole of one acceptance
-    # question, and an answer nobody gives blocks everything behind it.
+    # An unanswered question is the one work state that outranks both a live
+    # run and a held file: the user has been explicitly asked to decide before
+    # the work can move. Preserve that established board contract.
     if asked_user:
         return "waiting_human"
     if "live" in flags:
         return "running"
+    # A ready file that the person does not have is a delivery debt regardless
+    # of the task's working status. Task 1316 held its registered answer for
+    # five days under `blocked`, where the old terminal-only rule hid it as a
+    # generic jam. A live child still outranks the file: bytes may be changing.
+    if undelivered:
+        return "undelivered"
     if {"stale_label", "killed", "gap", "blocked", "work_outside_owner"} & set(flags):
         return "stuck"
     # An unexecuted decision on a task that is not finished stands here: below
