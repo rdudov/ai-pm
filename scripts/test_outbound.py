@@ -529,7 +529,8 @@ class HeldDocumentDoor(unittest.TestCase):
                     mock.patch.object(tick, "send_mail", return_value="gmail-document") as send:
                 first = tick.deliver_undelivered("process", report["title"], report, AT)
                 second = tick.deliver_undelivered(
-                    "moex", report["title"], report, AT + timedelta(minutes=20))
+                    "fictional-thread", report["title"], report,
+                    AT + timedelta(minutes=20))
         self.assertEqual(first[0]["action"], "send")
         self.assertEqual(second, [])
         self.assertEqual(send.call_count, 1)
@@ -586,7 +587,8 @@ class HeldDocumentDoor(unittest.TestCase):
                     mock.patch.object(tick, "send_mail", return_value="gmail-batch") as send:
                 receipt = tick.deliver_undelivered("process", report["title"], report, AT)
                 repeat = tick.deliver_undelivered(
-                    "moex", report["title"], report, AT + timedelta(minutes=20))
+                    "fictional-thread", report["title"], report,
+                    AT + timedelta(minutes=20))
                 data = json.loads(ledger.read_text(encoding="utf-8"))
         self.assertEqual(len(receipt), 1)
         self.assertEqual(receipt[0]["action"], "send")
@@ -624,7 +626,8 @@ class HeldDocumentDoor(unittest.TestCase):
                     mock.patch.object(outbound, "LEDGER", ledger), \
                     mock.patch.object(tick, "send_mail", return_value="gmail-second") as send:
                 receipt = tick.deliver_undelivered(
-                    "moex", report["title"], report, AT + timedelta(minutes=20))
+                    "fictional-thread", report["title"], report,
+                    AT + timedelta(minutes=20))
         self.assertEqual(receipt[0]["action"], "send")
         self.assertEqual(send.call_args.kwargs["attachments"], [str(second.resolve())])
         self.assertNotIn(first.name, send.call_args.args[1])
