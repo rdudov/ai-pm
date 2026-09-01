@@ -3289,6 +3289,54 @@ class OneObserver(unittest.TestCase):
         with self.assertRaises(SystemExit):
             state.build(False, only="no-such-thread")
 
+    def test_thread_state_build_projects_a_real_held_document_contract(self):
+        held = a_task(
+            id=1299, dir="1299-held", title="Готовый отчёт", status="blocked",
+            board={"area": "undelivered", "age_seconds": 7200},
+            detail={"handoff": {
+                "missing": ["deliverables/report.html"],
+                "delivered_src": "квитанции нет",
+            }})
+        observed = {
+            "threads": [{"title": "Deep Research", "products": [],
+                         "tasks": [held], "repos": [], "task_count": 1}],
+            "owners_awake": [],
+        }
+        with (mock.patch.object(thread, "load_thread", return_value={"repos": []}),
+              mock.patch.object(thread.observer, "build", return_value=observed),
+              mock.patch.object(thread, "process_inventory", return_value=[]),
+              mock.patch.object(thread.observer, "write_owner_observations")):
+            report = thread.build("deep-research")
+        self.assertEqual(report["undelivered"], [{
+            "id": 1299,
+            "title": "Готовый отчёт",
+            "path": "tasks/1299-held",
+            "age_seconds": 7200,
+            "missing": ["deliverables/report.html"],
+            "src": "квитанции нет",
+        }])
+
+    def test_thread_state_text_prints_the_missing_document_contract(self):
+        report = {
+            "title": "Deep Research", "thread": "deep-research", "task_count": 1,
+            "live_runs": [], "long_lived_processes_observation": {"available": True},
+            "long_lived_processes": [], "needs_attention": [], "ready_to_start": [],
+            "decided_not_done": [], "can_pick_up": [], "waiting_user": [],
+            "owners_awake": [], "repos": [],
+            "undelivered": [{"id": 1299, "title": "Готовый отчёт",
+                             "age_seconds": 7200,
+                             "missing": ["deliverables/report.html"],
+                             "src": "квитанции нет"}],
+        }
+        with (mock.patch.object(sys, "argv", ["thread_state.py", "deep-research",
+                                              "--format", "text"]),
+              mock.patch.object(thread, "build", return_value=report),
+              mock.patch("builtins.print") as output):
+            thread.main()
+        self.assertIn(
+            mock.call("      не доставлено: deliverables/report.html; квитанции нет"),
+            output.call_args_list)
+
 
 class DoneButNeverShown(unittest.TestCase):
     """Part 3 of task 817: finished work whose result nobody was shown.
@@ -3528,6 +3576,21 @@ class DoneButNeverShown(unittest.TestCase):
         box.mkdir()
         (box / "manifest.json").write_text("[]")
         self.assertIsNone(state.handoff(self.task))
+
+    def test_manifest_does_not_hide_markdown_delivery_debt_from_the_board(self):
+        box = self.task / "deliverables"
+        box.mkdir()
+        for name in ("instruction.md", "reader.html", "saved-mail.html", "reader.md"):
+            (box / name).write_text(name)
+        (box / "manifest.json").write_text(json.dumps({"deliverables": [
+            "instruction.md", "reader.html", "saved-mail.html", "reader.md",
+        ]}))
+        self.assertEqual([path.name for path in state.human_documents(self.task)],
+                         ["instruction.md", "reader.html", "reader.md", "saved-mail.html"])
+        self.assertEqual(state.handoff(self.task)["missing"], [
+            "deliverables/instruction.md", "deliverables/reader.html",
+            "deliverables/reader.md", "deliverables/saved-mail.html",
+        ])
 
     def test_internal_conclusions_and_review_handoffs_are_not_user_documents(self):
         box = self.task / "deliverables"

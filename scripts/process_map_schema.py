@@ -157,7 +157,7 @@ BOARD_AREAS = (
     "running",        # a process is alive right now
     "stuck",          # a dead run under a living label, a kill, a failed gate
     "decision_unmet", # a decision was recorded and nothing observed it carried out
-    "undelivered",    # finished, a document exists, nothing observed it delivered
+    "undelivered",    # a document is ready, nothing observed it delivered
     "product_owner",  # our own open question: the product owner owes the answer
     "ready_to_start", # a condition was written down, and it has since been met
     "pickup",         # nothing running, nothing observably holding it: start it
@@ -172,7 +172,7 @@ BOARD_AREA_RU = {
     "running": "В работе сейчас",
     "stuck": "Затор",
     "decision_unmet": "Решено, но не исполнено",
-    "undelivered": "Сделано, но не доставлено",
+    "undelivered": "Документ готов, но не доставлен",
     "product_owner": "Решает продакт",
     "ready_to_start": "Готово к запуску",
     "pickup": "Можно подхватить",
@@ -219,9 +219,9 @@ AREAS_WITHOUT_TASKS = ("plan",)
 # answer observed since, neither a letter of the user in the same thread nor a
 # decision written into the line.
 #
-# `undelivered` is Part 3, and it exists because a task can be finished and its
-# result still never seen: 783 left a 441 KB report in `deliverables/` and sent
-# two receipts, both about the life of the run.
+# `undelivered` is Part 3, and it exists because a task can have a ready result
+# that was never seen, even while the task remains blocked. Task 783 left a
+# 441 KB report in `deliverables/` and sent two receipts, both about the run.
 OWED_BY = ("user", "product")
 
 # One open question, wherever it was written down. `asked_src` is required of a

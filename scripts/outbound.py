@@ -58,6 +58,17 @@ def remember_delivery(entry: dict, *, event_id: str, subject: str, body: str,
     }
 
 
+def remember_event_aliases(entry: dict, event_ids: list[str], *,
+                           kind: str, now: datetime,
+                           message_id: str | None) -> None:
+    """Bind every exact file event in one batch to its single Gmail receipt."""
+    delivered = entry.setdefault("delivered_events", {})
+    for event_id in event_ids:
+        delivered[event_id] = {
+            "at": now.isoformat(), "kind": kind, "message_id": message_id,
+        }
+
+
 def last_of_kind(entry: dict, kind: str) -> datetime | None:
     stamps = []
     for letter in entry.get("letters", []):
