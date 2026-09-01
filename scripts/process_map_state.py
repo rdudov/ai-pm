@@ -814,8 +814,61 @@ def internal_document(task_dir: Path, path: Path) -> bool:
         r"(?:^|[-_])review(?:[-_].*)?\.(?:md|html)$", name, re.I))
 
 
+def registered_human_documents(task_dir: Path) -> list[Path] | None:
+    """The single reader document declared by an ordered task manifest.
+
+    A manifest registers every output, including instructions, programs and
+    material preserved for analysis.  It does not make every output a reader
+    document.  The installation's user contract supplies the missing narrow
+    fact: a delivered document is HTML and there is exactly one.  Stable
+    manifest order decides between several HTML outputs without guessing from
+    words in their names.  Older structured entries may declare text/html
+    explicitly even when their stored suffix is not .html.
+
+    ``None`` means that this older task has no usable manifest and needs the
+    legacy fallback.  An existing valid manifest with no HTML returns an empty
+    list: its other registered outputs do not create document debt.
+    """
+    manifest_path = task_dir / "deliverables" / "manifest.json"
+    if not manifest_path.is_file():
+        return None
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return None
+    if isinstance(manifest, dict):
+        entries = manifest.get("deliverables")
+    elif isinstance(manifest, list):
+        entries = manifest
+    else:
+        entries = None
+    if not isinstance(entries, list):
+        return None
+    box = manifest_path.parent
+    for entry in entries:
+        media_type = None
+        if isinstance(entry, str):
+            name = entry
+        elif isinstance(entry, dict):
+            name = entry.get("path")
+            media_type = entry.get("media_type")
+        else:
+            continue
+        if not isinstance(name, str) or Path(name).name != name:
+            continue
+        is_html = (media_type == "text/html" if isinstance(media_type, str)
+                   else Path(name).suffix.casefold() == ".html")
+        path = box / name
+        if is_html and path.is_file():
+            return [path]
+    return []
+
+
 def human_documents(task_dir: Path) -> list[Path]:
-    """Files this task made for the user, excluding internal run/review records."""
+    """Files this task made for the user, with a manifest-owned single HTML."""
+    registered = registered_human_documents(task_dir)
+    if registered is not None:
+        return registered
     found: list[Path] = []
     box = task_dir / "deliverables"
     if box.is_dir():
@@ -841,10 +894,9 @@ def human_documents(task_dir: Path) -> list[Path]:
 def human_document(task_dir: Path) -> dict | None:
     """A user-facing file this task made, by name and size and nothing else.
 
-    Two places, both named by the task: anything in `deliverables/`, and an
-    `*.html` at the top of the task directory — the shape a report has when a
-    run wrote it straight into its own directory. Internal conclusions and
-    review hand-offs are deliberately absent: they stay inside the work loop.
+    A current manifest owns one ordered HTML choice. Older tasks without a
+    usable manifest retain the file fallback so historical board state does not
+    disappear merely because it predates this contract.
     """
     found = human_documents(task_dir)
     if not found:
@@ -856,7 +908,7 @@ def human_document(task_dir: Path) -> dict | None:
         size = None
     return {"name": str(biggest.relative_to(task_dir)), "bytes": size,
             "count": len(found),
-            "src": "пользовательский файл в deliverables/ или *.html в каталоге задачи"}
+            "src": "первый зарегистрированный HTML или старый файловый fallback"}
 
 
 def _json_lines(path: Path) -> list[dict]:

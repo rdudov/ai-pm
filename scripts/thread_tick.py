@@ -80,7 +80,8 @@ import process_map_recorder  # noqa: E402
 import startup_context  # noqa: E402
 import runner_contract  # noqa: E402
 from process_map_schema import run_entrypoint  # noqa: E402
-from process_map_state import RUNNER_SCRIPTS, TERMINAL, tunable  # noqa: E402
+from process_map_state import (RUNNER_SCRIPTS, TERMINAL,  # noqa: E402
+                               registered_human_documents, tunable)
 from process_map_state import THREAD_STATE as STATE_DIR  # noqa: E402
 from thread_state import HOME, REPO, build  # noqa: E402
 
@@ -299,13 +300,13 @@ def overdue_undelivered(report: dict) -> list[dict]:
 
 
 def registered_undelivered(report: dict) -> list[dict]:
-    """Exact registered files the held-document door may attach.
+    """The one registered HTML reader document each held task may attach.
 
     The board decides that a task owes a document. This last mechanical check
-    decides which exact bytes may leave: the file is directly inside
-    `deliverables/`, its basename is registered in `manifest.json`, and it can
-    still be read while its digest is computed. An unregistered draft stays on
-    disk and gets another look next tick.
+    decides which exact bytes may leave. The ordered manifest and the one-HTML
+    user contract make that choice in `process_map_state`; this path only
+    confirms that the chosen file is still missing and readable. It does not
+    infer intent from words in a filename.
     """
     found = []
     for item in overdue_undelivered(report):
@@ -313,66 +314,69 @@ def registered_undelivered(report: dict) -> list[dict]:
         if not isinstance(task_path, str):
             continue
         task_dir = REPO / task_path
-        box = task_dir / "deliverables"
-        try:
-            manifest = json.loads((box / "manifest.json").read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError, ValueError):
-            continue
-        names = manifest.get("deliverables") if isinstance(manifest, dict) else None
-        if not isinstance(names, list):
-            continue
-        registered = {name for name in names
-                      if isinstance(name, str) and Path(name).name == name}
         missing = item.get("missing")
         if not isinstance(missing, list):
             continue
-        for document in missing:
-            relative = Path(document) if isinstance(document, str) else None
-            if (relative is None or len(relative.parts) != 2
-                    or relative.parts[0] != "deliverables"
-                    or relative.name not in registered
-                    or re.search(r"(?:^|[-_])instruction(?:[-_.]|$)",
-                                 relative.name.casefold())
-                    or re.search(r"(?:^|[-_])prompt(?:[-_.]|$)",
-                                 relative.name.casefold())
-                    or relative.suffix.casefold()
-                    in {".patch", ".py", ".sh", ".json", ".jsonl"}):
-                continue
-            path = task_dir / relative
-            digest = hashlib.sha256()
-            try:
-                with path.open("rb") as handle:
-                    for chunk in iter(lambda: handle.read(1 << 20), b""):
-                        digest.update(chunk)
-            except OSError:
-                continue
-            found.append({
-                "task": item.get("id"), "title": item.get("title"),
-                "name": str(relative), "path": str(path.resolve()),
-                "sha256": digest.hexdigest(),
-            })
+        selected = registered_human_documents(task_dir)
+        if not selected or len(selected) != 1:
+            continue
+        path = selected[0]
+        relative = path.relative_to(task_dir)
+        if str(relative) not in missing:
+            continue
+        digest = hashlib.sha256()
+        try:
+            with path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1 << 20), b""):
+                    digest.update(chunk)
+        except OSError:
+            continue
+        found.append({
+            "task": item.get("id"), "title": item.get("title"),
+            "name": str(relative), "path": str(path.resolve()),
+            "sha256": digest.hexdigest(),
+        })
     return found
+
+
+def document_event_id(item: dict) -> str:
+    """Stable identity of one exact task document, independent of direction."""
+    return f"document:{item['task']}:{item['sha256']}"
 
 
 def deliver_undelivered(thread: str, title: str, report: dict,
                         moment: datetime) -> list[dict]:
-    """Attach each overdue registered document through the existing door."""
-    receipts = []
-    for item in registered_undelivered(report):
-        body = (
-            f"Над чем работаем\n\n- Задача {item['task']}: {item['title']}.\n\n"
-            "Готовый документ оставался на диске и ещё не был доставлен.\n\n"
-            f"Документ: {Path(item['name']).name}\n"
-            f"sha256: {item['sha256']}\n\n"
-            "Файл приложен к письму. Дошло, читается?"
-        )
-        receipts.append(deliver(
-            thread, "document",
-            f"Продакт: {title} — готовый документ {Path(item['name']).name}",
-            body, moment, attachments=[item["path"]],
-            event_id=f"document:{item['task']}:{item['sha256']}",
-            selected_by="undelivered_door"))
-    return receipts
+    """Attach all newly owed reader documents in one direction message."""
+    selected = registered_undelivered(report)
+    with outbound.Ledger() as ledger:
+        selected = [item for item in selected if not outbound.event_delivered_anywhere(
+            ledger.data, document_event_id(item))]
+    if not selected:
+        return []
+    event_aliases = [document_event_id(item) for item in selected]
+    if len(event_aliases) == 1:
+        event_id = event_aliases[0]
+    else:
+        digest = hashlib.sha256("\n".join(sorted(event_aliases)).encode("utf-8")).hexdigest()
+        event_id = f"documents:{digest}"
+    listing = "\n".join(
+        f"- Задача {item['task']}: {item['title']}\n"
+        f"  Документ: {Path(item['name']).name}\n"
+        f"  sha256: {item['sha256']}"
+        for item in selected)
+    body = (
+        f"Над чем работаем\n\n{listing}\n\n"
+        "Эти готовые документы оставались на диске и ещё не были доставлены.\n\n"
+        "Файлы приложены к письму. Дошло, читается?"
+    )
+    subject = (f"Продакт: {title} — готовый документ {Path(selected[0]['name']).name}"
+               if len(selected) == 1 else
+               f"Продакт: {title} — готовые документы ({len(selected)})")
+    return [deliver(
+        thread, "document", subject, body, moment,
+        attachments=[item["path"] for item in selected],
+        event_id=event_id, event_aliases=event_aliases,
+        selected_by="undelivered_door")]
 
 
 def repeatable(previous: dict | None, signature: str, now: datetime,
@@ -787,6 +791,7 @@ def deliver(thread: str, kind: str, subject: str, body: str, moment: datetime,
             raw_message: bytes | None = None,
             names_instructions: list[dict] | None = None,
             event_id: str | None = None,
+            event_aliases: list[str] | None = None,
             selected_by: str = "delivery_door") -> dict:
     """Send one already-routed Gmail message and receipt its exact event."""
     if (kind == "reply") != bool(reply_to_message_id):
@@ -805,6 +810,12 @@ def deliver(thread: str, kind: str, subject: str, body: str, moment: datetime,
     with outbound.Ledger() as ledger:
         entry = ledger.thread(thread)
         duplicate = outbound.event_delivered_anywhere(ledger.data, event_id)
+        if event_aliases and any(outbound.event_delivered_anywhere(ledger.data, alias)
+                                 for alias in event_aliases):
+            # A concurrent direction may have won after the batch was built.
+            # Drop the whole attempt rather than repeat one file; any remaining
+            # file is selected alone on the next tick.
+            duplicate = True
         if names_instructions and not outbound.unnamed_instructions(entry, names_instructions):
             duplicate = True
         action = "drop" if duplicate else "send"
@@ -827,6 +838,9 @@ def deliver(thread: str, kind: str, subject: str, body: str, moment: datetime,
                 outbound.remember_delivery(
                     entry, event_id=event_id, subject=subject, body=body,
                     kind=kind, now=moment, message_id=message_id)
+                outbound.remember_event_aliases(
+                    entry, [alias for alias in event_aliases or [] if alias != event_id],
+                    kind=kind, now=moment, message_id=message_id)
             if delivered and names_instructions:
                 outbound.remember_instructions(entry, names_instructions, moment)
         record = {"at": moment.isoformat(), "thread": thread, "kind": kind,
@@ -837,6 +851,8 @@ def deliver(thread: str, kind: str, subject: str, body: str, moment: datetime,
                   "reply_to_message_id": reply_to_message_id,
                   "decision_owner": selected_by,
                   "composer_selected": selected_by == "composer"}
+        if event_aliases:
+            record["event_aliases"] = event_aliases
         ledger.record(record)
     return {**record, "src": "state/outbound.json — успешные event_id; "
             "state/outbound-journal.jsonl — все попытки доставки подряд"}

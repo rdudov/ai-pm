@@ -531,24 +531,29 @@ class HeldDocumentDoor(unittest.TestCase):
                 second = tick.deliver_undelivered(
                     "moex", report["title"], report, AT + timedelta(minutes=20))
         self.assertEqual(first[0]["action"], "send")
-        self.assertEqual(second[0]["action"], "drop")
+        self.assertEqual(second, [])
         self.assertEqual(send.call_count, 1)
 
-    def test_only_registered_missing_human_documents_leave(self):
+    def test_first_registered_html_is_the_one_user_document(self):
         with tempfile.TemporaryDirectory() as home:
             report, document, _digest = self.report(home)
             box = document.parent
             instruction = box / "a100-instruction-ru.md"
             patch = box / "candidate.patch"
-            already_sent = box / "old-report.html"
+            saved_mail = box / "saved-mail.html"
+            markdown_twin = box / "fanera.md"
             instruction.write_text("run\n", encoding="utf-8")
             patch.write_text("diff\n", encoding="utf-8")
-            already_sent.write_text("old\n", encoding="utf-8")
+            saved_mail.write_text("<html>mail already received</html>\n", encoding="utf-8")
+            markdown_twin.write_text("готовый ответ\n", encoding="utf-8")
             (box / "manifest.json").write_text(json.dumps({"deliverables": [
-                document.name, instruction.name, patch.name, already_sent.name,
+                instruction.name, document.name, saved_mail.name,
+                markdown_twin.name, patch.name,
             ]}), encoding="utf-8")
             report["undelivered"][0]["missing"] = [
                 f"deliverables/{document.name}",
+                f"deliverables/{saved_mail.name}",
+                f"deliverables/{markdown_twin.name}",
                 f"deliverables/{instruction.name}",
                 f"deliverables/{patch.name}",
             ]
@@ -556,6 +561,75 @@ class HeldDocumentDoor(unittest.TestCase):
                 selected = tick.registered_undelivered(report)
         self.assertEqual([item["name"] for item in selected],
                          ["deliverables/fanera.html"])
+
+    def test_multiple_tasks_leave_in_one_direction_letter(self):
+        with tempfile.TemporaryDirectory() as home:
+            report, first, first_digest = self.report(home)
+            second_task = Path(home) / "tasks" / "1299-second"
+            second_box = second_task / "deliverables"
+            second_box.mkdir(parents=True)
+            second = second_box / "second.html"
+            second.write_text("<html>second</html>\n", encoding="utf-8")
+            (second_box / "manifest.json").write_text(json.dumps({
+                "deliverables": ["second.html", "second.md"],
+            }), encoding="utf-8")
+            second_digest = hashlib.sha256(second.read_bytes()).hexdigest()
+            report["undelivered"].append({
+                "id": 1299, "title": "Второй отчёт",
+                "path": "tasks/1299-second",
+                "age_seconds": tick.UNDELIVERED_SECONDS + 1,
+                "missing": ["deliverables/second.html", "deliverables/second.md"],
+                "src": "квитанции нет",
+            })
+            ledger = Path(home) / "outbound.json"
+            with mock.patch.object(tick, "REPO", Path(home)), \
+                    mock.patch.object(outbound, "LEDGER", ledger), \
+                    mock.patch.object(tick, "send_mail", return_value="gmail-batch") as send:
+                receipt = tick.deliver_undelivered("process", report["title"], report, AT)
+                repeat = tick.deliver_undelivered(
+                    "moex", report["title"], report, AT + timedelta(minutes=20))
+                data = json.loads(ledger.read_text(encoding="utf-8"))
+        self.assertEqual(len(receipt), 1)
+        self.assertEqual(receipt[0]["action"], "send")
+        self.assertEqual(repeat, [])
+        self.assertEqual(send.call_count, 1)
+        self.assertEqual(send.call_args.kwargs["attachments"],
+                         [str(first.resolve()), str(second.resolve())])
+        self.assertIn(first.name, send.call_args.args[1])
+        self.assertIn(second.name, send.call_args.args[1])
+        delivered = data["threads"]["process"]["delivered_events"]
+        self.assertIn(f"document:1316:{first_digest}", delivered)
+        self.assertIn(f"document:1299:{second_digest}", delivered)
+
+    def test_a_partial_prior_batch_sends_only_the_still_missing_file(self):
+        with tempfile.TemporaryDirectory() as home:
+            report, first, first_digest = self.report(home)
+            second_task = Path(home) / "tasks" / "1299-second"
+            second_box = second_task / "deliverables"
+            second_box.mkdir(parents=True)
+            second = second_box / "second.html"
+            second.write_text("<html>second</html>\n", encoding="utf-8")
+            (second_box / "manifest.json").write_text(
+                json.dumps({"deliverables": [second.name]}), encoding="utf-8")
+            report["undelivered"].append({
+                "id": 1299, "title": "Второй отчёт", "path": "tasks/1299-second",
+                "age_seconds": tick.UNDELIVERED_SECONDS + 1,
+                "missing": ["deliverables/second.html"], "src": "квитанции нет",
+            })
+            ledger = Path(home) / "outbound.json"
+            with outbound.Ledger(ledger) as state:
+                outbound.remember_event_aliases(
+                    state.thread("process"), [f"document:1316:{first_digest}"],
+                    kind="document", now=AT, message_id="gmail-first")
+            with mock.patch.object(tick, "REPO", Path(home)), \
+                    mock.patch.object(outbound, "LEDGER", ledger), \
+                    mock.patch.object(tick, "send_mail", return_value="gmail-second") as send:
+                receipt = tick.deliver_undelivered(
+                    "moex", report["title"], report, AT + timedelta(minutes=20))
+        self.assertEqual(receipt[0]["action"], "send")
+        self.assertEqual(send.call_args.kwargs["attachments"], [str(second.resolve())])
+        self.assertNotIn(first.name, send.call_args.args[1])
+        self.assertIn(second.name, send.call_args.args[1])
 
     def test_an_unregistered_draft_does_not_leave(self):
         with tempfile.TemporaryDirectory() as home:
