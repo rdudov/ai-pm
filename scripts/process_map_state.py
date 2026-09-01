@@ -404,6 +404,7 @@ def gates(task_dir: Path) -> list[dict]:
 def run_state(task_dir: Path) -> dict:
     status = read_json(task_dir / "status.json")
     runner = read_json(task_dir / ".runner" / "runner.json")
+    repo, repo_unreadable = subject_repo(runner)
     pid = runner.get("pid") or status.get("pid")
     alive, alive_src = run_alive(runner)
 
@@ -438,25 +439,51 @@ def run_state(task_dir: Path) -> dict:
         # step and says so in writing; nothing used to read it. See `refusal`.
         "refusal": refusal.get("kind") if isinstance(refusal, dict) else None,
         "refusal_summary": (refusal.get("summary") or refusal.get("reason")) if isinstance(refusal, dict) else None,
-        "repo": subject_repo(runner),
+        "repo": repo,
+        # Что в записи запуска прочитать не удалось. Пусто у всех, кроме задачи,
+        # чей журнал запуска непригоден, — и у неё это единственный способ
+        # сказать человеку, почему её репозиторий не наблюдается.
+        "repo_unreadable": repo_unreadable,
     }
 
 
-def subject_repo(runner: dict) -> str | None:
-    """The repository this task's run was pointed at, as its own record has it.
+def subject_repo(runner: dict) -> tuple[str | None, str | None]:
+    """The repository this task's run was pointed at, and what could not be read.
 
     `--repo` of the recorded command is what the runner was actually told, and
     `access_grant.granted_directories` is what it was actually allowed to write.
     Both are observations of the same launch, so the command comes first and the
     grant is the fallback; nothing is derived from the title or the project.
+
+    A path is a string, and this reader now keeps that promise instead of only
+    declaring it. The launch of 1365 wrote `--repo` as
+    `['/opt/projects/example-engine']`, a list; the value travelled into
+    `busy_repository_map` and `queue_reason` as a dictionary key and took the
+    whole direction down with `TypeError: unhashable type: 'list'` — one
+    unusable run record, and the product owner saw no board, no tick and no
+    letter for the direction that mattered most. A value that is not a path
+    therefore names no repository, exactly as a command that names none: the
+    grant is consulted the same way it always was.
+
+    The second answer is why nothing was read, and it exists because silence
+    here is the wrong answer: an unusable record is a fact about this task the
+    person is owed, not a gap to hide. It is carried by `run_state`, reported by
+    `jam_reason`, and stops there — every other task of the direction is counted
+    as before.
     """
+    unreadable = None
     command = runner.get("command") or []
     if "--repo" in command:
         index = command.index("--repo") + 1
-        if index < len(command):
-            return command[index]
+        value = command[index] if index < len(command) else None
+        if isinstance(value, str):
+            return value, None
+        unreadable = ("запись запуска нечитаема: за --repo в записанной команде "
+                      + (f"стоит {type(value).__name__}, а не путь" if value is not None
+                         else "ничего не стоит"))
     granted = (runner.get("access_grant") or {}).get("granted_directories") or []
-    return granted[0] if granted else None
+    first = granted[0] if granted else None
+    return (first if isinstance(first, str) else None), unreadable
 
 
 # Files whose movement says nothing about the work: the runner's own log grows
@@ -1374,6 +1401,12 @@ def jam_reason(status_detail: str | None, run: dict, verdicts: list[dict],
     if run.get("alive_src") and not run.get("alive"):
         # Unobservable is not dead, and the plate has to say which one it is.
         return run["alive_src"], "сверка пространства имён PID с .runner/runner.json"
+    if run.get("repo_unreadable"):
+        # Последним из всех: непригодная запись запуска — это не то, за чем
+        # задача стоит, а то, чего о ней не удалось прочитать. Более точная
+        # причина, если она есть, идёт вперёд; но молча пропустить такую задачу
+        # нельзя — ровно из-за молчания одна запись погасила целое направление.
+        return run["repo_unreadable"], "записанная команда в .runner/runner.json"
     return None, None
 
 

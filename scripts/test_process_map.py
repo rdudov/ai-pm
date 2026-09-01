@@ -74,7 +74,8 @@ def a_task(**over) -> dict:
                     "workflow": None, "sandbox": None,
                     "stop_reason": None, "exit_code": None, "pid": None,
                     "alive": False, "alive_src": None, "progress": None,
-                    "refusal": None, "refusal_summary": None, "repo": None},
+                    "refusal": None, "refusal_summary": None, "repo": None,
+                    "repo_unreadable": None},
             "detail": {"summary": None, "review": None, "delivery": None, "files": [],
                        "moved": None, "moved_age_seconds": None, "moved_src": None,
                        "handoff": None},
@@ -2090,6 +2091,108 @@ class WhatCanBePickedUp(unittest.TestCase):
 def queue_why(task, repo, busy):
     """`queue_reason` with the run reduced to the one field it reads."""
     return state.queue_reason(task, {"repo": repo}, busy)
+
+
+class TheObserverSurvivesAnUnusableRunRecord(unittest.TestCase):
+    """Одна непригодная запись запуска не имеет права гасить целое направление.
+
+    2026-09-01 в 21:00 UTC запуск задачи 1365 записал в свой
+    `.runner/runner.json` значение `--repo` списком, а не строкой. Список доехал
+    ключом словаря в `busy_repository_map` и `queue_reason`, и весь снимок
+    направления упал с `TypeError: unhashable type: 'list'`: продакт не видел
+    доску, тик `product-thread@<направление>.service` умирал, письмо о
+    задержанном документе не уходило, и нашла это не наблюдение, а независимая
+    проверка соседней задачи.
+
+    Поэтому проверяется сборка снимка целиком, а не один читатель поля: падало
+    не чтение, а всё направление, и защищать надо именно его.
+    """
+
+    HEALTHY = "/opt/projects/example-engine"
+    # Ровно то, что записал запускатель задачи 1365: путь, завёрнутый в список.
+    UNUSABLE = ["/opt/projects/example-engine"]
+
+    def setUp(self):
+        self.home = tempfile.TemporaryDirectory()
+        self.addCleanup(self.home.cleanup)
+        self.tasks = Path(self.home.name)
+
+    def a_task(self, number: int, status: str, repo) -> dict:
+        """Каталожная запись задачи и её каталог на диске с записью запуска."""
+        directory = self.tasks / "tasks" / f"{number}-example"
+        (directory / ".runner").mkdir(parents=True)
+        (directory / "task.md").write_text(
+            f'---\nid: {number}\nstatus: "{status}"\n---\n'
+            "# Пример\n\n## Summary\nПример.\n", encoding="utf-8")
+        (directory / "status.json").write_text(
+            json.dumps({"state": "failed", "runner": "codex"}), encoding="utf-8")
+        (directory / ".runner" / "runner.json").write_text(json.dumps({
+            "runner": "codex",
+            "command": ["python", "adapter.py", str(directory), "--repo", repo],
+            "access_grant": {"granted_directories": []},
+        }), encoding="utf-8")
+        return {"id": number, "title": f"Задача {number}", "status": status,
+                "path": f"tasks/{number}-example", "projects": ["example-product"]}
+
+    def snapshot(self, catalogue: list[dict]) -> dict:
+        config = {"threads": {"example": {
+            "title": "Пример", "products": [], "projects": ["example-product"],
+            "repos": []}}}
+        content = self.tasks / "content"
+        (content / "products").mkdir(parents=True, exist_ok=True)
+        with (mock.patch.object(state, "REPO", self.tasks),
+              mock.patch.object(product_memory, "ROOT", content),
+              mock.patch.object(state, "PRODUCTS", content / "products"),
+              mock.patch.object(state, "load_config", return_value=config),
+              mock.patch.object(state, "query_tasks", return_value=catalogue),
+              mock.patch.object(state, "mailbox", return_value={
+                  "threads": {}, "replies": {}, "sent_at": {}, "sent_known": False}),
+              mock.patch.object(state, "attachment_observations", return_value={})):
+            # План читается настоящим кодом из пустого долговечного корня: доска
+            # без действующей редакции — рабочее состояние, и подделывать его
+            # чем-то своим значило бы проверять снимок, которого не бывает.
+            return state.build(False, only="example")
+
+    def test_the_direction_is_still_observed_around_the_broken_record(self):
+        broken = self.a_task(1365, "in_progress", self.UNUSABLE)
+        healthy = self.a_task(1364, "planned", self.HEALTHY)
+        threads = self.snapshot([broken, healthy])["threads"]
+        tasks = {task["id"]: task for task in threads[0]["tasks"]}
+        self.assertEqual(threads[0]["task_count"], 2)
+        # Остальные задачи направления считаются как раньше.
+        self.assertEqual(tasks[1364]["run"]["repo"], self.HEALTHY)
+        self.assertIsNotNone(tasks[1364]["board"]["area"])
+
+    def test_the_unusable_value_becomes_nothing_rather_than_a_list(self):
+        broken = self.a_task(1365, "in_progress", self.UNUSABLE)
+        tasks = self.snapshot([broken])["threads"][0]["tasks"]
+        # Читатель `--repo` отдаёт строку или ничего. Ничем не наблюдаемый
+        # репозиторий не держит и не занимает: этого достаточно, чтобы словарь
+        # занятых репозиториев остался словарём.
+        self.assertIsNone(tasks[0]["run"]["repo"])
+
+    def test_the_task_is_named_with_an_honest_reason_rather_than_skipped(self):
+        broken = self.a_task(1365, "in_progress", self.UNUSABLE)
+        tasks = self.snapshot([broken])["threads"][0]["tasks"]
+        why = tasks[0]["board"]["why"]
+        self.assertIn("запись запуска нечитаема", why)
+        self.assertIn("list", why)
+        self.assertIn("runner.json", tasks[0]["board"]["why_src"])
+
+    def test_the_wake_up_of_the_direction_shows_the_reason_too(self):
+        # Пробуждение читает состояние направления через `thread_state.py`, а не
+        # с доски: непригодная запись обязана доехать и туда, иначе задача
+        # выглядит обычной, а наблюдение по ней молча неполно.
+        broken = self.a_task(1365, "in_progress", self.UNUSABLE)
+        with (mock.patch.object(thread, "load_thread", return_value={"repos": []}),
+              mock.patch.object(thread.observer, "build",
+                                return_value=self.snapshot([broken])),
+              mock.patch.object(thread, "process_inventory", return_value=[]),
+              mock.patch.object(thread.observer, "write_owner_observations")):
+            report = thread.build("example")
+        attention = {item["id"]: item for item in report["needs_attention"]}
+        self.assertIn("запись запуска нечитаема",
+                      attention[1365]["run"]["repo_unreadable"])
 
 
 # The real sentence 831 carried, and the field it should have carried instead.

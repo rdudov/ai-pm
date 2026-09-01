@@ -146,6 +146,11 @@ def run_projection(task: dict) -> dict | None:
         "work_outside_owner": "work_outside_owner" in task["flags"],
         "moved_at": task["detail"]["moved"],
         "moved_src": task["detail"]["moved_src"],
+        # Что в записи запуска этой задачи прочитать не удалось. Пробуждение
+        # читает состояние направления отсюда, а не с доски, поэтому непригодная
+        # запись обязана доехать именно сюда: иначе задача выглядит обычной, а
+        # наблюдение по ней молча неполно.
+        "repo_unreadable": run["repo_unreadable"],
     }
 
 
@@ -351,6 +356,9 @@ def main() -> None:
     for item in report["needs_attention"]:
         mark = " РАБОТА ШЛА ВНЕ УМЕРШЕГО ВЛАДЕЛЬЦА" if (item["run"] or {}).get("work_outside_owner") else ""
         print(f"  {item['id']} {item['status']}{mark} — {item['title'][:70]}")
+        unreadable = (item["run"] or {}).get("repo_unreadable")
+        if unreadable:
+            print(f"      {unreadable}")
     print(f"готово к запуску: {len(report['ready_to_start'])}")
     for item in report["ready_to_start"]:
         print(f"  {item['id']} — {item['title'][:70]}")
