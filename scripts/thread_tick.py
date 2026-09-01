@@ -323,25 +323,34 @@ def registered_undelivered(report: dict) -> list[dict]:
             continue
         registered = {name for name in names
                       if isinstance(name, str) and Path(name).name == name}
-        document = item.get("document")
-        relative = Path(document) if isinstance(document, str) else None
-        if (relative is None or len(relative.parts) != 2
-                or relative.parts[0] != "deliverables"
-                or relative.name not in registered):
+        missing = item.get("missing")
+        if not isinstance(missing, list):
             continue
-        path = task_dir / relative
-        digest = hashlib.sha256()
-        try:
-            with path.open("rb") as handle:
-                for chunk in iter(lambda: handle.read(1 << 20), b""):
-                    digest.update(chunk)
-        except OSError:
-            continue
-        found.append({
-            "task": item.get("id"), "title": item.get("title"),
-            "name": str(relative), "path": str(path.resolve()),
-            "sha256": digest.hexdigest(),
-        })
+        for document in missing:
+            relative = Path(document) if isinstance(document, str) else None
+            if (relative is None or len(relative.parts) != 2
+                    or relative.parts[0] != "deliverables"
+                    or relative.name not in registered
+                    or re.search(r"(?:^|[-_])instruction(?:[-_.]|$)",
+                                 relative.name.casefold())
+                    or re.search(r"(?:^|[-_])prompt(?:[-_.]|$)",
+                                 relative.name.casefold())
+                    or relative.suffix.casefold()
+                    in {".patch", ".py", ".sh", ".json", ".jsonl"}):
+                continue
+            path = task_dir / relative
+            digest = hashlib.sha256()
+            try:
+                with path.open("rb") as handle:
+                    for chunk in iter(lambda: handle.read(1 << 20), b""):
+                        digest.update(chunk)
+            except OSError:
+                continue
+            found.append({
+                "task": item.get("id"), "title": item.get("title"),
+                "name": str(relative), "path": str(path.resolve()),
+                "sha256": digest.hexdigest(),
+            })
     return found
 
 
@@ -361,7 +370,7 @@ def deliver_undelivered(thread: str, title: str, report: dict,
             thread, "document",
             f"Продакт: {title} — готовый документ {Path(item['name']).name}",
             body, moment, attachments=[item["path"]],
-            event_id=f"document:{thread}:{item['task']}:{item['sha256']}",
+            event_id=f"document:{item['task']}:{item['sha256']}",
             selected_by="undelivered_door"))
     return receipts
 

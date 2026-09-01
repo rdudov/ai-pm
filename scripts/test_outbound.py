@@ -498,7 +498,7 @@ class HeldDocumentDoor(unittest.TestCase):
                 "id": 1316, "title": "Ответ про фанеру",
                 "path": "tasks/1316-ready-document",
                 "age_seconds": tick.UNDELIVERED_SECONDS + 1,
-                "document": "deliverables/fanera.html",
+                "missing": ["deliverables/fanera.html"],
                 "src": "квитанции нет",
             }],
         }, document, digest)
@@ -515,7 +515,7 @@ class HeldDocumentDoor(unittest.TestCase):
                 composed_message = tick.parse_composed_message("SILENT")
         self.assertIsNone(composed_message)
         self.assertEqual(receipts[0]["action"], "send")
-        self.assertEqual(receipts[0]["event_id"], f"document:process:1316:{digest}")
+        self.assertEqual(receipts[0]["event_id"], f"document:1316:{digest}")
         self.assertIn(document.name, send.call_args.args[1])
         self.assertIn(digest, send.call_args.args[1])
         self.assertEqual(send.call_args.kwargs["attachments"], [str(document.resolve())])
@@ -529,10 +529,33 @@ class HeldDocumentDoor(unittest.TestCase):
                     mock.patch.object(tick, "send_mail", return_value="gmail-document") as send:
                 first = tick.deliver_undelivered("process", report["title"], report, AT)
                 second = tick.deliver_undelivered(
-                    "process", report["title"], report, AT + timedelta(minutes=20))
+                    "moex", report["title"], report, AT + timedelta(minutes=20))
         self.assertEqual(first[0]["action"], "send")
         self.assertEqual(second[0]["action"], "drop")
         self.assertEqual(send.call_count, 1)
+
+    def test_only_registered_missing_human_documents_leave(self):
+        with tempfile.TemporaryDirectory() as home:
+            report, document, _digest = self.report(home)
+            box = document.parent
+            instruction = box / "a100-instruction-ru.md"
+            patch = box / "candidate.patch"
+            already_sent = box / "old-report.html"
+            instruction.write_text("run\n", encoding="utf-8")
+            patch.write_text("diff\n", encoding="utf-8")
+            already_sent.write_text("old\n", encoding="utf-8")
+            (box / "manifest.json").write_text(json.dumps({"deliverables": [
+                document.name, instruction.name, patch.name, already_sent.name,
+            ]}), encoding="utf-8")
+            report["undelivered"][0]["missing"] = [
+                f"deliverables/{document.name}",
+                f"deliverables/{instruction.name}",
+                f"deliverables/{patch.name}",
+            ]
+            with mock.patch.object(tick, "REPO", Path(home)):
+                selected = tick.registered_undelivered(report)
+        self.assertEqual([item["name"] for item in selected],
+                         ["deliverables/fanera.html"])
 
     def test_an_unregistered_draft_does_not_leave(self):
         with tempfile.TemporaryDirectory() as home:

@@ -3289,6 +3289,33 @@ class OneObserver(unittest.TestCase):
         with self.assertRaises(SystemExit):
             state.build(False, only="no-such-thread")
 
+    def test_thread_state_build_projects_a_real_held_document_contract(self):
+        held = a_task(
+            id=1299, dir="1299-held", title="Готовый отчёт", status="blocked",
+            board={"area": "undelivered", "age_seconds": 7200},
+            detail={"handoff": {
+                "missing": ["deliverables/report.html"],
+                "delivered_src": "квитанции нет",
+            }})
+        observed = {
+            "threads": [{"title": "Deep Research", "products": [],
+                         "tasks": [held], "repos": [], "task_count": 1}],
+            "owners_awake": [],
+        }
+        with (mock.patch.object(thread, "load_thread", return_value={"repos": []}),
+              mock.patch.object(thread.observer, "build", return_value=observed),
+              mock.patch.object(thread, "process_inventory", return_value=[]),
+              mock.patch.object(thread.observer, "write_owner_observations")):
+            report = thread.build("deep-research")
+        self.assertEqual(report["undelivered"], [{
+            "id": 1299,
+            "title": "Готовый отчёт",
+            "path": "tasks/1299-held",
+            "age_seconds": 7200,
+            "missing": ["deliverables/report.html"],
+            "src": "квитанции нет",
+        }])
+
 
 class DoneButNeverShown(unittest.TestCase):
     """Part 3 of task 817: finished work whose result nobody was shown.

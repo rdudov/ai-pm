@@ -1664,7 +1664,7 @@ const AREA_RULE = {
   product_owner: "наши собственные вопросы: открытые, но пользователю их не задавали, либо он ответил, а решение осталось незаписанным. Решает продакт, а не человек",
   ready_to_start: "у задачи записано машиночитаемое условие запуска — после каких задач и какое рабочее дерево она занимает, — и по наблюдению ничто из названного её больше не держит",
   decision_unmet: "на задаче записано решение продакта, а наблюдения, что оно исполнено, нет: для доставки таким наблюдением служит delivery.md или квитанция с идентификатором сообщения",
-  undelivered: "задача завершена, документ для человека лежит в каталоге задачи, а свидетельства доставки нет: ни delivery.md, ни квитанции о документе — только события жизненного цикла прогона",
+  undelivered: "документ для человека готов и лежит в каталоге задачи, а свидетельства доставки нет: ни delivery.md, ни квитанции о документе — только события жизненного цикла прогона; статус самой задачи может оставаться blocked",
 };
 
 function questionNode(q, areaKey) {
@@ -1903,7 +1903,7 @@ function drawStrip(board) {
        that is the only place it would have been noticed: 783 finished at 16:14
        and its 441 KB report lay on the server for an hour, behind two receipts
        that both spoke about the life of the run. */
-    ["Сделано, но не доставлено", board.undelivered, "undelivered",
+    ["Документ готов, но не доставлен", board.undelivered, "undelivered",
      "", board.undelivered_hidden, false],
   ];
   /* The headline stands first, before the names. It is the question that made
@@ -2397,7 +2397,7 @@ function goalSessionNode(session) {
    самом деле. */
 const AREA_SEEN = {
   running: ["идёт сейчас", "live"], done: ["сделано", "done"],
-  undelivered: ["сделано, но не доставлено", "done"],
+  undelivered: ["документ готов, но не доставлен", "done"],
   stuck: ["затор", "stuck"], waiting_human: ["ждёт решения пользователя", "stuck"],
   queued: ["в очереди", ""], pickup: ["можно подхватить", ""],
   ready_to_start: ["готово к запуску", ""], backlog: ["в бэклоге", ""],
