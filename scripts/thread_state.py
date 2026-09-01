@@ -367,7 +367,7 @@ def main() -> None:
     for item in report["undelivered"][:8]:
         stood = "" if item["age_seconds"] is None else f", стоит {item['age_seconds'] // 60} мин"
         print(f"  {item['id']} — {item['title'][:70]}{stood}")
-        print(f"      документ: {item['document']}; {item['src']}")
+        print(f"      не доставлено: {', '.join(item['missing'])}; {item['src']}")
     print(f"ждёт ответа пользователя: {len(report['waiting_user'])}")
     for item in report["waiting_user"]:
         print(f"  {item['id']} — {item['title'][:70]}")

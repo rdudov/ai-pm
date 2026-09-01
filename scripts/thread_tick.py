@@ -80,8 +80,7 @@ import process_map_recorder  # noqa: E402
 import startup_context  # noqa: E402
 import runner_contract  # noqa: E402
 from process_map_schema import run_entrypoint  # noqa: E402
-from process_map_state import (RUNNER_SCRIPTS, TERMINAL,  # noqa: E402
-                               registered_human_documents, tunable)
+from process_map_state import RUNNER_SCRIPTS, TERMINAL, tunable  # noqa: E402
 from process_map_state import THREAD_STATE as STATE_DIR  # noqa: E402
 from thread_state import HOME, REPO, build  # noqa: E402
 
@@ -300,13 +299,12 @@ def overdue_undelivered(report: dict) -> list[dict]:
 
 
 def registered_undelivered(report: dict) -> list[dict]:
-    """The one registered HTML reader document each held task may attach.
+    """The sole registered HTML the held-document door may attach.
 
     The board decides that a task owes a document. This last mechanical check
-    decides which exact bytes may leave. The ordered manifest and the one-HTML
-    user contract make that choice in `process_map_state`; this path only
-    confirms that the chosen file is still missing and readable. It does not
-    infer intent from words in a filename.
+    decides which exact bytes may leave. One registered HTML is unambiguous; no
+    HTML or several HTML files leave the debt on the board for the product owner
+    to resolve. Manifest position and filename words never choose between them.
     """
     found = []
     for item in overdue_undelivered(report):
@@ -317,10 +315,21 @@ def registered_undelivered(report: dict) -> list[dict]:
         missing = item.get("missing")
         if not isinstance(missing, list):
             continue
-        selected = registered_human_documents(task_dir)
-        if not selected or len(selected) != 1:
+        box = task_dir / "deliverables"
+        try:
+            manifest = json.loads((box / "manifest.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, ValueError):
             continue
-        path = selected[0]
+        names = manifest.get("deliverables") if isinstance(manifest, dict) else None
+        if not isinstance(names, list):
+            continue
+        html = [name for name in names
+                if isinstance(name, str) and Path(name).name == name
+                and Path(name).suffix.casefold() == ".html"
+                and (box / name).is_file()]
+        if len(html) != 1:
+            continue
+        path = box / html[0]
         relative = path.relative_to(task_dir)
         if str(relative) not in missing:
             continue
@@ -437,7 +446,7 @@ def standing_events(report: dict, current: dict, stored: dict,
     held_reminder = stored.get("undelivered_reminder")
     if overdue and repeatable(held_reminder, held_signature, moment):
         events.append(
-            f"«сделано, но не доставлено» стоит дольше {UNDELIVERED_SECONDS // 60} мин: задачи "
+            f"«документ готов, но не доставлен» стоит дольше {UNDELIVERED_SECONDS // 60} мин: задачи "
             + ", ".join(str(item["id"]) for item in overdue))
         held_reminder = {"at": now, "signature": held_signature}
     return events, idle_reminder, held_reminder

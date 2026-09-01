@@ -534,7 +534,7 @@ class HeldDocumentDoor(unittest.TestCase):
         self.assertEqual(second, [])
         self.assertEqual(send.call_count, 1)
 
-    def test_first_registered_html_is_the_one_user_document(self):
+    def test_multiple_registered_html_files_leave_the_choice_to_the_product_owner(self):
         with tempfile.TemporaryDirectory() as home:
             report, document, _digest = self.report(home)
             box = document.parent
@@ -559,8 +559,7 @@ class HeldDocumentDoor(unittest.TestCase):
             ]
             with mock.patch.object(tick, "REPO", Path(home)):
                 selected = tick.registered_undelivered(report)
-        self.assertEqual([item["name"] for item in selected],
-                         ["deliverables/fanera.html"])
+        self.assertEqual(selected, [])
 
     def test_multiple_tasks_leave_in_one_direction_letter(self):
         with tempfile.TemporaryDirectory() as home:
