@@ -19,9 +19,13 @@ cd "$(python3 -c 'import sys; sys.path.insert(0, "scripts"); import product_memo
 Это штатный профиль основного исполнителя: семейство наследуется от продакта,
 обычный workflow и режим записи выбирает runner, а разрешённый Telegram-адрес
 application adapter получает из серверного владельца credentials. Отдельный
-проверяющий запускается одной командой `task_runner.py review TASK
---repo REPO`; нужную другую семью и read-only границу выбирает существующий
-контур ревью.
+проверяющий запускается одной командой `task_runner.py review TASK` без
+`--repo`: репозиторий, другую семью и read-only границу подкоманда берёт из
+допуска автора (`reviews/admissions.jsonl`). Наблюдено 2026-09-02 на задаче
+1389 при движке 6375f5a: `review TASK --repo REPO` отказал словами
+`unrecognized arguments: --repo`, а `review TASK` записал `admitted_review`,
+проверяющего Claude и `sandbox_mode: read-only` на том же репозитории, что у
+автора.
 
 **Автора в режиме записи запускай подкомандой `author`, а не `start`.**
 `start` даёт ребёнку право только на рабочее дерево, и `.git` репозитория
