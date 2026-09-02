@@ -5,16 +5,20 @@ All interactive, timer and mail entrypoints call
 
 - `claude-pm` explicitly selects Claude for its manual interactive session.
 - `codex-pm` explicitly selects Codex for its manual interactive session.
-- Manual and background Claude routes use the same model policy: Opus remains
-  the default; Fable is selected only when the published Opus-specific remainder
-  is below five percent and Fable is not observed exhausted.
+- Manual and background Claude routes use the same model policy: Fable is the
+  product owner's model, and Opus is only its fallback. The user chose this on
+  2026-09-02: the owner mostly reads plans, snapshots and thread state and
+  writes prose, and the expensive Claude window belongs to the executors. Opus
+  is selected only when the provider explicitly reports Fable exhausted. An
+  observation that fails also keeps Fable, so a network or authorization hiccup
+  cannot quietly restore the expensive model.
 - Background and unforced `--entry print` callers keep the shared limit-aware selection:
   the observed shared seven-day Claude remainder is compared with the latest observed
   seven-day Codex remainder. For these unforced routes, an observed exhausted shared
   Claude limit, or observed exhaustion of both Opus and Fable model-scoped routes,
   selects Codex even before that comparison.
 - A missing observation is never turned into a percentage. Without a comparable
-  weekly remainder the router keeps Opus and names which observation is missing;
+  weekly remainder the router keeps Claude and names which observation is missing;
   Claude network/API failures and unknown schemas remain visible. Every selected
   Claude route emits its reason before the engine starts: mail keeps it in its
   existing agent stderr artifact, and the timer forwards that one diagnostic to
@@ -55,4 +59,4 @@ field, the latest Codex budget observation, the live observation time/source,
 authorization-recovery provenance, and a typed authorization/network/schema
 error when observation is unavailable.
 Unavailable observation contains no fabricated remainder and keeps product work
-on visible Opus behavior. `--show-command` shows the selected argv.
+on the visible default model. `--show-command` shows the selected argv.

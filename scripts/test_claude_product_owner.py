@@ -138,9 +138,17 @@ class ProductOwnerModelRouterTests(unittest.TestCase):
             attempted_at="2026-08-24T00:00:00+00:00", observed_at=None,
             authorization_recovery="not_attempted", error=None)
 
-    def test_switches_only_below_five_percent_remaining(self):
-        self.assertEqual(select_model({"seven_day_opus": {"utilization": 95}})[0], "opus")
+    def test_fable_is_the_default_and_opus_only_its_fallback(self):
+        # The user moved the product owner to Fable on 2026-09-02, so a healthy
+        # Opus no longer wins anything: only observed Fable exhaustion does.
+        self.assertEqual(select_model({"seven_day_opus": {"utilization": 1}})[0], "fable")
         self.assertEqual(select_model({"seven_day_opus": {"utilization": 95.1}})[0], "fable")
+        self.assertEqual(
+            select_model({"limits": [
+                {"percent": 100, "scope": {"model": {"display_name": "Fable"}}},
+            ]})[0],
+            "opus",
+        )
 
     def test_reads_new_scoped_opus_limit(self):
         usage = {"limits": [{
@@ -174,11 +182,11 @@ class ProductOwnerModelRouterTests(unittest.TestCase):
                 "scope": {"model": {"display_name": "Fable"}},
             }],
         }
-        self.assertEqual(select_model(usage), ("opus", "no_opus_specific_limit"))
+        self.assertEqual(select_model(usage), ("fable", "fable_remaining=4%"))
         self.assertEqual(shared_limits(usage)[0]["remaining_percent"], 0.0)
 
     def test_malformed_values_are_ignored(self):
-        self.assertEqual(select_model({"seven_day_opus": {"utilization": "96"}})[0], "opus")
+        self.assertEqual(select_model({"seven_day_opus": {"utilization": "96"}})[0], "fable")
         self.assertEqual(select_route({"five_hour": {"utilization": 130}}, None).engine,
                          "claude")
 
@@ -217,15 +225,8 @@ class ProductOwnerModelRouterTests(unittest.TestCase):
             {"seven_day": {"utilization": 90}},
             ["--entry", "interactive"],
         )
-        forced_opus = shown(
+        forced_default = shown(
             {"seven_day": {"utilization": 90}},
-            ["--entry", "interactive", "--force-claude", "--", "probe"],
-        )
-        forced_fable = shown(
-            {
-                "seven_day": {"utilization": 60},
-                "seven_day_opus": {"utilization": 100},
-            },
             ["--entry", "interactive", "--force-claude", "--", "probe"],
         )
         forced_opus_when_fable_exhausted = shown(
@@ -238,10 +239,9 @@ class ProductOwnerModelRouterTests(unittest.TestCase):
         )
 
         self.assertEqual(unforced[0], router.CODEX_BIN)
-        self.assertEqual(forced_opus[0], router.CLAUDE_BIN)
-        self.assertEqual(forced_opus[1:3], ["--model", router.OPUS_MODEL])
-        self.assertTrue(forced_opus[-1].endswith("Первый запрос пользователя: probe"))
-        self.assertEqual(forced_fable[1:3], ["--model", router.FABLE_MODEL])
+        self.assertEqual(forced_default[0], router.CLAUDE_BIN)
+        self.assertEqual(forced_default[1:3], ["--model", router.FABLE_MODEL])
+        self.assertTrue(forced_default[-1].endswith("Первый запрос пользователя: probe"))
         self.assertEqual(
             forced_opus_when_fable_exhausted[1:3],
             ["--model", router.OPUS_MODEL],
@@ -252,7 +252,7 @@ class ProductOwnerModelRouterTests(unittest.TestCase):
             {"seven_day": {"utilization": 18}}, observed_codex(31)
         )
         self.assertEqual(route, Route(
-            "claude", "opus", "weekly_remaining:claude=82%,codex=31%"
+            "claude", "fable", "weekly_remaining:claude=82%,codex=31%"
         ))
 
     def test_missing_remainder_is_visible_and_not_fabricated(self):
@@ -386,10 +386,11 @@ class ProductOwnerModelRouterTests(unittest.TestCase):
         route = select_route(usage, observed_codex(3))
         self.assertEqual((route.engine, route.model), ("claude", "opus"))
 
-    def test_unavailable_or_unknown_usage_keeps_fail_visible_opus(self):
+    def test_unavailable_or_unknown_usage_keeps_fail_visible_default(self):
+        # A failed observation must not quietly restore the expensive model.
         with mock.patch("claude_product_owner.fetch_usage", side_effect=OSError("offline")):
             route, usage, error = inspect_live()
-        self.assertEqual((route.engine, route.model), ("claude", "opus"))
+        self.assertEqual((route.engine, route.model), ("claude", "fable"))
         self.assertIsNone(usage)
         self.assertIn("OSError", error)
 
@@ -443,7 +444,7 @@ class ProductOwnerModelRouterTests(unittest.TestCase):
             side_effect=ValueError("usage response has no recognized quota fields"),
         ):
             observation = inspect_observation()
-        self.assertEqual(observation.route, Route("claude", "opus", "usage_unavailable"))
+        self.assertEqual(observation.route, Route("claude", "fable", "usage_unavailable"))
         self.assertEqual(observation.error["kind"], "schema")
 
     def test_background_engines_have_the_same_owner_cwd_and_access(self):

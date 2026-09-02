@@ -45,7 +45,6 @@ AUTH_REFRESH_LOCK = HOME / "state" / "claude-quota-refresh.lock"
 OPUS_MODEL = "opus"
 FABLE_MODEL = "fable"
 CODEX_MODEL = "gpt-5.6-sol"
-OPUS_REMAINING_THRESHOLD = 5.0
 # `EX_TEMPFAIL` из sysexits.h — «временный отказ; просьбу следует повторить
 # позже». Единственный канал между этим запускателем и тем, кто его позвал, —
 # код возврата, и число здесь стандартное, а не наше: тот, кто следует той же
@@ -233,10 +232,7 @@ def codex_weekly_remaining(codex: dict[str, Any] | None) -> float | None:
     return remaining
 
 
-def select_route(
-    usage: dict[str, Any], codex: dict[str, Any] | None,
-    threshold: float = OPUS_REMAINING_THRESHOLD,
-) -> Route:
+def select_route(usage: dict[str, Any], codex: dict[str, Any] | None) -> Route:
     """Choose the family with the larger observed weekly remainder."""
     exhausted_shared = [item for item in shared_limits(usage) if item["used_percent"] >= 100.0]
     if exhausted_shared:
@@ -252,7 +248,7 @@ def select_route(
     if opus_exhausted and fable_exhausted:
         return Route("codex", CODEX_MODEL, "observed_opus_and_fable_limits_exhausted")
 
-    claude_model = select_model(usage, threshold)[0]
+    claude_model = select_model(usage)[0]
     claude_remaining = claude_weekly_remaining(usage)
     codex_remaining = codex_weekly_remaining(codex)
     if claude_remaining is None:
@@ -270,19 +266,21 @@ def select_route(
     return Route("claude", claude_model, comparison)
 
 
-def select_model(
-    usage: dict[str, Any], threshold: float = OPUS_REMAINING_THRESHOLD
-) -> tuple[str, str]:
-    """Choose a usable Claude model from observed model-scoped limits."""
-    percentages = opus_used_percentages(usage)
-    if not percentages:
-        return OPUS_MODEL, "no_opus_specific_limit"
-    remaining = 100.0 - max(percentages)
+def select_model(usage: dict[str, Any]) -> tuple[str, str]:
+    """Choose a usable Claude model from observed model-scoped limits.
+
+    Fable is the product owner's model by the user's decision of 2026-09-02:
+    the owner reads and writes far more than it reasons, and the expensive
+    window belongs to the executors. Opus is the fallback and nothing else —
+    it is selected only when the provider explicitly reports Fable exhausted.
+    """
     fable = model_used_percentages(usage, "fable")
-    fable_exhausted = bool(fable) and max(fable) >= 100.0
-    if remaining < threshold and not fable_exhausted:
-        return FABLE_MODEL, f"opus_remaining={remaining:g}%"
-    return OPUS_MODEL, f"opus_remaining={remaining:g}%"
+    if not fable:
+        return FABLE_MODEL, "no_fable_specific_limit"
+    used = max(fable)
+    if used >= 100.0:
+        return OPUS_MODEL, f"fable_exhausted:fable_used={used:g}%"
+    return FABLE_MODEL, f"fable_remaining={100.0 - used:g}%"
 
 
 def fetch_usage(
@@ -518,7 +516,9 @@ def inspect_observation() -> UsageObservation:
         RuntimeError,
     ) as exc:
         return UsageObservation(
-            route=Route("claude", OPUS_MODEL, "usage_unavailable"),
+            # Fable is the default the user chose, so a failed observation
+            # must not quietly restore the expensive model behind their back.
+            route=Route("claude", FABLE_MODEL, "usage_unavailable"),
             usage=None,
             codex_budget=codex,
             codex_error=codex_error,
