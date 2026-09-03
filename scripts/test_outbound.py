@@ -193,6 +193,26 @@ class DirectDelivery(unittest.TestCase):
         self.assertTrue(record["composer_selected"])
         self.assertEqual(record["decision_owner"], "composer")
 
+    def test_every_successful_composer_attachment_is_remembered_by_its_bytes(self):
+        with tempfile.TemporaryDirectory() as home:
+            attachments = [Path(home) / "report.html", Path(home) / "appendix.html"]
+            attachments[0].write_text("<html>ready</html>\n", encoding="utf-8")
+            attachments[1].write_text("<html>appendix</html>\n", encoding="utf-8")
+            digests = [hashlib.sha256(path.read_bytes()).hexdigest()
+                       for path in attachments]
+            ledger = Path(home) / "outbound.json"
+            with mock.patch.object(outbound, "LEDGER", ledger), \
+                    mock.patch.object(tick, "send_mail", return_value="gmail-report"):
+                record = tick.deliver(
+                    "process", "report", "Продакт: результат", "Готово", AT,
+                    attachments=[str(path) for path in attachments],
+                    event_id="report:task-1394:attachment", selected_by="composer")
+            data = json.loads(ledger.read_text(encoding="utf-8"))
+        attachment_ids = [outbound.attachment_event_id(digest) for digest in digests]
+        self.assertEqual(record["attachment_event_ids"], attachment_ids)
+        self.assertTrue(all(outbound.event_delivered_anywhere(data, event_id)
+                            for event_id in attachment_ids))
+
     def test_mechanical_door_does_not_claim_a_composer_selected_its_message(self):
         with tempfile.TemporaryDirectory() as home:
             record, _mailed = self.send(
@@ -534,6 +554,32 @@ class HeldDocumentDoor(unittest.TestCase):
         self.assertEqual(first[0]["action"], "send")
         self.assertEqual(second, [])
         self.assertEqual(send.call_count, 1)
+
+    def test_composer_attachment_suppresses_the_same_held_file_but_not_new_bytes(self):
+        with tempfile.TemporaryDirectory() as home:
+            report, document, digest = self.report(home)
+            ledger = Path(home) / "outbound.json"
+            with mock.patch.object(tick, "REPO", Path(home)), \
+                    mock.patch.object(outbound, "LEDGER", ledger), \
+                    mock.patch.object(tick, "send_mail", return_value="gmail-sent") as send:
+                composer = tick.deliver(
+                    "process", "report", "Продакт: результат", "Готово", AT,
+                    attachments=[str(document.resolve())],
+                    event_id="report:task-1316:accepted", selected_by="composer")
+                repeated = tick.deliver_undelivered(
+                    "process", report["title"], report, AT + timedelta(minutes=1))
+                document.write_text("<html>новая редакция</html>\n", encoding="utf-8")
+                changed = tick.deliver_undelivered(
+                    "process", report["title"], report, AT + timedelta(minutes=2))
+                journal = [json.loads(line) for line in
+                           ledger.with_name("outbound-journal.jsonl").read_text().splitlines()]
+        self.assertEqual(composer["action"], "send")
+        self.assertEqual(repeated, [])
+        self.assertEqual(changed[0]["action"], "send")
+        self.assertEqual(send.call_count, 2)
+        drops = [row for row in journal if row.get("action") == "drop"]
+        self.assertEqual(drops[-1]["event_id"], f"document:1316:{digest}")
+        self.assertIn("sha256 уже доставлен любым путём", drops[-1]["reason"])
 
     def test_multiple_registered_html_files_leave_the_choice_to_the_product_owner(self):
         with tempfile.TemporaryDirectory() as home:

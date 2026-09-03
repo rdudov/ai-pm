@@ -4,7 +4,9 @@
 This module never infers a channel, question, subject, or duplicate from Russian
 text. A product composer owns those decisions for product messages. The direct
 instruction door owns one narrower decision from task state: a registered
-instruction with no returned external result is sent once.
+instruction with no returned external result is sent once. Successful mail
+attachments also receive byte identities here so every delivery path shares
+the held-document door's existing receipt ledger.
 """
 from __future__ import annotations
 
@@ -67,6 +69,11 @@ def remember_event_aliases(entry: dict, event_ids: list[str], *,
         delivered[event_id] = {
             "at": now.isoformat(), "kind": kind, "message_id": message_id,
         }
+
+
+def attachment_event_id(digest: str) -> str:
+    """Stable identity of exact attachment bytes, independent of mail kind."""
+    return f"attachment:{digest}"
 
 
 def last_of_kind(entry: dict, kind: str) -> datetime | None:

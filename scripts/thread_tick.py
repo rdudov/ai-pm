@@ -80,7 +80,7 @@ import process_map_recorder  # noqa: E402
 import startup_context  # noqa: E402
 import runner_contract  # noqa: E402
 from process_map_schema import run_entrypoint  # noqa: E402
-from process_map_state import RUNNER_SCRIPTS, TERMINAL, tunable  # noqa: E402
+from process_map_state import RUNNER_SCRIPTS, TERMINAL, _file_sha256, tunable  # noqa: E402
 from process_map_state import THREAD_STATE as STATE_DIR  # noqa: E402
 from thread_state import HOME, REPO, build  # noqa: E402
 
@@ -333,17 +333,13 @@ def registered_undelivered(report: dict) -> list[dict]:
         relative = path.relative_to(task_dir)
         if str(relative) not in missing:
             continue
-        digest = hashlib.sha256()
-        try:
-            with path.open("rb") as handle:
-                for chunk in iter(lambda: handle.read(1 << 20), b""):
-                    digest.update(chunk)
-        except OSError:
+        digest = _file_sha256(path)
+        if digest is None:
             continue
         found.append({
             "task": item.get("id"), "title": item.get("title"),
             "name": str(relative), "path": str(path.resolve()),
-            "sha256": digest.hexdigest(),
+            "sha256": digest,
         })
     return found
 
@@ -358,15 +354,34 @@ def deliver_undelivered(thread: str, title: str, report: dict,
     """Attach all newly owed reader documents in one direction message."""
     selected = registered_undelivered(report)
     with outbound.Ledger() as ledger:
-        selected = [item for item in selected if not outbound.event_delivered_anywhere(
-            ledger.data, document_event_id(item))]
+        pending = []
+        for item in selected:
+            document_id = document_event_id(item)
+            attachment_id = outbound.attachment_event_id(item["sha256"])
+            if (outbound.event_delivered_anywhere(ledger.data, document_id)
+                    or outbound.event_delivered_anywhere(ledger.data, attachment_id)):
+                ledger.record({
+                    "at": moment.isoformat(), "thread": thread, "kind": "document",
+                    "event_id": document_id, "attachment_event_id": attachment_id,
+                    "channel": "gmail", "action": "drop",
+                    "reason": "файл с этим sha256 уже доставлен любым путём",
+                    "delivered": None, "decision_owner": "undelivered_door",
+                    "composer_selected": False,
+                })
+            else:
+                pending.append(item)
+        selected = pending
     if not selected:
         return []
-    event_aliases = [document_event_id(item) for item in selected]
-    if len(event_aliases) == 1:
-        event_id = event_aliases[0]
+    document_aliases = [document_event_id(item) for item in selected]
+    attachment_aliases = [outbound.attachment_event_id(item["sha256"])
+                          for item in selected]
+    event_aliases = document_aliases + attachment_aliases
+    if len(document_aliases) == 1:
+        event_id = document_aliases[0]
     else:
-        digest = hashlib.sha256("\n".join(sorted(event_aliases)).encode("utf-8")).hexdigest()
+        digest = hashlib.sha256(
+            "\n".join(sorted(document_aliases)).encode("utf-8")).hexdigest()
         event_id = f"documents:{digest}"
     listing = "\n".join(
         f"- Задача {item['task']}: {item['title']}\n"
@@ -832,6 +847,11 @@ def deliver(thread: str, kind: str, subject: str, body: str, moment: datetime,
                   f"канал Gmail выбран до текста: {selected_by}")
         delivered = None
         message_id = None
+        attachment_aliases = []
+        for path in attachments or []:
+            digest = _file_sha256(Path(path))
+            if digest is not None:
+                attachment_aliases.append(outbound.attachment_event_id(digest))
         if action == "send":
             mail_options = {"reply_to_message_id": reply_to_message_id,
                             "attachments": attachments}
@@ -848,7 +868,8 @@ def deliver(thread: str, kind: str, subject: str, body: str, moment: datetime,
                     entry, event_id=event_id, subject=subject, body=body,
                     kind=kind, now=moment, message_id=message_id)
                 outbound.remember_event_aliases(
-                    entry, [alias for alias in event_aliases or [] if alias != event_id],
+                    entry, [alias for alias in (event_aliases or []) + attachment_aliases
+                            if alias != event_id],
                     kind=kind, now=moment, message_id=message_id)
             if delivered and names_instructions:
                 outbound.remember_instructions(entry, names_instructions, moment)
@@ -862,6 +883,8 @@ def deliver(thread: str, kind: str, subject: str, body: str, moment: datetime,
                   "composer_selected": selected_by == "composer"}
         if event_aliases:
             record["event_aliases"] = event_aliases
+        if attachment_aliases:
+            record["attachment_event_ids"] = attachment_aliases
         ledger.record(record)
     return {**record, "src": "state/outbound.json — успешные event_id; "
             "state/outbound-journal.jsonl — все попытки доставки подряд"}
