@@ -262,7 +262,8 @@ def session_route() -> dict:
     `systemd-run`, дочерняя единица видела Codex и выходила, и при активной цели
     направление оставалось без продакта вообще.
     """
-    route, _usage, error = claude_product_owner.inspect_live()
+    # Сессия по цели — фоновый ход, и модель у неё фоновая (Opus по варианту B).
+    route, _usage, error = claude_product_owner.inspect_live("print")
     return {"ok": route.engine == "claude", "engine": route.engine,
             "model": route.model, "reason": route.reason, "error": error,
             "src": "маршрут продакта, спрошенный claude_product_owner.inspect_live()"}

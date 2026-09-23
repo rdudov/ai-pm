@@ -154,7 +154,7 @@ def packet(current_thread: tuple[str, dict] | None = None) -> dict:
     for name in product_memory.installation().get("threads", {}):
         reports[name] = (current_thread[1] if current_thread and current_thread[0] == name
                          else thread_state.build(name))
-    observation = claude_product_owner.inspect_observation()
+    observation = claude_product_owner.inspect_observation("print")
     return {
         "contract": {
             "kind": "bounded-background-startup-v1",

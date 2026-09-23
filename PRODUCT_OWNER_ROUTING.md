@@ -5,13 +5,18 @@ All interactive, timer and mail entrypoints call
 
 - `claude-pm` explicitly selects Claude for its manual interactive session.
 - `codex-pm` explicitly selects Codex for its manual interactive session.
-- Manual and background Claude routes use the same model policy: Fable is the
-  product owner's model, and Opus is only its fallback. The user chose this on
-  2026-09-02: the owner mostly reads plans, snapshots and thread state and
-  writes prose, and the expensive Claude window belongs to the executors. Opus
-  is selected only when the provider explicitly reports Fable exhausted. An
-  observation that fails also keeps Fable, so a network or authorization hiccup
-  cannot quietly restore the expensive model.
+- Manual and background Claude routes differ by model since 2026-09-23 (the
+  user's variant B): the interactive console and the Gmail door (`--entry mail`,
+  print-shaped) run on Fable, and `--entry print` (thread ticks, standup, goal
+  sessions) runs on Opus, which the CLI alias resolves to Opus 5.5. The background gives most of the volume and mostly
+  observes and launches; Opus 5.5 is declared Fable-level on most work at a
+  lower price. Each entry keeps the other model only as its fallback, selected
+  when the provider explicitly reports the primary exhausted. An observation
+  that fails keeps the entry's primary model, so a network or authorization
+  hiccup cannot quietly move a route.
+- The Codex fallback of the product owner is GPT-6 Sol at effort `xhigh`, not
+  Astra: it runs only when the Claude windows are gone, and then the Codex
+  window belongs to the authors; Astra spends it five times faster.
 - Background and unforced `--entry print` callers keep the shared limit-aware selection:
   the observed shared seven-day Claude remainder is compared with the latest observed
   seven-day Codex remainder. For these unforced routes, an observed exhausted shared

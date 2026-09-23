@@ -150,6 +150,36 @@ class ProductOwnerModelRouterTests(unittest.TestCase):
             "opus",
         )
 
+    def test_background_entry_runs_on_opus_with_fable_as_its_fallback(self):
+        # Variant B of 2026-09-23: ticks and goal sessions (--entry print) run
+        # on Opus; the console keeps Fable. Each entry falls back only on an
+        # explicitly reported exhaustion of its own primary model.
+        self.assertEqual(select_model({}, "print"), ("opus", "no_opus_specific_limit"))
+        self.assertEqual(select_model({"seven_day_fable": {"utilization": 100}}, "print")[0],
+                         "opus")
+        self.assertEqual(
+            select_model({"limits": [
+                {"percent": 100, "scope": {"model": {"display_name": "Opus"}}},
+            ]}, "print"),
+            ("fable", "opus_exhausted:opus_used=100%"),
+        )
+        self.assertEqual(select_route({}, observed_codex(80), "print").model, "opus")
+        self.assertEqual(select_route({}, observed_codex(80)).model, "fable")
+        codex = codex_command("print", [])
+        self.assertEqual(codex[codex.index("-c") + 1], "model_reasoning_effort=xhigh")
+        # The Gmail door is print-shaped but keeps letters on the console model.
+        self.assertEqual(select_model({}, "mail")[0], "fable")
+        with mock.patch("claude_product_owner.inspect_observation") as observe:
+            observe.return_value = router.UsageObservation(
+                route=Route("claude", "fable", "probe"), usage={}, codex_budget=None,
+                codex_error=None, attempted_at="2026-09-23T00:00:00+00:00",
+                observed_at=None, authorization_recovery="not_attempted", error=None)
+            with redirect_stdout(StringIO()) as out, redirect_stderr(StringIO()):
+                router.main(["--show-command", "--entry", "mail"])
+            observe.assert_called_once_with("mail")
+        command = json.loads(out.getvalue())
+        self.assertEqual(command[1:4], ["--model", "fable", "--print"])
+
     def test_reads_new_scoped_opus_limit(self):
         usage = {"limits": [{
             "kind": "weekly_scoped",
@@ -367,7 +397,7 @@ class ProductOwnerModelRouterTests(unittest.TestCase):
         self.assertEqual(stdout.getvalue(), "SILENT\n")
         self.assertIsNone(thread_tick.parse_composed_message(stdout.getvalue()))
         self.assertIn("product-owner: route selected; Codex", stderr.getvalue())
-        self.assertIn("Codex GPT-5.6 Sol", stderr.getvalue())
+        self.assertIn("Codex GPT-6 Sol", stderr.getvalue())
         self.assertIn("codex diagnostic", stderr.getvalue())
 
     def test_only_observed_exhaustion_of_both_scoped_models_selects_codex(self):
@@ -460,7 +490,7 @@ class ProductOwnerModelRouterTests(unittest.TestCase):
                               in enumerate(command) if item == "--add-dir"], shelf)
         # Where this product owner is installed, not where one server keeps it.
         self.assertEqual(codex[codex.index("-C") + 1], str(router.HOME))
-        self.assertEqual(codex[codex.index("--model") + 1], "gpt-5.6-sol")
+        self.assertEqual(codex[codex.index("--model") + 1], "gpt-6-sol")
 
     def test_claude_exec_starts_in_the_owner_checkout(self):
         with (mock.patch("claude_product_owner.fetch_usage", return_value={}),

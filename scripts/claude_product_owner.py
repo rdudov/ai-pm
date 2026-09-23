@@ -44,7 +44,11 @@ OAUTH_BETA = "oauth-2025-04-20"
 AUTH_REFRESH_LOCK = HOME / "state" / "claude-quota-refresh.lock"
 OPUS_MODEL = "opus"
 FABLE_MODEL = "fable"
-CODEX_MODEL = "gpt-5.6-sol"
+CODEX_MODEL = "gpt-6-sol"
+# Запасной Codex-маршрут продакта включается, когда окно Claude кончилось, и в
+# этот момент окно Codex нужно авторам. Поэтому Sol на xhigh, а не Astra: Astra
+# тратит то же окно впятеро быстрее. Решение пользователя 2026-09-23.
+CODEX_EFFORT = "xhigh"
 # `EX_TEMPFAIL` из sysexits.h — «временный отказ; просьбу следует повторить
 # позже». Единственный канал между этим запускателем и тем, кто его позвал, —
 # код возврата, и число здесь стандартное, а не наше: тот, кто следует той же
@@ -232,7 +236,8 @@ def codex_weekly_remaining(codex: dict[str, Any] | None) -> float | None:
     return remaining
 
 
-def select_route(usage: dict[str, Any], codex: dict[str, Any] | None) -> Route:
+def select_route(usage: dict[str, Any], codex: dict[str, Any] | None,
+                 entry: str | None = "interactive") -> Route:
     """Choose the family with the larger observed weekly remainder."""
     exhausted_shared = [item for item in shared_limits(usage) if item["used_percent"] >= 100.0]
     if exhausted_shared:
@@ -248,7 +253,7 @@ def select_route(usage: dict[str, Any], codex: dict[str, Any] | None) -> Route:
     if opus_exhausted and fable_exhausted:
         return Route("codex", CODEX_MODEL, "observed_opus_and_fable_limits_exhausted")
 
-    claude_model = select_model(usage)[0]
+    claude_model = select_model(usage, entry)[0]
     claude_remaining = claude_weekly_remaining(usage)
     codex_remaining = codex_weekly_remaining(codex)
     if claude_remaining is None:
@@ -266,21 +271,26 @@ def select_route(usage: dict[str, Any], codex: dict[str, Any] | None) -> Route:
     return Route("claude", claude_model, comparison)
 
 
-def select_model(usage: dict[str, Any]) -> tuple[str, str]:
+def select_model(usage: dict[str, Any],
+                 entry: str | None = "interactive") -> tuple[str, str]:
     """Choose a usable Claude model from observed model-scoped limits.
 
-    Fable is the product owner's model by the user's decision of 2026-09-02:
-    the owner reads and writes far more than it reasons, and the expensive
-    window belongs to the executors. Opus is the fallback and nothing else —
-    it is selected only when the provider explicitly reports Fable exhausted.
+    The console and the letters run on Fable; the background ticks and goal
+    sessions run on Opus. The user chose this split on 2026-09-23 (variant B):
+    the background gives most of the volume and mostly observes and launches,
+    and Opus 5.5 is declared Fable-level on most work at a lower price. Each
+    entry keeps the other model as its fallback and nothing else — the fallback
+    is selected only when the provider explicitly reports the primary exhausted.
     """
-    fable = model_used_percentages(usage, "fable")
-    if not fable:
-        return FABLE_MODEL, "no_fable_specific_limit"
-    used = max(fable)
+    primary, fallback = ((OPUS_MODEL, FABLE_MODEL) if entry == "print"
+                         else (FABLE_MODEL, OPUS_MODEL))
+    used_values = model_used_percentages(usage, primary)
+    if not used_values:
+        return primary, f"no_{primary}_specific_limit"
+    used = max(used_values)
     if used >= 100.0:
-        return OPUS_MODEL, f"fable_exhausted:fable_used={used:g}%"
-    return FABLE_MODEL, f"fable_remaining={100.0 - used:g}%"
+        return fallback, f"{primary}_exhausted:{primary}_used={used:g}%"
+    return primary, f"{primary}_remaining={100.0 - used:g}%"
 
 
 def fetch_usage(
@@ -470,7 +480,7 @@ def _error_record(exc: BaseException) -> dict[str, Any]:
     }
 
 
-def inspect_observation() -> UsageObservation:
+def inspect_observation(entry: str | None = "interactive") -> UsageObservation:
     attempted_at = datetime.now(timezone.utc).isoformat()
     recovery = "not_needed"
     codex_error = None
@@ -497,7 +507,7 @@ def inspect_observation() -> UsageObservation:
                 raise
             usage, recovery = _usage_after_authorization_recovery()
         return UsageObservation(
-            route=select_route(usage, codex),
+            route=select_route(usage, codex, entry),
             usage=usage,
             codex_budget=codex,
             codex_error=codex_error,
@@ -516,9 +526,9 @@ def inspect_observation() -> UsageObservation:
         RuntimeError,
     ) as exc:
         return UsageObservation(
-            # Fable is the default the user chose, so a failed observation
-            # must not quietly restore the expensive model behind their back.
-            route=Route("claude", FABLE_MODEL, "usage_unavailable"),
+            # A failed observation keeps the primary model of this entry, so a
+            # network hiccup can never quietly move a route to its fallback.
+            route=Route("claude", select_model({}, entry)[0], "usage_unavailable"),
             usage=None,
             codex_budget=codex,
             codex_error=codex_error,
@@ -529,9 +539,9 @@ def inspect_observation() -> UsageObservation:
         )
 
 
-def inspect_live() -> tuple[Route, dict[str, Any] | None, str | None]:
+def inspect_live(entry: str | None = "interactive") -> tuple[Route, dict[str, Any] | None, str | None]:
     """Backward-compatible tuple view for existing callers."""
-    observation = inspect_observation()
+    observation = inspect_observation(entry)
     error = observation.error
     rendered_error = None if error is None else f"{error['exception_type']}: {error['message']}"
     return observation.route, observation.usage, rendered_error
@@ -574,7 +584,8 @@ def claude_command(model: str, entry: str | None, extra: list[str]) -> list[str]
 def codex_command(entry: str, extra: list[str]) -> list[str]:
     common = [
         CODEX_BIN, "--ask-for-approval", "never", "--sandbox", "danger-full-access",
-        "--model", CODEX_MODEL, "-C", str(HOME), *workspace_access(),
+        "--model", CODEX_MODEL, "-c", f"model_reasoning_effort={CODEX_EFFORT}",
+        "-C", str(HOME), *workspace_access(),
     ]
     if entry == "print":
         return [*common, "exec", "--skip-git-repo-check", "-"]
@@ -663,21 +674,25 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument("--select", action="store_true", help="print the selected model")
     mode.add_argument("--status", action="store_true", help="print redacted routing status as JSON")
     mode.add_argument("--show-command", action="store_true", help="print the selected argv without executing it")
-    parser.add_argument("--entry", choices=("interactive", "print"))
+    # `mail` is the Gmail door: the same detached print-shaped engine as a
+    # tick, but letters stay on the console model (the user's variant B).
+    parser.add_argument("--entry", choices=("interactive", "print", "mail"))
     parser.add_argument("--force-codex", action="store_true")
     parser.add_argument("--force-claude", action="store_true")
     args, extra = parser.parse_known_args(argv)
     if extra and extra[0] == "--":
         extra = extra[1:]
 
-    observation = inspect_observation()
+    entry = args.entry or ("print" if "--print" in extra else "interactive")
+    shape = "print" if entry in ("print", "mail") else "interactive"
+    observation = inspect_observation(entry)
     route, usage = observation.route, observation.usage
     error = observation.error
     if args.force_codex:
         route = Route("codex", CODEX_MODEL, "explicit_codex_pm_command")
     elif args.force_claude:
         route = Route(
-            "claude", select_model(usage or {})[0], "explicit_claude_pm_command"
+            "claude", select_model(usage or {}, entry)[0], "explicit_claude_pm_command"
         )
     if args.select:
         print(route.model)
@@ -712,8 +727,7 @@ def main(argv: list[str] | None = None) -> int:
         }, ensure_ascii=False, indent=2))
         return 0
 
-    entry = args.entry or ("print" if "--print" in extra else "interactive")
-    if args.entry == "interactive":
+    if shape == "interactive" and args.entry == "interactive":
         user_request = " ".join(extra).strip()
         extra = [
             STARTUP_PROMPT + (
@@ -721,9 +735,9 @@ def main(argv: list[str] | None = None) -> int:
             )
         ]
     command = (
-        claude_command(route.model, args.entry, extra)
+        claude_command(route.model, shape, extra)
         if route.engine == "claude"
-        else codex_command(entry, extra)
+        else codex_command(shape, extra)
     )
     if args.show_command:
         print(json.dumps(command, ensure_ascii=False))
@@ -742,21 +756,21 @@ def main(argv: list[str] | None = None) -> int:
         )
     if route.engine == "claude":
         environment = {**os.environ, "IS_SANDBOX": "1"}
-        if args.entry == "print":
+        if shape == "print":
             return run_background_engine(command, environment)
         os.chdir(HOME)
         os.execvpe(CLAUDE_BIN, command, environment)
         return 127
 
     if args.force_codex:
-        notice = "Продакт запущен явной командой codex-pm через Codex GPT-5.6 Sol."
+        notice = "Продакт запущен явной командой codex-pm через Codex GPT-6 Sol."
     elif route.reason.startswith("weekly_remaining:"):
         notice = ("Продакт: у Codex больше наблюдаемый остаток недельного окна; "
-                  "продолжаю через Codex GPT-5.6 Sol.")
+                  "продолжаю через Codex GPT-6 Sol.")
     else:
         notice = ("Продакт: наблюдаемый лимит не оставил пригодного Claude-маршрута; "
-                  "продолжаю через Codex GPT-5.6 Sol.")
-    if entry == "interactive":
+                  "продолжаю через Codex GPT-6 Sol.")
+    if shape == "interactive":
         print(notice, file=sys.stderr)
         os.execvpe(CODEX_BIN, command, os.environ)
         return 127
