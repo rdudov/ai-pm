@@ -748,7 +748,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if error:
         print(
-            "product-owner: quota check unavailable; keeping Opus "
+            f"product-owner: quota check unavailable; keeping {route.model} "
             f"({error['kind']}: {error['message']})",
             file=sys.stderr,
         )
