@@ -238,7 +238,14 @@ def codex_weekly_remaining(codex: dict[str, Any] | None) -> float | None:
 
 def select_route(usage: dict[str, Any], codex: dict[str, Any] | None,
                  entry: str | None = "interactive") -> Route:
-    """Choose the family with the larger observed weekly remainder."""
+    """Keep the product owner on Claude; Codex only when Claude is exhausted.
+
+    The user moved the product owner to Claude on 2026-09-02 and left Codex's
+    window to the authors; on 2026-09-23 Codex became the product owner's
+    fallback. Comparing the two weekly remainders sent every background tick to
+    Codex whenever it had more left, against both decisions. The remainders are
+    still named in the reason so the journal shows what was observed.
+    """
     exhausted_shared = [item for item in shared_limits(usage) if item["used_percent"] >= 100.0]
     if exhausted_shared:
         kinds = ",".join(item["kind"] for item in exhausted_shared)
@@ -265,9 +272,6 @@ def select_route(usage: dict[str, Any], codex: dict[str, Any] | None,
         )
     comparison = (f"weekly_remaining:claude={claude_remaining:g}%,"
                   f"codex={codex_remaining:g}%")
-    if codex_remaining > claude_remaining:
-        return Route("codex", CODEX_MODEL, comparison)
-
     return Route("claude", claude_model, comparison)
 
 
@@ -764,9 +768,6 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.force_codex:
         notice = "Продакт запущен явной командой codex-pm через Codex GPT-6 Sol."
-    elif route.reason.startswith("weekly_remaining:"):
-        notice = ("Продакт: у Codex больше наблюдаемый остаток недельного окна; "
-                  "продолжаю через Codex GPT-6 Sol.")
     else:
         notice = ("Продакт: наблюдаемый лимит не оставил пригодного Claude-маршрута; "
                   "продолжаю через Codex GPT-6 Sol.")

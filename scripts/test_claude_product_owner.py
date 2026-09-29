@@ -228,12 +228,16 @@ class ProductOwnerModelRouterTests(unittest.TestCase):
         }, observed_codex(80))
         self.assertEqual((route.engine, route.model), ("claude", "fable"))
 
-    def test_larger_observed_codex_remainder_selects_codex(self):
+    def test_larger_codex_remainder_keeps_product_owner_on_claude(self):
+        # 2026-09-02 and 2026-09-23: the product owner runs on Claude and
+        # Codex is only its fallback; its window belongs to the authors.
         usage = {"seven_day": {"utilization": 69}}
         route = select_route(usage, observed_codex(81))
         self.assertEqual(route, Route(
-            "codex", CODEX_MODEL, "weekly_remaining:claude=31%,codex=81%"
+            "claude", "fable", "weekly_remaining:claude=31%,codex=81%"
         ))
+        background = select_route(usage, observed_codex(81), "print")
+        self.assertEqual((background.engine, background.model), ("claude", "opus"))
         self.assertEqual(claude_weekly_remaining(usage), 31.0)
 
     def test_manual_claude_binding_reuses_model_selection(self):
@@ -268,7 +272,7 @@ class ProductOwnerModelRouterTests(unittest.TestCase):
             ["--entry", "interactive", "--force-claude", "--", "probe"],
         )
 
-        self.assertEqual(unforced[0], router.CODEX_BIN)
+        self.assertEqual(unforced[0], router.CLAUDE_BIN)
         self.assertEqual(forced_default[0], router.CLAUDE_BIN)
         self.assertEqual(forced_default[1:3], ["--model", router.FABLE_MODEL])
         self.assertTrue(forced_default[-1].endswith("Первый запрос пользователя: probe"))
@@ -515,7 +519,7 @@ class ProductOwnerModelRouterTests(unittest.TestCase):
         with (mock.patch("claude_product_owner.codex_budget.latest",
                          return_value=observed_codex(81)),
               mock.patch("claude_product_owner.fetch_usage", return_value={
-                  "seven_day": {"utilization": 82},
+                  "seven_day": {"utilization": 100},
               }),
               mock.patch("claude_product_owner.sys.stdin") as stdin,
               mock.patch("claude_product_owner.subprocess.run", return_value=answer),

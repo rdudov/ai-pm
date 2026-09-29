@@ -17,18 +17,20 @@ All interactive, timer and mail entrypoints call
 - The Codex fallback of the product owner is GPT-6 Sol at effort `xhigh`, not
   Astra: it runs only when the Claude windows are gone, and then the Codex
   window belongs to the authors; Astra spends it five times faster.
-- Background and unforced `--entry print` callers keep the shared limit-aware selection:
-  the observed shared seven-day Claude remainder is compared with the latest observed
-  seven-day Codex remainder. For these unforced routes, an observed exhausted shared
-  Claude limit, or observed exhaustion of both Opus and Fable model-scoped routes,
-  selects Codex even before that comparison.
+- Unforced routes stay on Claude. They move to Codex only when the provider
+  reports the shared Claude limit exhausted, or both Opus and Fable exhausted.
+  The router no longer sends the product owner to Codex because Codex has the
+  larger weekly remainder: the user put the product owner on Claude on
+  2026-09-02 and kept Codex's window for the authors. Observed on 2026-09-28:
+  with Claude at 65% and Codex at 82% every background tick went to Codex,
+  answered `SILENT` in about ten seconds, and four tasks waiting for their next
+  step stood overnight. Both remainders stay in the route reason.
 - A missing observation is never turned into a percentage. Without a comparable
   weekly remainder the router keeps Claude and names which observation is missing;
   Claude network/API failures and unknown schemas remain visible. Every selected
   Claude route emits its reason before the engine starts: mail keeps it in its
   existing agent stderr artifact, and the timer forwards that one diagnostic to
-  its service journal without replaying arbitrary model stderr. This also leaves
-  a durable trace when a higher observed Claude remainder wins the comparison.
+  its service journal without replaying arbitrary model stderr.
 - `--entry print` is the one entry whose caller is a service rather than a
   person, so it is the one entry the router stays alive above instead of
   replacing itself with the engine. It runs Claude Code under
