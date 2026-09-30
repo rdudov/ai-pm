@@ -14,7 +14,9 @@ All interactive, timer and mail entrypoints call
   when the provider explicitly reports the primary exhausted. An observation
   that fails keeps the entry's primary model, so a network or authorization
   hiccup cannot quietly move a route.
-- The Codex fallback of the product owner is GPT-6 Sol at effort `xhigh`, not
+- Since 2026-09-30, the Codex fallback of the product owner is GPT-6.1 Sol
+  (`gpt-6.1-sol`) at effort `xhigh`, updating the model identity from the
+  September 23 decision while preserving routing and effort. It does not use
   Astra: it runs only when the Claude windows are gone, and then the Codex
   window belongs to the authors; Astra spends it five times faster.
 - Unforced routes stay on Claude. They move to Codex only when the provider

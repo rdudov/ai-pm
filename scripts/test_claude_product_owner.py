@@ -401,7 +401,7 @@ class ProductOwnerModelRouterTests(unittest.TestCase):
         self.assertEqual(stdout.getvalue(), "SILENT\n")
         self.assertIsNone(thread_tick.parse_composed_message(stdout.getvalue()))
         self.assertIn("product-owner: route selected; Codex", stderr.getvalue())
-        self.assertIn("Codex GPT-6 Sol", stderr.getvalue())
+        self.assertIn("Codex GPT-6.1 Sol", stderr.getvalue())
         self.assertIn("codex diagnostic", stderr.getvalue())
 
     def test_only_observed_exhaustion_of_both_scoped_models_selects_codex(self):
@@ -494,7 +494,7 @@ class ProductOwnerModelRouterTests(unittest.TestCase):
                               in enumerate(command) if item == "--add-dir"], shelf)
         # Where this product owner is installed, not where one server keeps it.
         self.assertEqual(codex[codex.index("-C") + 1], str(router.HOME))
-        self.assertEqual(codex[codex.index("--model") + 1], "gpt-6-sol")
+        self.assertEqual(codex[codex.index("--model") + 1], "gpt-6.1-sol")
 
     def test_claude_exec_starts_in_the_owner_checkout(self):
         with (mock.patch("claude_product_owner.fetch_usage", return_value={}),

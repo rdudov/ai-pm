@@ -44,7 +44,7 @@ OAUTH_BETA = "oauth-2025-04-20"
 AUTH_REFRESH_LOCK = HOME / "state" / "claude-quota-refresh.lock"
 OPUS_MODEL = "opus"
 FABLE_MODEL = "fable"
-CODEX_MODEL = "gpt-6-sol"
+CODEX_MODEL = "gpt-6.1-sol"
 # Запасной Codex-маршрут продакта включается, когда окно Claude кончилось, и в
 # этот момент окно Codex нужно авторам. Поэтому Sol на xhigh, а не Astra: Astra
 # тратит то же окно впятеро быстрее. Решение пользователя 2026-09-23.
@@ -767,10 +767,10 @@ def main(argv: list[str] | None = None) -> int:
         return 127
 
     if args.force_codex:
-        notice = "Продакт запущен явной командой codex-pm через Codex GPT-6 Sol."
+        notice = "Продакт запущен явной командой codex-pm через Codex GPT-6.1 Sol."
     else:
         notice = ("Продакт: наблюдаемый лимит не оставил пригодного Claude-маршрута; "
-                  "продолжаю через Codex GPT-6 Sol.")
+                  "продолжаю через Codex GPT-6.1 Sol.")
     if shape == "interactive":
         print(notice, file=sys.stderr)
         os.execvpe(CODEX_BIN, command, os.environ)
