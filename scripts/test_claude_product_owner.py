@@ -240,7 +240,7 @@ class ProductOwnerModelRouterTests(unittest.TestCase):
         self.assertEqual((background.engine, background.model), ("claude", "opus"))
         self.assertEqual(claude_weekly_remaining(usage), 31.0)
 
-    def test_manual_claude_binding_reuses_model_selection(self):
+    def test_legacy_claude_binding_obeys_global_codex_selection(self):
         def shown(usage: dict, argv: list[str]) -> list[str]:
             output = StringIO()
             diagnostic_argv = list(argv)
@@ -272,13 +272,13 @@ class ProductOwnerModelRouterTests(unittest.TestCase):
             ["--entry", "interactive", "--force-claude", "--", "probe"],
         )
 
-        self.assertEqual(unforced[0], router.CLAUDE_BIN)
-        self.assertEqual(forced_default[0], router.CLAUDE_BIN)
-        self.assertEqual(forced_default[1:3], ["--model", router.FABLE_MODEL])
+        self.assertEqual(unforced[0], router.CODEX_BIN)
+        self.assertEqual(forced_default[0], router.CODEX_BIN)
+        self.assertEqual(forced_default[forced_default.index("--model") + 1], CODEX_MODEL)
         self.assertTrue(forced_default[-1].endswith("Первый запрос пользователя: probe"))
         self.assertEqual(
-            forced_opus_when_fable_exhausted[1:3],
-            ["--model", router.OPUS_MODEL],
+            forced_opus_when_fable_exhausted[forced_opus_when_fable_exhausted.index("--model") + 1],
+            CODEX_MODEL,
         )
 
     def test_larger_observed_claude_remainder_selects_claude(self):
@@ -326,58 +326,29 @@ class ProductOwnerModelRouterTests(unittest.TestCase):
               })):
             observation = inspect_observation()
         self.assertEqual(observation.route.reason,
-                         "codex_weekly_remaining_unavailable:claude_remaining=31%")
+                         "user_selected_codex_all_product_owners")
         self.assertEqual(observation.codex_error["kind"], "codex_observation")
 
-    def test_codex_observation_failure_is_visible_before_the_engine_starts(self):
-        stderr = StringIO()
-        with (mock.patch("claude_product_owner.codex_budget.latest",
-                         side_effect=OSError("sessions unreadable")),
-              mock.patch("claude_product_owner.fetch_usage", return_value={
-                  "seven_day": {"utilization": 69},
-              }),
-              mock.patch("claude_product_owner.run_background_engine",
-                         side_effect=RuntimeError("engine boundary")),
-              redirect_stderr(stderr),
-              self.assertRaisesRegex(RuntimeError, "engine boundary")):
-            router.main(["--entry", "print"])
-        self.assertIn(
-            "product-owner: route selected; Claude "
-            "(codex_weekly_remaining_unavailable:claude_remaining=31%)",
-            stderr.getvalue(),
-        )
+    def test_missing_codex_budget_is_visible_in_current_routing_status(self):
+        with mock.patch("claude_product_owner.codex_budget.latest", side_effect=OSError("sessions unreadable")), redirect_stdout(StringIO()) as out:
+            router.main(["--status"])
+        record = json.loads(out.getvalue())
+        self.assertEqual(record["engine"], "codex")
+        self.assertEqual(record["codex_quota_observation"]["error"]["kind"], "codex_observation")
 
-    def test_observed_claude_comparison_is_visible_before_the_engine_starts(self):
-        stderr = StringIO()
-        with (mock.patch("claude_product_owner.codex_budget.latest",
-                         return_value=observed_codex(31)),
-              mock.patch("claude_product_owner.fetch_usage", return_value={
-                  "seven_day": {"utilization": 18},
-              }),
-              mock.patch("claude_product_owner.run_background_engine",
-                         side_effect=RuntimeError("engine boundary")),
-              redirect_stderr(stderr),
-              self.assertRaisesRegex(RuntimeError, "engine boundary")):
-            router.main(["--entry", "print"])
-        self.assertIn(
-            "product-owner: route selected; Claude "
-            "(weekly_remaining:claude=82%,codex=31%)",
-            stderr.getvalue(),
-        )
+    def test_print_entry_does_not_query_claude(self):
+        with mock.patch("claude_product_owner.fetch_usage", side_effect=AssertionError("Claude queried")) as fetch, redirect_stdout(StringIO()) as out:
+            router.main(["--entry", "print", "--show-command"])
+        argv = json.loads(out.getvalue())
+        self.assertEqual(argv[0], router.CODEX_BIN)
+        fetch.assert_not_called()
 
-    def test_unavailable_claude_observation_is_visible_before_the_engine_starts(self):
-        stderr = StringIO()
-        with (mock.patch("claude_product_owner.fetch_usage",
-                         side_effect=OSError("offline")),
-              mock.patch("claude_product_owner.run_background_engine",
-                         side_effect=RuntimeError("engine boundary")),
-              redirect_stderr(stderr),
-              self.assertRaisesRegex(RuntimeError, "engine boundary")):
-            router.main(["--entry", "print"])
-        self.assertIn(
-            "product-owner: route selected; Claude (usage_unavailable)",
-            stderr.getvalue(),
-        )
+    def test_mail_entry_ignores_legacy_claude_flag_without_claude_query(self):
+        with mock.patch("claude_product_owner.fetch_usage", side_effect=OSError("offline")) as fetch, redirect_stdout(StringIO()) as out:
+            router.main(["--entry", "mail", "--force-claude", "--show-command"])
+        argv = json.loads(out.getvalue())
+        self.assertEqual(argv[argv.index("--model") + 1], CODEX_MODEL)
+        fetch.assert_not_called()
 
     def test_observed_shared_exhaustion_selects_codex(self):
         route = select_route({
@@ -424,11 +395,11 @@ class ProductOwnerModelRouterTests(unittest.TestCase):
         # A failed observation must not quietly restore the expensive model.
         with mock.patch("claude_product_owner.fetch_usage", side_effect=OSError("offline")):
             route, usage, error = inspect_live()
-        self.assertEqual((route.engine, route.model), ("claude", "fable"))
+        self.assertEqual((route.engine, route.model), ("codex", CODEX_MODEL))
         self.assertIsNone(usage)
-        self.assertIn("OSError", error)
+        self.assertIsNone(error)
 
-    def test_401_uses_claude_owned_zero_turn_refresh_then_retries(self):
+    def test_current_route_does_not_request_claude_authorization_recovery(self):
         unauthorized = urllib.error.HTTPError(
             "https://example.invalid/usage", 401, "Unauthorized", {}, None
         )
@@ -438,9 +409,9 @@ class ProductOwnerModelRouterTests(unittest.TestCase):
             mock.patch("claude_product_owner.refresh_authorization_with_claude") as refresh,
         ):
             observation = inspect_observation()
-        refresh.assert_called_once_with()
-        self.assertEqual(observation.authorization_recovery, "claude_cli_zero_turn_usage")
-        self.assertEqual(observation.route.engine, "claude")
+        refresh.assert_not_called()
+        self.assertEqual(observation.authorization_recovery, "not_requested")
+        self.assertEqual(observation.route.engine, "codex")
         self.assertIsNone(observation.error)
 
     def test_authorization_refresh_never_reads_the_callers_stdin(self):
@@ -469,8 +440,8 @@ class ProductOwnerModelRouterTests(unittest.TestCase):
         ):
             observation = inspect_observation()
         self.assertIsNone(observation.usage)
-        self.assertEqual(observation.route.reason, "usage_unavailable")
-        self.assertEqual(observation.error["kind"], "authorization_or_runtime")
+        self.assertEqual(observation.route.reason, "user_selected_codex_all_product_owners")
+        self.assertIsNone(observation.error)
 
     def test_unknown_live_schema_is_visible_not_exhaustion(self):
         with mock.patch(
@@ -478,8 +449,8 @@ class ProductOwnerModelRouterTests(unittest.TestCase):
             side_effect=ValueError("usage response has no recognized quota fields"),
         ):
             observation = inspect_observation()
-        self.assertEqual(observation.route, Route("claude", "fable", "usage_unavailable"))
-        self.assertEqual(observation.error["kind"], "schema")
+        self.assertEqual(observation.route, Route("codex", CODEX_MODEL, "user_selected_codex_all_product_owners"))
+        self.assertIsNone(observation.error)
 
     def test_background_engines_have_the_same_owner_cwd_and_access(self):
         # The directories are the installation's own answer, so the test states
@@ -496,14 +467,12 @@ class ProductOwnerModelRouterTests(unittest.TestCase):
         self.assertEqual(codex[codex.index("-C") + 1], str(router.HOME))
         self.assertEqual(codex[codex.index("--model") + 1], "gpt-6.1-sol")
 
-    def test_claude_exec_starts_in_the_owner_checkout(self):
-        with (mock.patch("claude_product_owner.fetch_usage", return_value={}),
-              mock.patch("claude_product_owner.os.chdir") as chdir,
-              mock.patch("claude_product_owner.os.execvpe",
-                         side_effect=RuntimeError("exec boundary")),
-              self.assertRaisesRegex(RuntimeError, "exec boundary")):
-            router.main(["--entry", "interactive"])
-        chdir.assert_called_once_with(router.HOME)
+    def test_legacy_claude_exec_starts_codex_in_the_owner_checkout(self):
+        with mock.patch("claude_product_owner.os.execvpe", side_effect=RuntimeError("exec boundary")) as execute, self.assertRaisesRegex(RuntimeError, "exec boundary"):
+            router.main(["--entry", "interactive", "--force-claude"])
+        argv = execute.call_args.args[1]
+        self.assertEqual(argv[argv.index("-C") + 1], str(router.HOME))
+        self.assertEqual(execute.call_args.args[0], router.CODEX_BIN)
 
     def test_the_codex_route_notice_is_a_diagnostic_and_not_part_of_the_letter(self):
         """«Ровно `SILENT` остаётся молчанием» — 2026-08-23.
@@ -528,7 +497,7 @@ class ProductOwnerModelRouterTests(unittest.TestCase):
             router.main(["--entry", "print"])
         self.assertEqual(out.getvalue().strip(), "SILENT")
         self.assertIn("product-owner: route selected; Codex", err.getvalue())
-        self.assertIn("продолжаю через Codex", err.getvalue())
+        self.assertIn("по решению пользователя", err.getvalue())
 
     def test_an_installation_that_names_no_directories_gets_no_flag(self):
         # A fresh clone works in its own checkout: an empty `--add-dir` would be

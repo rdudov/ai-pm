@@ -1,3 +1,11 @@
+> Текущий временный выбор пользователя от 1 октября 2026: автор Codex Sol
+> high, проверяющий Codex Astra (`gpt-6-astra`) high в отдельной свежей read-only
+> сессии. Это `isolated_same_provider`, а не разносемейная проверка. Companion
+> передаёт существующую assurance configuration и точную модель для review,
+> product-review, statement-review и review-candidate. Старые привязки меняются
+> штатным повторным допуском автора; исторические результаты не переименовываются.
+
+
 # Как отдавать работу в разработку
 
 Технический интерфейс запуска задач. Правило верхнего уровня живёт в
@@ -42,7 +50,8 @@ application adapter получает из серверного владельц�
 ```bash
 TASK_AGENT_ROOT=<корень установки системы задач> \
 .venv/bin/python -m task_agent.task_runner author tasks/<id>-<слаг> \
-  --repo <репозиторий> --runner codex --reviewer-runner claude
+  --repo <репозиторий> --runner codex --reviewer-runner codex \
+  --assurance-config <Companion>/skills/task-runner/scripts/codex_astra_assurance.json
 ```
 
 **`TASK_AGENT_ROOT` обязателен при любом запуске ребёнка из установленного

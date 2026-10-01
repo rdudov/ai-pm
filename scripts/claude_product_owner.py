@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Route every product-owner entry through one observed Claude/Codex policy."""
+"""Route every product-owner entry through the current user-selected engine."""
 
 from __future__ import annotations
 
@@ -45,9 +45,8 @@ AUTH_REFRESH_LOCK = HOME / "state" / "claude-quota-refresh.lock"
 OPUS_MODEL = "opus"
 FABLE_MODEL = "fable"
 CODEX_MODEL = "gpt-6.1-sol"
-# Запасной Codex-маршрут продакта включается, когда окно Claude кончилось, и в
-# этот момент окно Codex нужно авторам. Поэтому Sol на xhigh, а не Astra: Astra
-# тратит то же окно впятеро быстрее. Решение пользователя 2026-09-23.
+# Все входы продакта используют Codex по слову пользователя 2026-10-01.
+# Sol на xhigh сохраняет выбранные пользователем модель и усилие.
 CODEX_EFFORT = "xhigh"
 # `EX_TEMPFAIL` из sysexits.h — «временный отказ; просьбу следует повторить
 # позже». Единственный канал между этим запускателем и тем, кто его позвал, —
@@ -503,44 +502,19 @@ def inspect_observation(entry: str | None = "interactive") -> UsageObservation:
             "exception_type": None,
             "message": "no current explicitly seven-day Codex observation",
         }
-    try:
-        try:
-            usage = fetch_usage()
-        except urllib.error.HTTPError as exc:
-            if exc.code != 401:
-                raise
-            usage, recovery = _usage_after_authorization_recovery()
-        return UsageObservation(
-            route=select_route(usage, codex, entry),
-            usage=usage,
-            codex_budget=codex,
-            codex_error=codex_error,
-            attempted_at=attempted_at,
-            observed_at=datetime.now(timezone.utc).isoformat(),
-            authorization_recovery=recovery,
-            error=None,
-        )
-    except (
-        OSError,
-        KeyError,
-        ValueError,
-        json.JSONDecodeError,
-        urllib.error.URLError,
-        subprocess.SubprocessError,
-        RuntimeError,
-    ) as exc:
-        return UsageObservation(
-            # A failed observation keeps the primary model of this entry, so a
-            # network hiccup can never quietly move a route to its fallback.
-            route=Route("claude", select_model({}, entry)[0], "usage_unavailable"),
-            usage=None,
-            codex_budget=codex,
-            codex_error=codex_error,
-            attempted_at=attempted_at,
-            observed_at=None,
-            authorization_recovery=recovery,
-            error=_error_record(exc),
-        )
+    # The October 1 user decision governs every entry, including legacy wrappers.
+    # Resolve it before any Claude endpoint or credential recovery can run.
+    return UsageObservation(
+        route=Route("codex", CODEX_MODEL, "user_selected_codex_all_product_owners"),
+        usage=None,
+        codex_budget=codex,
+        codex_error=codex_error,
+        attempted_at=attempted_at,
+        observed_at=None,
+        authorization_recovery="not_requested",
+        error=None,
+    )
+
 
 
 def inspect_live(entry: str | None = "interactive") -> tuple[Route, dict[str, Any] | None, str | None]:
@@ -692,12 +666,7 @@ def main(argv: list[str] | None = None) -> int:
     observation = inspect_observation(entry)
     route, usage = observation.route, observation.usage
     error = observation.error
-    if args.force_codex:
-        route = Route("codex", CODEX_MODEL, "explicit_codex_pm_command")
-    elif args.force_claude:
-        route = Route(
-            "claude", select_model(usage or {}, entry)[0], "explicit_claude_pm_command"
-        )
+    # Compatibility flags remain accepted; the current global decision wins.
     if args.select:
         print(route.model)
         return 0
@@ -719,8 +688,8 @@ def main(argv: list[str] | None = None) -> int:
                 "error": observation.codex_error,
             },
             "quota_observation": {
-                "status": "observed" if usage is not None else "unavailable",
-                "source": "anthropic_oauth_usage_endpoint",
+                "status": "not_requested",
+                "source": "user_selected_codex_all_product_owners",
                 "freshness": "live" if usage is not None else "unavailable",
                 "attempted_at": observation.attempted_at,
                 "observed_at": observation.observed_at,
@@ -766,11 +735,7 @@ def main(argv: list[str] | None = None) -> int:
         os.execvpe(CLAUDE_BIN, command, environment)
         return 127
 
-    if args.force_codex:
-        notice = "Продакт запущен явной командой codex-pm через Codex GPT-6.1 Sol."
-    else:
-        notice = ("Продакт: наблюдаемый лимит не оставил пригодного Claude-маршрута; "
-                  "продолжаю через Codex GPT-6.1 Sol.")
+    notice = "Продакт запущен через Codex GPT-6.1 Sol по решению пользователя."
     if shape == "interactive":
         print(notice, file=sys.stderr)
         os.execvpe(CODEX_BIN, command, os.environ)
