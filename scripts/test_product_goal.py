@@ -17,6 +17,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -388,6 +389,67 @@ class TickReadsGoals(unittest.TestCase):
         later = tick.goal_watch("process", report, stored,
                                 moment + timedelta(seconds=tick.GOAL_REMIND_SECONDS + 1))
         self.assertTrue(later["standing"])
+
+    def test_unfinished_user_result_survives_a_nonlaunchable_task_and_new_tick(self):
+        moment = datetime.now(timezone.utc)
+        repo = self.root / "repo"
+        task_tree(repo, 100, "blocked")
+        for status in ("blocked", "completed"):
+            with self.subTest(status=status), mock.patch.object(goals, "TASKS_REPO", repo):
+                set_status(repo, 100, status)
+                report = {"live_runs": [], "needs_attention": [],
+                          "can_pick_up": [], "ready_to_start": [],
+                          "decided_not_done": [], "queued_by_plan": []}
+                # Even a completed task absent from the capped attention list
+                # leaves its durable goal owed. The next tick reads that goal.
+                first = tick.goal_watch("process", report, {}, moment)
+                stored = json.loads(json.dumps({"goals": first["panel"],
+                                               "goal_reminder": first["reminder"]}))
+                again = tick.goal_watch("process", report, stored,
+                                       moment + timedelta(seconds=30))
+                self.assertTrue(first["standing"])
+                self.assertFalse(again["standing"])
+                self.assertEqual([g["id"] for g in again["objects"]], [self.goal["id"]])
+                holds, handover = tick.session_leads(
+                    {"mode": "session", "holds": False, "detail": "Codex tick"},
+                    again["objects"])
+                self.assertFalse(holds)
+                self.assertTrue(handover)
+
+    def test_explicit_human_and_plan_holds_do_not_become_continuation_work(self):
+        for field in ("waiting_user", "backlog"):
+            with self.subTest(field=field):
+                report = {"live_runs": [], field: [{"id": 100}],
+                          "ready_to_start": [{"id": 100}]}
+                watch = tick.goal_watch("process", report, {}, datetime.now(timezone.utc))
+                self.assertEqual(watch["standing"], [])
+                self.assertEqual(watch["objects"], [])
+
+    def test_a_live_task_does_not_need_a_second_product_owner_decision(self):
+        watch = tick.goal_watch("process", {"live_runs": [{"id": 100}]}, {},
+                                datetime.now(timezone.utc))
+        self.assertEqual(watch["standing"], [])
+        self.assertEqual(watch["objects"], [])
+
+    def test_user_pause_without_pending_repair_remains_a_pause(self):
+        goals.pause(self.goal["id"], "ждём пользователя", "письмо пользователя")
+        watch = tick.goal_watch("process", {"live_runs": []}, {}, datetime.now(timezone.utc))
+        self.assertEqual(watch["standing"], [])
+        self.assertEqual(watch["objects"], [])
+
+    def test_paused_main_work_waits_on_its_repair_then_leaves_the_main_work_paused(self):
+        goals.pause(self.goal["id"], "нужен ремонт", "отказ штатного пути")
+        goals.add_corrective(self.goal["id"], 101, "эффект", "критерий")
+        for live in ([], [{"id": 100}]):
+            with self.subTest(live=live):
+                watch = tick.goal_watch("process", {"live_runs": live}, {},
+                                        datetime.now(timezone.utc))
+                self.assertTrue(watch["objects"])
+                self.assertEqual(watch["objects"][0]["waiting_on"], [101])
+                self.assertEqual(watch["objects"][0]["state"], "paused")
+        held = tick.goal_watch("process", {"live_runs": [], "backlog": [{"id": 101}]}, {},
+                               datetime.now(timezone.utc))
+        self.assertEqual(held["objects"], [])
 
     def test_turning_on_control_is_a_transition(self):
         moment = datetime.now(timezone.utc)

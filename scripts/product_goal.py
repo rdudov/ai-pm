@@ -698,11 +698,10 @@ def standing(thread: str, live_run_ids: list[int],
         waiting = live_tasks(goal)
         if set(waiting) & live:
             continue
-        # A stable blocked task or an explicit external wait has no safe move
-        # for a model to make.  Its transition was already news once; waking
-        # every twenty minutes after that only rereads the same context.  The
-        # old two-argument call keeps the historical diagnostic behaviour for
-        # readers that do not know which tasks are actionable.
+        # The caller supplies eligible task ids after explicit holds. A task
+        # status alone cannot say whether its product goal still owes work.
+        # The old two-argument call keeps the historical diagnostic behaviour
+        # for readers that do not know which tasks are eligible.
         if actionable is not None:
             if waiting and not set(waiting) & actionable:
                 continue

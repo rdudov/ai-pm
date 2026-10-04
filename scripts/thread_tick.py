@@ -488,18 +488,20 @@ def goal_watch(thread: str, report: dict, stored: dict, moment: datetime) -> dic
     """
     previous = {str(goal.get("id")): goal for goal in stored.get("goals") or []}
     live_ids = {item["id"] for item in report["live_runs"]}
-    actionable_ids = {
-        item["id"]
-        for field in ("can_pick_up", "ready_to_start", "decided_not_done",
-                      "queued_by_plan")
-        for item in (report.get(field) or [])
-    }
     try:
         for goal in product_goal.active(thread):
             product_goal.apply_observed(goal["id"])
         panel = product_goal.panel(thread)
+        # A technical task can be blocked or completed while its goal still
+        # owes installation, acceptance or delivery. Launchability is therefore
+        # not the test for whether the product owner has a next decision.
+        # Explicit holds still belong to the observer, not to status labels.
+        held_ids = {item["id"] for field in ("waiting_user", "backlog")
+                    for item in (report.get(field) or [])}
+        continuation_ids = {number for goal in panel
+                            for number in goal.get("waiting_on") or []} - held_ids
         waiting = product_goal.standing(
-            thread, list(live_ids), list(actionable_ids))
+            thread, list(live_ids), list(continuation_ids))
     except (product_goal.GoalError, OSError, ValueError) as error:
         return {"transitions": [f"долговечные цели направления не читаются: {error}"],
                 "standing": [], "reminder": stored.get("goal_reminder"), "panel": [],
@@ -529,7 +531,7 @@ def goal_watch(thread: str, report: dict, stored: dict, moment: datetime) -> dic
     objects = [goal for goal in panel
                if goal.get("waiting_on")
                and not set(goal["waiting_on"]) & live_ids
-               and set(goal["waiting_on"]) & actionable_ids]
+               and set(goal["waiting_on"]) & continuation_ids]
     return {"transitions": transitions_seen, "standing": standing_now,
             "reminder": reminder, "panel": panel, "objects": objects}
 
