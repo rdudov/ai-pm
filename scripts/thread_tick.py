@@ -496,8 +496,7 @@ def goal_watch(thread: str, report: dict, stored: dict, moment: datetime) -> dic
         # owes installation, acceptance or delivery. Launchability is therefore
         # not the test for whether the product owner has a next decision.
         # Explicit holds still belong to the observer, not to status labels.
-        held_ids = {item["id"] for field in ("waiting_user", "backlog")
-                    for item in (report.get(field) or [])}
+        held_ids = {item["id"] for item in report.get("continuation_holds") or []}
         continuation_ids = {number for goal in panel
                             for number in goal.get("waiting_on") or []} - held_ids
         waiting = product_goal.standing(
@@ -646,7 +645,7 @@ def started_runs(before: dict, after: dict | None) -> list[int]:
 
 
 def outcome(before: dict, after: dict | None, woke: bool, report: dict,
-            session: dict | None = None) -> str:
+            session: dict | None = None, owner_holds: bool = False) -> str:
     """What the check came to, in ordinary words, from what was observed.
 
     Never from the text the woken owner returned. The owner's own account of what
@@ -655,6 +654,8 @@ def outcome(before: dict, after: dict | None, woke: bool, report: dict,
     the live runs after it.
     """
     if not woke:
+        if owner_holds:
+            return "не будился: занят другой продакт в том же рабочем дереве"
         # Не будиться, потому что направление уже ведёт непрерывная сессия, — это
         # не то же самое, что не будиться, потому что новостей нет. Смешать их
         # значило бы показать пользователю тишину там, где идёт работа.
@@ -1330,10 +1331,14 @@ def main() -> int:
     # восстанавливает её, когда она умерла или была вынуждена ротироваться.
     # Обычная работа сюда не попадает: без усиленной цели `mode` остаётся `none`
     # и всё ниже идёт ровно как раньше.
-    session = goal_session.watchdog(args.thread, moment, act=not args.dry_run)
+    owner_holds = bool((standing["yielded_to_awake_owner"] or {}).get("to"))
+    # The same observed collision holds both launch paths. Keep the goals and
+    # wait on disk; the next tick can continue once the overlapping owner exits.
+    session = goal_session.watchdog(
+        args.thread, moment, act=not args.dry_run and not owner_holds)
     session_holds, handover = session_leads(session, goals["objects"])
     events += handover
-    woke = (bool(events) or args.force) and not session_holds
+    woke = (bool(events) or args.force) and not session_holds and not owner_holds
 
     def record(final: dict | None, done: bool) -> dict:
         """The direction's state file, in the one shape the board reads."""
@@ -1374,7 +1379,7 @@ def main() -> int:
             # when the board is built, which is the moment the answer is about.
             "check": {
                 "at": now,
-                "outcome": (outcome(current, final, woke, report, session) if done
+                "outcome": (outcome(current, final, woke, report, session, owner_holds) if done
                             else "проверка идёт: продакт разбужен, решение ещё не принято"),
                 "outcome_src": (
                     "события и очередь треда в момент проверки" if not woke else

@@ -263,6 +263,16 @@ def build(name: str) -> dict:
         "backlog": [{"id": task["id"], "title": task["title"],
                      "src": (task["board"]["plan_place"] or {}).get("src")}
                     for task in thread["tasks"] if task["board"]["area"] == "backlog"],
+        # Display areas are exclusive: a blocked/completed task can still be
+        # explicitly paused or awaiting the user's answer. Carry the observer's
+        # parsed hold facts independently for durable goal continuation.
+        "continuation_holds": [
+            {"id": task["id"], "title": task["title"],
+             "asked_user": task.get("asked_user") or [],
+             "plan_place": task["board"].get("plan_place")}
+            for task in thread["tasks"]
+            if task.get("asked_user")
+            or (task["board"].get("plan_place") or {}).get("role") == "paused"],
         # Work whose start condition was written down and has since been met.
         # Kept apart from «можно подхватить» on purpose: both say nothing is
         # holding the task, but only this one says somebody decided in advance

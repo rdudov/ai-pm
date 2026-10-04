@@ -10,6 +10,8 @@ goes with it and the layout decisions the picture depends on.
 from __future__ import annotations
 
 import ast
+from contextlib import redirect_stdout
+from io import StringIO
 import json
 import os
 import subprocess
@@ -26,6 +28,7 @@ import process_map_schema as schema
 import process_map_serve as serve
 import process_map_state as state
 import product_memory
+import product_goal
 import runner_contract
 import thread_state as thread
 import thread_tick as tick
@@ -4084,6 +4087,61 @@ class TheWakeUpSeesTheQueueMove(unittest.TestCase):
                                            worktrees=["/path/to/task-agent"])]
         self.assertEqual(tick.yielded(report)["to"][0]["kind"], "session")
 
+    def test_main_waits_for_an_overlapping_owner_then_continues_the_durable_goal(self):
+        # Actual launch decision, not merely a recorded yield. No provider or
+        # delivery is called: the first real-mode tick must stop before either.
+        with (tempfile.TemporaryDirectory() as home, mock.patch.dict(os.environ, {
+                "PRODUCT_OWNER_GOALS": str(Path(home) / "goals")}),
+              mock.patch.object(product_goal, "TASKS_REPO", Path(home) / "empty-repo")):
+            goal = product_goal.open_goal("process", "installed result", ["observed"], 100)
+            report = self.report()
+            report["owners_awake"] = [an_owner(
+                pid=999999, kind="session", thread=None, worktrees=report["worktrees"],
+                activity={"active": True})]
+            store = Path(home) / "threads"
+            store.mkdir()
+            path = store / "process.json"
+            path.write_text(json.dumps({"snapshot": tick.snapshot(report),
+                                        "goals": product_goal.panel("process")}))
+            session = {"mode": "session", "live": False, "holds": False,
+                       "detail": "configured Codex tick fallback"}
+            with (mock.patch.object(tick, "STATE_DIR", store),
+                  mock.patch.object(tick, "build", return_value=report),
+                  mock.patch.object(tick, "runner_contract_alarm", return_value=([], None)),
+                  mock.patch.object(tick.daily_standup, "maybe_send", return_value={}),
+                  mock.patch.object(tick, "codex_window", return_value=None),
+                  mock.patch.object(tick.goal_session, "watchdog", return_value=session) as watchdog,
+                  mock.patch.object(tick.outbound, "Ledger"),
+                  mock.patch.object(tick.outbound, "instruction_letter", return_value=None),
+                  mock.patch.object(tick, "deliver_undelivered", return_value=[]),
+                  mock.patch.object(tick, "deliver") as deliver,
+                  mock.patch.object(tick.subprocess, "run") as launch,
+                  mock.patch.object(sys, "argv", ["thread_tick.py", "process", "--force"])):
+                result = tick.main()
+                launch.assert_not_called()
+                deliver.assert_not_called()
+                self.assertEqual(result, 0)
+                self.assertFalse(watchdog.call_args.kwargs["act"])
+                held = json.loads(path.read_text())
+                self.assertFalse(held["check"]["woke_owner"])
+                self.assertIn("занят другой продакт", held["check"]["outcome"])
+                self.assertEqual(held["goals"][0]["id"], goal["id"])
+                self.assertTrue(held["yielded_to_awake_owner"]["to"])
+                self.assertIn("awake_owner", [r["code"] for r in held["check"]["reasons"]])
+                # Reuse the persisted tick. Exit, disjoint worktrees and an
+                # observed idle terminal all permit continuation without force,
+                # even though the goal reminder was just written.
+                for owners in ([], [an_owner(worktrees=["/other/tree"], activity={"active": True})],
+                               [an_owner(worktrees=report["worktrees"], activity={"active": False})]):
+                    with self.subTest(owners=owners), redirect_stdout(StringIO()) as out:
+                        report["owners_awake"] = owners
+                        with mock.patch.object(sys, "argv", ["thread_tick.py", "process", "--dry-run"]):
+                            self.assertEqual(tick.main(), 0)
+                        observed = json.loads(out.getvalue())
+                        self.assertTrue(observed["check"]["woke_owner"])
+                        self.assertTrue(observed["check"]["events"])
+                launch.assert_not_called()
+
     def test_the_list_is_written_whether_or_not_an_agent_is_woken(self):
         source = Path(state.HOME / "scripts" / "thread_tick.py").read_text()
         # Written into the thread's own state file, next to the snapshot, before
@@ -5014,6 +5072,41 @@ class TheWakeUpSeesTheQueueAndTheBacklog(unittest.TestCase):
               mock.patch.object(thread, "process_inventory", return_value=[]),
               mock.patch.object(thread.observer, "write_owner_observations")):
             return thread.build("process")
+
+    def test_goal_continuation_uses_hold_facts_even_when_the_board_displays_a_jam_or_done(self):
+        # Real plan/question parsing, classifier, report and selector. Display
+        # priority must not erase the pause or unanswered-question observation.
+        cases = (("planned", True, False, "backlog"),
+                 ("blocked", True, False, "stuck"),
+                 ("completed", True, False, "done"),
+                 ("completed", False, True, "done"),
+                 ("blocked", False, False, "stuck"),
+                 ("completed", False, False, "done"))
+        with (tempfile.TemporaryDirectory() as home, mock.patch.dict(os.environ, {
+                "PRODUCT_OWNER_GOALS": str(Path(home) / "goals")}),
+              mock.patch.object(product_goal, "TASKS_REPO", Path(home) / "empty-repo")):
+            goal = product_goal.open_goal("process", "installed result", ["observed"], 100)
+            for status, paused, asked, area in cases:
+                with self.subTest(status=status, paused=paused, asked=asked):
+                    plan = ThePlanOwnsTheQueue().projection(
+                        a_revision(now=[], next=[], parallel=[],
+                                   paused=["100 — на паузе по слову пользователя"] if paused else []),
+                        catalogue=[{"id": 100, "title": "Fixture", "slug": "100-fixture",
+                                    "status": status}])
+                    questions = state.questions_of([
+                        "Продолжать? Спрошено у пользователя 2026-08-05, Telegram 12345"
+                    ] if asked else [], {})
+                    task = a_task(id=100, status=status, questions=questions,
+                                  flags=["blocked"] if status == "blocked" else [])
+                    state.assign_areas([task], [{"id": 100, "status_detail": None}], plan=plan)
+                    self.assertEqual(task["board"]["area"], area)
+                    report = self.report(task)
+                    watch = tick.goal_watch("process", report, {}, AT)
+                    self.assertEqual([h["id"] for h in report.get("continuation_holds") or []],
+                                     [100] if paused or asked else [])
+                    self.assertEqual([g["id"] for g in watch["objects"]],
+                                     [] if paused or asked else [goal["id"]])
+                    self.assertEqual(bool(watch["standing"]), not (paused or asked))
 
     def test_a_dead_run_of_a_closed_task_is_not_live_or_attention(self):
         closed = a_task(id=1098, dir="1098-t", status="completed",

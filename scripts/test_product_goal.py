@@ -417,9 +417,9 @@ class TickReadsGoals(unittest.TestCase):
                 self.assertTrue(handover)
 
     def test_explicit_human_and_plan_holds_do_not_become_continuation_work(self):
-        for field in ("waiting_user", "backlog"):
+        for field in ("asked_user", "plan_place"):
             with self.subTest(field=field):
-                report = {"live_runs": [], field: [{"id": 100}],
+                report = {"live_runs": [], "continuation_holds": [{"id": 100, field: True}],
                           "ready_to_start": [{"id": 100}]}
                 watch = tick.goal_watch("process", report, {}, datetime.now(timezone.utc))
                 self.assertEqual(watch["standing"], [])
@@ -447,7 +447,7 @@ class TickReadsGoals(unittest.TestCase):
                 self.assertTrue(watch["objects"])
                 self.assertEqual(watch["objects"][0]["waiting_on"], [101])
                 self.assertEqual(watch["objects"][0]["state"], "paused")
-        held = tick.goal_watch("process", {"live_runs": [], "backlog": [{"id": 101}]}, {},
+        held = tick.goal_watch("process", {"live_runs": [], "continuation_holds": [{"id": 101}]}, {},
                                datetime.now(timezone.utc))
         self.assertEqual(held["objects"], [])
 
