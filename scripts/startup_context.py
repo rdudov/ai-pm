@@ -32,7 +32,11 @@ TASK_RECORD_NAMES = {
     "progress.json", "manifest.json",
 }
 MAX_RECORD_BYTES = 65_536
-MAX_POST_CURSOR_BYTES = 262_144
+# Keep unread bodies at their existing durable addresses. The current decision
+# blocks already fill most of a tick's initial input; copying the unread tail
+# as well exceeded the engine's turn/start limit. Its existing manifest keeps
+# every source, digest and size without advancing the plan cursor.
+MAX_POST_CURSOR_BYTES = 0
 
 
 def digest_text(text: str) -> str:
