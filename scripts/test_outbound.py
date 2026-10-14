@@ -34,6 +34,92 @@ def composed(**changes) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
+class FailedWakeStaysInTheServiceJournal(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        home = Path(temporary.name)
+        self.state_dir = home / "threads"
+        self.ledger = home / "outbound.json"
+        self.report = {
+            "title": "Companion", "live_runs": [], "needs_attention": [],
+            "repos": [], "ready_to_start": [], "decided_not_done": [],
+            "can_pick_up": [], "undelivered": [], "waiting_user": [],
+            "worktrees": [], "owners_awake": [],
+        }
+        patches = [
+            mock.patch.object(tick, "STATE_DIR", self.state_dir),
+            mock.patch.object(outbound, "LEDGER", self.ledger),
+            mock.patch.object(tick, "build", return_value=self.report),
+            mock.patch.object(tick, "runner_contract_alarm", return_value=([], None)),
+            mock.patch.object(tick, "goal_watch", return_value={
+                "objects": [], "panel": [], "reminder": None,
+                "transitions": [], "standing": []}),
+            mock.patch.object(tick.goal_session, "watchdog", return_value={"mode": "none"}),
+            mock.patch.object(outbound, "instruction_letter", return_value=None),
+            mock.patch.object(tick, "deliver_undelivered", return_value=[]),
+            mock.patch.object(tick.startup_context, "packet", return_value={}),
+            mock.patch.object(tick.startup_context, "render", return_value="startup context"),
+        ]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+        self.mail = self.enterContext(mock.patch.object(tick, "send_mail", return_value="gmail-test"))
+        self.engine = self.enterContext(mock.patch.object(tick.subprocess, "run"))
+
+    def run_tick(self, result, *flags):
+        self.engine.return_value = result
+        stdout, journal = io.StringIO(), io.StringIO()
+        with (mock.patch.object(sys, "argv", ["thread_tick.py", "companion", *flags]),
+              contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(journal)):
+            code = tick.main()
+        return code, stdout.getvalue(), journal.getvalue()
+
+    def test_nonzero_exit_keeps_both_full_streams_without_a_send_or_receipt(self):
+        banner = "OpenAI Codex v0.162.1\n" + "runtime header\n" * 40
+        stderr = banner + "Error: engine refusal after the banner\nlast diagnostic"
+        stdout = "partial output\n" * 40 + "last output"
+        for engine_code, out, err in [(1, stdout, stderr), (75, "", ""), (2, stdout, "")]:
+            with self.subTest(engine_code=engine_code):
+                code, printed, journal = self.run_tick(
+                    subprocess.CompletedProcess([], engine_code, out, err), "--force")
+                self.assertEqual(code, 1)
+                self.assertEqual(printed, "")
+                self.assertIn(f"код {engine_code}", journal)
+                self.assertIn("stderr:\n" + err, journal)
+                self.assertIn("stdout:\n" + out, journal)
+                self.mail.assert_not_called()
+                data = json.loads(self.ledger.read_text())
+                self.assertEqual(data["threads"]["companion"]["letters"], [])
+                self.assertEqual(data["threads"]["companion"]["delivered_events"], {})
+                self.assertFalse(self.ledger.with_name("outbound-journal.jsonl").exists())
+
+    def test_a_later_success_keeps_silence_routes_and_normal_composed_delivery(self):
+        self.run_tick(subprocess.CompletedProcess([], 1, "", "failed"), "--force")
+        route = "product-owner: route selected; Codex (test)"
+        code, printed, journal = self.run_tick(
+            subprocess.CompletedProcess([], 0, "SILENT\n", route + "\nmodel transcript"), "--force")
+        self.assertEqual((code, printed, journal), (0, "SILENT\n", route + "\n"))
+        self.mail.assert_not_called()
+        code, _, _ = self.run_tick(subprocess.CompletedProcess([], 0, composed(), ""), "--force")
+        self.assertEqual(code, 0)
+        self.mail.assert_called_once()
+        letters = json.loads(self.ledger.read_text())["threads"]["companion"]["letters"]
+        self.assertEqual([letter["kind"] for letter in letters], ["report"])
+        self.assertEqual(letters[0]["event_id"], "report:task-1280:accepted")
+
+    def test_quiet_and_dry_run_ticks_do_not_call_the_engine_or_send_mail(self):
+        self.state_dir.mkdir()
+        (self.state_dir / "companion.json").write_text(json.dumps({
+            "snapshot": tick.snapshot(self.report)}))
+        for flags in [(), ("--dry-run", "--force")]:
+            with self.subTest(flags=flags):
+                code, _, _ = self.run_tick(None, *flags)
+                self.assertEqual(code, 0)
+                self.engine.assert_not_called()
+                self.mail.assert_not_called()
+
+
 class ComposerSelectsBeforeText(unittest.TestCase):
     def test_silent_creates_no_message(self):
         self.assertIsNone(tick.parse_composed_message("SILENT"))

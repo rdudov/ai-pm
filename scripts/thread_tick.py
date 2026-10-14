@@ -1468,15 +1468,17 @@ def main() -> int:
         env=environment,
         capture_output=True, text=True, cwd=HOME, timeout=WAKE_TIMEOUT,
     )
+    if result.returncode != 0:
+        # The existing service journal owns engine failures, including output
+        # before a final answer. A changing runtime banner is not a mail event.
+        print(f"[{args.thread}] пробуждение треда не отработало: "
+              f"код {result.returncode}", file=sys.stderr)
+        print(f"stderr:\n{result.stderr or ''}", file=sys.stderr)
+        print(f"stdout:\n{result.stdout or ''}", file=sys.stderr)
+        return 1
     for diagnostic in route_diagnostics(result.stderr or ""):
         print(diagnostic, file=sys.stderr)
     message = (result.stdout or "").strip()
-    if result.returncode != 0:
-        failure = f"[{args.thread}] пробуждение треда не отработало: {(result.stderr or '')[:300]}"
-        deliver(args.thread, "wake_failure",
-                f"Продакт: пробуждение треда «{report['title']}» не отработало",
-                failure, moment)
-        return 1
 
     try:
         composed = parse_composed_message(message)
