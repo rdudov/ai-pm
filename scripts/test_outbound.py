@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import outbound
 import plain_russian
 import process_map_state as pms
+import product_goal
 import thread_state
 import thread_tick as tick
 
@@ -39,6 +40,7 @@ class FailedWakeStaysInTheServiceJournal(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         home = Path(temporary.name)
+        self.goals = home / "goals"
         self.state_dir = home / "threads"
         self.ledger = home / "outbound.json"
         self.report = {
@@ -48,6 +50,7 @@ class FailedWakeStaysInTheServiceJournal(unittest.TestCase):
             "worktrees": [], "owners_awake": [],
         }
         patches = [
+            mock.patch.dict(os.environ, {"PRODUCT_OWNER_GOALS": str(self.goals)}),
             mock.patch.object(tick, "STATE_DIR", self.state_dir),
             mock.patch.object(outbound, "LEDGER", self.ledger),
             mock.patch.object(tick, "build", return_value=self.report),
@@ -118,6 +121,58 @@ class FailedWakeStaysInTheServiceJournal(unittest.TestCase):
                 self.assertEqual(code, 0)
                 self.engine.assert_not_called()
                 self.mail.assert_not_called()
+
+    def standing_goal(self, gap=None, next_transition=None):
+        opened = product_goal.open_goal(
+            "companion", "Recover the missing original snapshot", ["Compare original values"],
+            100, gap=gap, next_transition=next_transition)
+        projected = product_goal.projection(opened)
+        tick.goal_watch.return_value = {
+            "objects": [projected], "panel": [projected], "reminder": None,
+            "transitions": [], "standing": []}
+        return opened
+
+    def test_recorded_wait_and_silent_complete_without_a_letter(self):
+        opened = self.standing_goal(
+            "The original snapshot is unavailable; another run cannot reconstruct it.",
+            "Wait for the archive, then compare the original values.")
+        code, printed, journal = self.run_tick(
+            subprocess.CompletedProcess([], 0, "SILENT", ""), "--force")
+        self.assertEqual((code, printed, journal), (0, "SILENT\n", ""))
+        checked = json.loads((self.state_dir / "companion.json").read_text())["goal_post_check"]
+        self.assertTrue(checked["resolved"])
+        self.assertEqual(checked["waiting"][0]["gap"], opened["gap"])
+        self.assertEqual(checked["waiting"][0]["next_transition"], opened["next_transition"])
+        self.mail.assert_not_called()
+        self.assertFalse(self.ledger.with_name("outbound-journal.jsonl").exists())
+
+    def test_unexplained_silence_fails_and_a_useful_linked_run_succeeds(self):
+        opened = self.standing_goal()
+        result = subprocess.CompletedProcess([], 0, "SILENT", "")
+        code, _, journal = self.run_tick(result, "--force")
+        self.assertEqual(code, 1)
+        self.assertIn("ни живого прогона", journal)
+        self.mail.assert_not_called()
+        # The run starts during the engine turn; it must be linked to this goal.
+        self.engine.side_effect = lambda *args, **kwargs: (
+            self.report["live_runs"].append({"id": opened["main_task"],
+                                              "run": {"stale_running": False}}) or result)
+        code, _, journal = self.run_tick(result, "--force")
+        self.assertEqual((code, journal), (0, ""))
+        checked = json.loads((self.state_dir / "companion.json").read_text())["goal_post_check"]
+        self.assertEqual(checked["how"], "по задаче цели пошёл живой прогон")
+        self.mail.assert_not_called()
+
+    def test_recorded_wait_does_not_mask_an_engine_failure(self):
+        self.standing_goal("Original snapshot is missing.", "Wait for the archive.")
+        with mock.patch.object(tick.goal_session, "post_check") as check:
+            code, _, journal = self.run_tick(
+                subprocess.CompletedProcess([], 2, "partial", "actual refusal"), "--force")
+        self.assertEqual(code, 1)
+        self.assertIn("код 2", journal)
+        self.assertIn("actual refusal", journal)
+        check.assert_not_called()
+        self.mail.assert_not_called()
 
 
 class ComposerSelectsBeforeText(unittest.TestCase):

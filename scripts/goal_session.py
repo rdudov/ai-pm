@@ -52,8 +52,9 @@
 
 Тут же живёт машинный пост-контроль стоячей цели. Пробуждение по цели, которая
 стоит, обязано кончиться одним из двух: живым прогоном по её задаче или
-названным блокером. `SILENT` третьим исходом не является — и это проверяется
-после хода наблюдением, а не дисциплиной промпта.
+названным блокером в ответе либо долговечной цели со следующим переходом.
+`SILENT` не заменяет эти исходы и не отменяет записанное ожидание — это
+проверяется после хода наблюдением, а не дисциплиной промпта.
 
 Usage:
     goal_session.py run <тред> [--once]
@@ -390,24 +391,46 @@ def post_check(thread: str, standing_goals: list[dict], after_live: list[int],
     ровно там, где сам режим объясняет, почему нужен машинный отказ.
 
     Два допустимых исхода, и оба наблюдаемы после хода: по задаче цели пошёл
-    живой прогон — или в ответе назван конкретный блокер обычными словами.
-    Молчание третьим исходом не является: оно записывается как отказ в снимке
-    направления и делает ход неуспешным. Внутренние номера целей в Telegram из
-    этого пути не проецируются.
+    живой прогон — или назван конкретный блокер обычными словами, в ответе либо
+    в долговечной цели вместе со следующим переходом. SILENT решает только,
+    нужно ли письмо; незаписанное бездействие остаётся отказом. Внутренние номера
+    целей в Telegram из этого пути не проецируются.
     """
     if not standing_goals:
         return None
     named = bool(reply.strip()) and reply.strip() != "SILENT"
     unresolved = [goal for goal in standing_goals
                   if not set(goal.get("waiting_on") or []) & set(after_live)]
+    waiting = []
+    if unresolved and not named:
+        for goal in unresolved:
+            # Read the decision after the turn, by this goal's id. The old
+            # wake-up projection cannot witness a newly written or removed wait.
+            try:
+                current = product_goal.load(goal["id"])
+            except (product_goal.GoalError, OSError, ValueError) as error:
+                print(f"[{thread}] причина ожидания цели не читается: {error}", file=sys.stderr)
+                continue
+            if (isinstance(current, dict) and current.get("id") == goal["id"]
+                    and current.get("thread") == thread
+                    and current.get("state") == product_goal.ACTIVE
+                    and all(isinstance(current.get(key), str) and current[key].strip()
+                            for key in ("gap", "next_transition"))):
+                waiting.append({"id": goal["id"], "gap": current["gap"],
+                                "next_transition": current["next_transition"],
+                                "src": str(product_goal.root() / f"{goal['id']}.json")})
+        recorded = {goal["id"] for goal in waiting}
+        unresolved = [goal for goal in unresolved if goal["id"] not in recorded]
     if not unresolved or named:
         return {
             "at": moment.isoformat(),
             "resolved": True,
-            "how": "по задаче цели пошёл живой прогон" if not unresolved
-                   else "в ответе назван блокер",
+            "how": ("в ответе назван блокер" if named and unresolved else
+                    "причина ожидания записана в долговечной цели" if waiting else
+                    "по задаче цели пошёл живой прогон"),
             "goals": [goal["id"] for goal in standing_goals],
-            "src": "живые прогоны направления, наблюдённые после хода, и текст ответа",
+            "waiting": waiting,
+            "src": "живые прогоны направления, текст ответа и долговечные цели после хода",
         }
     told = (f"[{thread}] цель "
             + ", ".join(str(goal["id"]) for goal in unresolved)
@@ -515,9 +538,10 @@ def _rules_block() -> str:
     """Правила, одинаковые на всех ходах: одно место, чтобы они не разъехались."""
     return f"""Правила этого режима:
 - по каждой стоячей цели обязателен один из двух исходов: запущен следующий
-  безопасный шаг по её задаче — или в ответе назван конкретный внешний блокер
-  обычными словами. Молчание третьим исходом не является и записывается как
-  отказ механизма;
+  безопасный шаг по её задаче — или назван конкретный внешний блокер обычными
+  словами, в ответе либо в gap долговечной цели вместе с next_transition.
+  Молчание третьим исходом не является: без записанной причины это отказ
+  механизма. При записанном ожидании SILENT допустим, повторного письма не нужно;
 - кросс-ревью: работу Codex Sol временно ревьюит Codex Astra в отдельной свежей read-only сессии; на замечания сначала
   анализ и план, потом правки, потом повторное ревью;
 - код продуктов ты руками не правишь: работа уходит обычным путём задач;

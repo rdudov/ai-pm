@@ -377,6 +377,10 @@ class StandingGoalOutcome(unittest.TestCase):
 
     def setUp(self) -> None:
         self.mail: list[tuple] = []
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.enterContext(mock.patch.dict(os.environ, {"PRODUCT_OWNER_GOALS": str(self.root)}))
         self.deliver, tick.deliver = tick.deliver, lambda *args, **kwargs: self.mail.append(args)
         self.addCleanup(self.restore)
 
@@ -408,7 +412,8 @@ class StandingGoalOutcome(unittest.TestCase):
         # Внутренний номер цели остаётся в машинной записи отказа, но не уходит
         # пользователю отдельным сообщением; продуктового Telegram-отправителя
         # в этом пути больше нет.
-        self.assertIn("ни живого прогона", journal.write.call_args_list[0].args[0])
+        self.assertIn("ни живого прогона", "".join(call.args[0]
+                      for call in journal.write.call_args_list))
 
     def test_an_empty_answer_is_refused_like_silence(self):
         checked = session.post_check("process", [goal()], [], "   ", self.moment())
@@ -416,6 +421,52 @@ class StandingGoalOutcome(unittest.TestCase):
 
     def test_a_direction_without_standing_goals_is_not_judged(self):
         self.assertIsNone(session.post_check("process", [], [], "SILENT", self.moment()))
+
+    def test_the_wait_is_read_after_the_turn_instead_of_from_the_wake_projection(self):
+        opened = goals.open_goal("process", "Recover original values", ["Compare values"], 1094)
+        before = goals.projection(opened)
+        goals.set_fields(opened["id"], gap="Original values are missing.",
+                         next_transition="Wait for the archive, then compare.")
+        checked = session.post_check("process", [before], [], "", self.moment())
+        self.assertTrue(checked["resolved"])
+        self.assertIn("Original values", checked["waiting"][0]["gap"])
+        # Withdrawing the next transition cannot leave the old decision accepted.
+        before = goals.projection(goals.load(opened["id"]))
+        goals.set_fields(opened["id"], next_transition="")
+        with mock.patch("sys.stderr"):
+            checked = session.post_check("process", [before], [], "SILENT", self.moment())
+        self.assertFalse(checked["resolved"])
+
+    def test_incomplete_unreadable_and_other_goal_decisions_do_not_excuse_silence(self):
+        original = self.root / "0001.json"
+        for change in ({"gap": ""}, {"next_transition": "   "},
+                       {"id": "0002"}, {"thread": "another"}, {"state": "paused"}):
+            with self.subTest(change=change), mock.patch("sys.stderr"):
+                original.write_text(json.dumps({**goal(), **change}))
+                checked = session.post_check("process", [goal()], [], "", self.moment())
+                self.assertFalse(checked["resolved"])
+        original.write_text("{broken")
+        with mock.patch("sys.stderr") as journal:
+            checked = session.post_check("process", [goal()], [], "SILENT", self.moment())
+        self.assertFalse(checked["resolved"])
+        self.assertIn("не читается", journal.write.call_args_list[0].args[0])
+        original.unlink()
+        (self.root / "0002.json").write_text(json.dumps(goal(goal_id="0002")))
+        with mock.patch("sys.stderr"):
+            checked = session.post_check("process", [goal()], [1126], "SILENT", self.moment())
+        self.assertFalse(checked["resolved"])
+        self.assertEqual(self.mail, [])
+
+    def test_each_goal_needs_its_own_run_or_recorded_reason(self):
+        (self.root / "0001.json").write_text(json.dumps(goal()))
+        other = goal(goal_id="0002", waiting=[1100])
+        with mock.patch("sys.stderr"):
+            checked = session.post_check("process", [goal(), other], [], "", self.moment())
+        self.assertFalse(checked["resolved"])
+        self.assertEqual(checked["goals"], ["0002"])
+        checked = session.post_check("process", [goal(), other], [1100], "SILENT", self.moment())
+        self.assertTrue(checked["resolved"])
+        self.assertEqual([item["id"] for item in checked["waiting"]], ["0001"])
 
     def test_the_tick_fails_its_unit_on_an_unresolved_standing_goal(self):
         """Код возврата — единственный сигнал, переживающий проверку, которую никто не читал."""
@@ -556,6 +607,22 @@ class OneConversation(unittest.TestCase):
         turn = session.read("process")["last_turn"]
         self.assertTrue(turn["silent"])
         self.assertNotIn("composer_failure", turn)
+
+    def test_a_session_turn_accepts_recorded_waiting_without_composing_mail(self):
+        goals.set_fields("0001", gap="Original snapshot is missing.",
+                         next_transition="Wait for the archive, then compare.")
+        self.observations = [look(live=[])]
+        session.MIN_TURN_GAP_SECONDS = 0
+        session.run_turn = lambda *args, **kwargs: {
+            "ok": True, "reply": "SILENT", "usage": None,
+            "duration_seconds": 1.0, "error": None}
+        with mock.patch.object(tick, "deliver") as deliver:
+            self.assertEqual(session.loop("process", once=True), 0)
+        turn = session.read("process")["last_turn"]
+        self.assertTrue(turn["silent"])
+        self.assertTrue(turn["post_check"]["resolved"])
+        self.assertEqual(turn["post_check"]["waiting"][0]["gap"], "Original snapshot is missing.")
+        deliver.assert_not_called()
 
     def test_recovery_continues_the_same_conversation(self):
         """Новый разговор стоил бы ровно ту пересборку, ради отказа от которой режим и заведён."""
