@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from pathlib import Path
 import sys
 import tempfile
@@ -25,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import process_map_schema as schema
 import process_map_state as state
 import product_goal as goals
+import startup_context
 import thread_tick as tick
 
 
@@ -86,6 +88,53 @@ class GoalStore(unittest.TestCase):
         self.assertEqual(again["outcome"], opened["outcome"])
         self.assertEqual([goal["id"] for goal in goals.active("process")], [opened["id"]])
         self.assertEqual(goals.active("product"), [])
+
+    def test_wait_is_explicit_persistent_and_visible_to_existing_readers(self):
+        opened = self.opened()
+        goals.set_fields(opened["id"], gap="Repair is not installed.",
+                         next_transition="Start the available author.")
+        self.assertIsNone(goals.waiting_decision(goals.load(opened["id"])))
+        result = subprocess.run(
+            [sys.executable, str(Path(goals.__file__)), "wait", opened["id"],
+             "--reason", "The owner's decision is required before changing retention.",
+             "--next", "Apply the policy after the owner decides.",
+             "--src", "Owner's recorded request"], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        record = goals.load(opened["id"])
+        self.assertEqual(record["state"], goals.ACTIVE)
+        self.assertEqual(record["gap"], "Repair is not installed.")
+        decision = goals.waiting_decision(record)
+        self.assertIn("owner's decision", decision["reason"])
+        self.assertEqual(goals.projection(record)["waiting"], decision)
+        self.assertEqual(startup_context.goal_view(record)["waiting"], decision)
+        self.assertIn(decision["reason"], goals.block("process"))
+        self.assertIn(decision["src"], result.stdout)
+        events = [json.loads(line) for line in (goals.root() / goals.JOURNAL).read_text().splitlines()]
+        self.assertEqual(events[-1]["event"], "wait")
+
+    def test_wait_requires_a_reason_next_transition_and_observed_source(self):
+        opened = self.opened()
+        before = goals.load(opened["id"])
+        for args in ((" ", "next", "source"), ("reason", "", "source"),
+                     ("reason", "next", " ")):
+            with self.subTest(args=args), self.assertRaises(goals.GoalError):
+                goals.wait(opened["id"], *args)
+            self.assertEqual(goals.load(opened["id"]), before)
+        goals.pause(opened["id"], "Task needs a corrective repair.", "Observed refusal")
+        with self.assertRaises(goals.GoalError):
+            goals.wait(opened["id"], "reason", "next", "source")
+
+    def test_available_work_withdraws_wait_at_the_same_owner(self):
+        opened = self.opened()
+        for mutation in (lambda: goals.resume(opened["id"]),
+                         lambda: goals.set_fields(opened["id"], next_transition="Start the ready author."),
+                         lambda: goals.set_fields(opened["id"], gap="Ready to repair."),
+                         lambda: goals.pause(opened["id"], "Corrective repair needed.", "Observed refusal")):
+            with self.subTest(mutation=mutation):
+                goals.wait(opened["id"], "Original data unavailable.", "Compare after receipt.", "Archive check")
+                mutation()
+                self.assertIsNone(goals.waiting_decision(goals.load(opened["id"])))
+                self.assertNotIn("waiting", goals.load(opened["id"]))
 
     # -- the corrective task path ---------------------------------------------
 

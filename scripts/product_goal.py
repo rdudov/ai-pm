@@ -46,6 +46,7 @@ Usage:
     product_goal.py open --thread <тред> --outcome <...> --observable <...>
                          --main-task <N> [--product <slug>] [--gap <...>]
     product_goal.py set <id> [--gap <...>] [--next <...>]
+    product_goal.py wait <id> --reason <...> --next <...> --src <...>
     product_goal.py signal <id> --code <код> --text <...> --src <чем наблюдено>
     product_goal.py observe [<id>] [--json]
     product_goal.py pause <id> --reason <...> --src <чем наблюдено>
@@ -286,7 +287,41 @@ def set_fields(goal_id: str, gap: str | None = None,
             goal["gap"] = gap.strip() or None
         if next_transition is not None:
             goal["next_transition"] = next_transition.strip() or None
+        if gap is not None or next_transition is not None:
+            goal.pop("waiting", None)
         return _save(goal, "set", {"gap": goal["gap"], "next": goal["next_transition"]})
+
+
+def wait(goal_id: str, reason: str, next_transition: str, src: str) -> dict:
+    """Record the owner's decision that an obstacle prevents useful action.
+
+    A plan is not this decision. The owner names the necessary obstacle and
+    what observed it, and withdraws it with resume or a planning edit when a
+    useful next step becomes available. No text classifier decides necessity.
+    """
+    if not all(value.strip() for value in (reason, next_transition, src)):
+        raise GoalError("ожидание требует конкретного препятствия, следующего "
+                        "перехода и источника наблюдения")
+    with _Lock():
+        goal = load(goal_id)
+        if goal["state"] != ACTIVE:
+            raise GoalError("ожидание записывается только для активной цели")
+        goal["next_transition"] = next_transition.strip()
+        goal["waiting"] = {"reason": reason.strip(), "src": src.strip(), "at": now()}
+        return _save(goal, "wait", {**goal["waiting"], "next": goal["next_transition"]})
+
+
+def waiting_decision(goal: dict) -> dict | None:
+    """Read only an explicit complete decision; legacy plans imply no wait."""
+    record = goal.get("waiting")
+    if (goal.get("state") != ACTIVE or not isinstance(record, dict)
+            or not all(isinstance(record.get(key), str) and record[key].strip()
+                       for key in ("reason", "src"))
+            or not isinstance(goal.get("next_transition"), str)
+            or not goal["next_transition"].strip()):
+        return None
+    return {"reason": record["reason"], "src": record["src"],
+            "at": record.get("at"), "next_transition": goal["next_transition"]}
 
 
 def add_signal(goal_id: str, code: str, text: str, src: str,
@@ -328,6 +363,7 @@ def pause(goal_id: str, reason: str, src: str) -> dict:
         if goal["state"] == CLOSED:
             raise GoalError("цель закрыта: её нельзя поставить на паузу")
         goal["state"] = PAUSED
+        goal.pop("waiting", None)
         goal["pause"] = {"at": now(), "reason": reason.strip(), "src": src.strip()}
         return _save(goal, "pause", {"reason": reason.strip()})
 
@@ -466,6 +502,7 @@ def resume(goal_id: str, gap: str | None = None,
                 + ", ".join(str(number) for number in holding))
         goal["state"] = ACTIVE
         goal["pause"] = None
+        goal.pop("waiting", None)
         if gap is not None:
             goal["gap"] = gap.strip() or None
         if next_transition is not None:
@@ -653,6 +690,7 @@ def projection(goal: dict) -> dict:
         "correctives": correctives,
         "gap": goal.get("gap"),
         "next_transition": goal.get("next_transition"),
+        "waiting": waiting_decision(goal),
         "pause": goal.get("pause"),
         "signals": [{"code": item["code"], "text": item["text"], "src": item["src"]}
                     for item in goal.get("signals", [])],
@@ -723,6 +761,7 @@ def block(thread: str) -> str:
         return ""
     lines = []
     for goal in goals:
+        waiting = waiting_decision(goal)
         marks = ", ".join(sorted({item["code"] for item in goal.get("signals", [])}))
         lines.append(
             f"- цель {goal['id']} [{goal['state']}, контроль {goal['control']}"
@@ -737,6 +776,8 @@ def block(thread: str) -> str:
                 for item in goal.get("correctives", []))
             + (f"  пауза: {goal['pause']['reason']} [{goal['pause']['src']}]\n"
                if goal.get("pause") else "")
+            + (f"  необходимое ожидание: {waiting['reason']} "
+               f"[{waiting['src']}]\n" if waiting else "")
             + f"  ближайший разрыв: {goal.get('gap') or 'не назван'}\n"
             f"  следующий переход: {goal.get('next_transition') or 'не назван'}\n")
     return f"""
@@ -744,8 +785,14 @@ def block(thread: str) -> str:
 переживают смену процесса, сеанса и модели — читай их до решения о запуске):
 {chr(10).join(lines)}
 По каждой активной цели на этом пробуждении обязателен один из двух исходов:
-запущен следующий безопасный шаг по названной задаче — или в ответе назван
-конкретный внешний блокер обычными словами. Закрытая корректирующая задача цель
+запущен следующий безопасный шаг по названной задаче — или назван конкретный
+внешний блокер обычными словами. Необходимое ожидание независимо от письма
+записывается через `product_goal.py wait <id> --reason "что мешает полезному
+действию" --next "после чего и что сделать" --src "чем препятствие наблюдено"`.
+Поля gap и next_transition сами по себе ожидания не разрешают. Когда полезный
+шаг доступен, `resume` или `set` снимает прежнее ожидание у того же владельца.
+Записанное ожидание допускает SILENT без повторного письма.
+Закрытая корректирующая задача цель
 не закрывает: после её приёмки основная задача возвращается в работу
 (`product_goal.py accept` и затем `resume`), и цель закрывается только живой
 проверкой исходного сценария через фактически установленный продукт
@@ -784,6 +831,9 @@ def _print(goal: dict, as_json: bool) -> None:
         print(f"  пауза: {goal['pause']['reason']} ({goal['pause']['src']})")
     print(f"  ближайший разрыв: {goal.get('gap') or 'не назван'}")
     print(f"  следующий переход: {goal.get('next_transition') or 'не назван'}")
+    waiting = waiting_decision(goal)
+    if waiting:
+        print(f"  необходимое ожидание: {waiting['reason']} ({waiting['src']})")
     for item in goal.get("signals", []):
         print(f"  признак {item['code']}: {item['text']} ({item['src']})")
     if goal.get("closed"):
@@ -819,6 +869,12 @@ def main() -> int:
     setter.add_argument("id")
     setter.add_argument("--gap")
     setter.add_argument("--next", dest="next_transition")
+
+    waiter = sub.add_parser("wait", help="явное необходимое ожидание активной цели")
+    waiter.add_argument("id")
+    waiter.add_argument("--reason", required=True)
+    waiter.add_argument("--next", dest="next_transition", required=True)
+    waiter.add_argument("--src", required=True)
 
     signal = sub.add_parser("signal", help="записать признак отклонения")
     signal.add_argument("id")
@@ -890,6 +946,9 @@ def main() -> int:
             return 0
         if args.command == "set":
             _print(set_fields(args.id, args.gap, args.next_transition), False)
+            return 0
+        if args.command == "wait":
+            _print(wait(args.id, args.reason, args.next_transition, args.src), False)
             return 0
         if args.command == "signal":
             _print(add_signal(args.id, args.code, args.text, args.src), False)

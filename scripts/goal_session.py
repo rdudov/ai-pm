@@ -305,6 +305,7 @@ def observation(thread: str) -> dict:
         "goal_state": {str(goal["id"]): {
             "state": goal.get("state"), "control": goal.get("control"),
             "gap": goal.get("gap"), "waiting_on": goal.get("waiting_on", []),
+            "waiting": goal.get("waiting"),
             "correctives": {str(item["task"]): (item["settled"] or {}).get("kind", "")
                             for item in goal.get("correctives", [])},
         } for goal in panel},
@@ -357,6 +358,8 @@ def changes(previous: dict | None, current: dict) -> list[str]:
             said.append(f"цель {goal_id}: контроль {state.get('control')}")
         if was.get("gap") != state.get("gap"):
             said.append(f"цель {goal_id}: ближайший разрыв изменился")
+        if was.get("waiting") != state.get("waiting"):
+            said.append(f"цель {goal_id}: решение об ожидании изменилось")
         for task, settled in state.get("correctives", {}).items():
             settled = _settled_kind(settled)
             if _settled_kind(was.get("correctives", {}).get(task)) != settled and settled:
@@ -392,7 +395,8 @@ def post_check(thread: str, standing_goals: list[dict], after_live: list[int],
 
     Два допустимых исхода, и оба наблюдаемы после хода: по задаче цели пошёл
     живой прогон — или назван конкретный блокер обычными словами, в ответе либо
-    в долговечной цели вместе со следующим переходом. SILENT решает только,
+    в явном решении ждать в долговечной цели вместе со следующим переходом.
+    Обычные поля плана такого решения не заменяют. SILENT решает только,
     нужно ли письмо; незаписанное бездействие остаётся отказом. Внутренние номера
     целей в Telegram из этого пути не проецируются.
     """
@@ -412,13 +416,11 @@ def post_check(thread: str, standing_goals: list[dict], after_live: list[int],
                 print(f"[{thread}] причина ожидания цели не читается: {error}", file=sys.stderr)
                 continue
             if (isinstance(current, dict) and current.get("id") == goal["id"]
-                    and current.get("thread") == thread
-                    and current.get("state") == product_goal.ACTIVE
-                    and all(isinstance(current.get(key), str) and current[key].strip()
-                            for key in ("gap", "next_transition"))):
-                waiting.append({"id": goal["id"], "gap": current["gap"],
-                                "next_transition": current["next_transition"],
-                                "src": str(product_goal.root() / f"{goal['id']}.json")})
+                    and current.get("thread") == thread):
+                decision = product_goal.waiting_decision(current)
+                if decision:
+                    waiting.append({"id": goal["id"], **decision,
+                                    "goal_src": str(product_goal.root() / f"{goal['id']}.json")})
         recorded = {goal["id"] for goal in waiting}
         unresolved = [goal for goal in unresolved if goal["id"] not in recorded]
     if not unresolved or named:
@@ -539,7 +541,9 @@ def _rules_block() -> str:
     return f"""Правила этого режима:
 - по каждой стоячей цели обязателен один из двух исходов: запущен следующий
   безопасный шаг по её задаче — или назван конкретный внешний блокер обычными
-  словами, в ответе либо в gap долговечной цели вместе с next_transition.
+  словами, в ответе либо явным решением `product_goal.py wait` с причиной,
+  следующим переходом и источником. Поля gap/next_transition — только план.
+  Доступный полезный шаг снимает ожидание через `resume` или `set`;
   Молчание третьим исходом не является: без записанной причины это отказ
   механизма. При записанном ожидании SILENT допустим, повторного письма не нужно;
 - кросс-ревью: работу Codex Sol временно ревьюит Codex Astra в отдельной свежей read-only сессии; на замечания сначала

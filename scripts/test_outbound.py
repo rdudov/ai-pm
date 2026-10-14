@@ -136,18 +136,26 @@ class FailedWakeStaysInTheServiceJournal(unittest.TestCase):
         opened = self.standing_goal(
             "The original snapshot is unavailable; another run cannot reconstruct it.",
             "Wait for the archive, then compare the original values.")
+        product_goal.wait(opened["id"], opened["gap"], opened["next_transition"],
+                          "Archive inspection")
         code, printed, journal = self.run_tick(
             subprocess.CompletedProcess([], 0, "SILENT", ""), "--force")
         self.assertEqual((code, printed, journal), (0, "SILENT\n", ""))
         checked = json.loads((self.state_dir / "companion.json").read_text())["goal_post_check"]
         self.assertTrue(checked["resolved"])
-        self.assertEqual(checked["waiting"][0]["gap"], opened["gap"])
+        self.assertEqual(checked["waiting"][0]["reason"], opened["gap"])
         self.assertEqual(checked["waiting"][0]["next_transition"], opened["next_transition"])
         self.mail.assert_not_called()
         self.assertFalse(self.ledger.with_name("outbound-journal.jsonl").exists())
+        product_goal.set_fields(opened["id"], next_transition="Compare the received archive.")
+        code, _, journal = self.run_tick(
+            subprocess.CompletedProcess([], 0, "SILENT", ""), "--force")
+        self.assertEqual(code, 1)
+        self.assertIn("ни живого прогона", journal)
+        self.mail.assert_not_called()
 
     def test_unexplained_silence_fails_and_a_useful_linked_run_succeeds(self):
-        opened = self.standing_goal()
+        opened = self.standing_goal("Repair is not installed.", "Start the available author task.")
         result = subprocess.CompletedProcess([], 0, "SILENT", "")
         code, _, journal = self.run_tick(result, "--force")
         self.assertEqual(code, 1)
@@ -164,7 +172,9 @@ class FailedWakeStaysInTheServiceJournal(unittest.TestCase):
         self.mail.assert_not_called()
 
     def test_recorded_wait_does_not_mask_an_engine_failure(self):
-        self.standing_goal("Original snapshot is missing.", "Wait for the archive.")
+        opened = self.standing_goal("Original snapshot is missing.", "Wait for the archive.")
+        product_goal.wait(opened["id"], opened["gap"], opened["next_transition"],
+                          "Archive inspection")
         with mock.patch.object(tick.goal_session, "post_check") as check:
             code, _, journal = self.run_tick(
                 subprocess.CompletedProcess([], 2, "partial", "actual refusal"), "--force")
