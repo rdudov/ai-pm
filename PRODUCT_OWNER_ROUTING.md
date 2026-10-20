@@ -15,6 +15,9 @@ retains the latest observed Codex budget without inventing a remainder.
 
 The existing Codex interactive and print execution paths are reused. Print
 callers receive only model output on stdout and routing diagnostics on stderr.
+Print and mail calls start a fresh `codex exec --ephemeral`, without persisting
+session rollout files. Interactive calls and explicit resumes retain persistence;
+goal-session turns keep their separate session/resume command path.
 If a thread tick receives a nonzero engine exit, it writes that exit code and
 the full captured stderr and stdout to the existing service journal. It sends
 no wake-failure email. An engine failure and a goal post-check refusal are
