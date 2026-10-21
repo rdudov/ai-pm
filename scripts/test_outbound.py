@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import contextlib
+from email import policy
+from email.parser import BytesParser
 import hashlib
 import io
 import json
@@ -18,6 +20,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import outbound
+import daily_standup as daily
 import plain_russian
 import process_map_state as pms
 import product_goal
@@ -93,12 +96,56 @@ class FailedWakeStaysInTheServiceJournal(unittest.TestCase):
                 self.assertIn("stdout:\n" + out, journal)
                 failure = json.loads((self.state_dir / "companion.json").read_text())["wake_failure"]
                 self.assertIn(f"код {engine_code}", failure["reason"])
-                self.assertIn((err or out)[-2000:], failure["reason"])
+                self.assertIn("причина не установлена", failure["reason"])
+                self.assertIn("в журнале службы", failure["reason"])
+                self.assertNotIn("runtime header", failure["reason"])
+                self.assertNotIn("partial output", failure["reason"])
                 self.mail.assert_not_called()
                 data = json.loads(self.ledger.read_text())
                 self.assertEqual(data["threads"]["companion"]["letters"], [])
                 self.assertEqual(data["threads"]["companion"]["delivered_events"], {})
                 self.assertFalse(self.ledger.with_name("outbound-journal.jsonl").exists())
+
+    def test_failed_engine_state_reaches_daily_without_transcript_fragments(self):
+        banner = "runtime header /private/runtime/path\n" * 200
+        for out, err, known_limit in [
+            ("partial answer", banner + "Input exceeds the maximum length of 1048576 characters", True),
+            ("input_too_large\n" + banner, "other diagnostic", True),
+            (banner + "partial answer", "", False),
+        ]:
+            with self.subTest(known_limit=known_limit, stdout_only=not err):
+                code, _, journal = self.run_tick(
+                    subprocess.CompletedProcess([], 1, out, err), "--force")
+                self.assertEqual(code, 1)
+                self.assertIn("stderr:\n" + err, journal)
+                self.assertIn("stdout:\n" + out, journal)
+                self.mail.assert_not_called()
+                self.assertEqual(self.engine.call_count, 1)
+                state = json.loads((self.state_dir / "companion.json").read_text())
+                reason = state["wake_failure"]["reason"]
+                self.assertIn("превысил допустимый размер" if known_limit
+                              else "причина не установлена", reason)
+                with mock.patch.object(daily.product_memory, "installation", return_value={
+                        "threads": {"companion": {"title": "Demo"}}}), \
+                        mock.patch.object(daily, "sent_today", return_value=False), \
+                        mock.patch.object(daily, "source_packet", return_value={
+                            "plan": "plan", "wake_health": daily.wake_health()}), \
+                        mock.patch.object(daily, "compose", return_value={
+                            "intro": "Планы дня", "plans": [], "questions": [], "initiatives": []}), \
+                        mock.patch.object(tick, "MAIL_TO", "user@example.test"), \
+                        mock.patch.object(tick, "MAIL_SCRIPT", Path(__file__)), \
+                        mock.patch.object(tick, "MAIL_PYTHON", Path(__file__)), \
+                        mock.patch.object(tick, "deliver", return_value={"action": "send"}) as deliver:
+                    self.assertEqual(daily.maybe_send(AT, force=True)["action"], "send")
+                message = BytesParser(policy=policy.default).parsebytes(
+                    deliver.call_args.kwargs["raw_message"])
+                for kind in ("plain", "html"):
+                    body = message.get_body(preferencelist=(kind,)).get_content()
+                    self.assertIn(reason, body)
+                    for fragment in ("runtime header", "/private/runtime/path", "partial answer",
+                                     "input_too_large", "other diagnostic"):
+                        self.assertNotIn(fragment, body)
+                self.engine.reset_mock()
 
     def test_a_later_success_keeps_silence_routes_and_normal_composed_delivery(self):
         self.run_tick(subprocess.CompletedProcess([], 1, "", "failed"), "--force")

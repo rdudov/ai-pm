@@ -812,6 +812,20 @@ def persist_composer_failure(state_path: Path, state: dict,
                        "src": f"stdout составителя; {state_path}"})
 
 
+def engine_failure(result: subprocess.CompletedProcess, label: str) -> str:
+    """Keep full engine streams in the journal, only an explanation in mail."""
+    print(f"[{label}] движок завершился с ошибкой: код {result.returncode}", file=sys.stderr)
+    print(f"stderr:\n{result.stderr or ''}", file=sys.stderr)
+    print(f"stdout:\n{result.stdout or ''}", file=sys.stderr)
+    diagnostics = ((result.stderr or "") + "\n" + (result.stdout or "")).casefold()
+    if ("input_too_large" in diagnostics
+            or "input exceeds the maximum length" in diagnostics):
+        reason = "Вход для модели превысил допустимый размер."
+    else:
+        reason = f"Движок завершился с ошибкой (код {result.returncode}); причина не установлена."
+    return reason + " Подробности — в журнале службы."
+
+
 def persist_wake_failure(state_path: Path, state: dict, reason: str,
                          retry_snapshot: dict) -> None:
     """One current health observation, no mail and no consumed transition."""
@@ -1507,15 +1521,9 @@ def main() -> int:
     if result.returncode != 0:
         # The existing service journal owns engine failures, including output
         # before a final answer. A changing runtime banner is not a mail event.
-        print(f"[{args.thread}] пробуждение треда не отработало: "
-              f"код {result.returncode}", file=sys.stderr)
-        print(f"stderr:\n{result.stderr or ''}", file=sys.stderr)
-        print(f"stdout:\n{result.stdout or ''}", file=sys.stderr)
         persist_wake_failure(
             state_path, record(None, True),
-            f"движок вернул код {result.returncode}; "
-            f"{(result.stderr or result.stdout or 'диагностика отсутствует')[-2000:]} "
-            "(полная диагностика в журнале службы)", previous)
+            engine_failure(result, args.thread), previous)
         return 1
     stored.pop("wake_failure", None)
     for diagnostic in route_diagnostics(result.stderr or ""):

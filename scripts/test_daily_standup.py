@@ -3,6 +3,9 @@ from __future__ import annotations
 from email import policy
 from email.parser import BytesParser
 from datetime import datetime, timezone
+import contextlib
+import io
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -159,7 +162,7 @@ class DailyStandupRendering(unittest.TestCase):
         with tempfile.TemporaryDirectory() as home:
             directory = Path(home)
             state_path = directory / "demo.json"
-            reason = "Input exceeds the maximum length of 1048576 characters"
+            reason = "Вход для модели превысил допустимый размер. Подробности — в журнале службы."
             thread_tick.persist_wake_failure(state_path, {
                 "updated_at": at.isoformat(), "check": {}}, reason, {})
             value = {"portfolio_plan": "first then second", "product_snapshots": {},
@@ -183,6 +186,39 @@ class DailyStandupRendering(unittest.TestCase):
             html = message.get_body(preferencelist=("html",)).get_content()
             self.assertIn(reason, html)
             self.assertEqual(deliver.call_args.args[1], "daily")
+
+    def test_failed_daily_engine_keeps_streams_in_journal_only(self):
+        banner = "runtime header /private/runtime/path\n" * 200
+        for out, err, known_limit in [
+            ("partial answer", banner + "input_too_large", True),
+            (banner + "Input exceeds the maximum length of 1048576 characters", "", True),
+            (banner + "partial answer", "", False),
+        ]:
+            with self.subTest(known_limit=known_limit, stdout_only=not err):
+                journal = io.StringIO()
+                with contextlib.redirect_stderr(journal), \
+                        mock.patch.object(daily, "sent_today", return_value=False), \
+                        mock.patch.object(daily, "source_packet", return_value={"plan": "plan"}), \
+                        mock.patch.object(daily, "wake_health", return_value=[]), \
+                        mock.patch.object(daily.subprocess, "run", return_value=
+                            subprocess.CompletedProcess([], 2, out, err)) as engine, \
+                        mock.patch.object(thread_tick, "MAIL_TO", "user@example.test"), \
+                        mock.patch.object(thread_tick, "MAIL_SCRIPT", Path(__file__)), \
+                        mock.patch.object(thread_tick, "MAIL_PYTHON", Path(__file__)), \
+                        mock.patch.object(thread_tick, "deliver", return_value={"action": "send"}) as deliver:
+                    self.assertEqual(daily.maybe_send(force=True)["action"], "send")
+                engine.assert_called_once()
+                self.assertIn("stderr:\n" + err, journal.getvalue())
+                self.assertIn("stdout:\n" + out, journal.getvalue())
+                message = BytesParser(policy=policy.default).parsebytes(deliver.call_args.kwargs["raw_message"])
+                for kind in ("plain", "html"):
+                    body = message.get_body(preferencelist=(kind,)).get_content()
+                    self.assertIn("превысил допустимый размер" if known_limit
+                                  else "причина не установлена", body)
+                    self.assertIn("в журнале службы", body)
+                    for fragment in ("runtime header", "/private/runtime/path", "partial answer",
+                                     "input_too_large", "Input exceeds"):
+                        self.assertNotIn(fragment, body)
 
     def test_daily_bound_refuses_model_but_sends_one_readable_daily_failure(self):
         at = datetime(2026, 8, 15, 10, 20, tzinfo=timezone.utc)

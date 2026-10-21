@@ -138,7 +138,8 @@ def compose(packet: dict, local_date: str) -> dict:
         cwd=HOME, env={**os.environ, "IS_SANDBOX": "1"}, timeout=MODEL_TIMEOUT,
         check=False)
     if result.returncode != 0:
-        raise RuntimeError((result.stderr or "daily product owner failed")[:500])
+        import thread_tick
+        raise RuntimeError(thread_tick.engine_failure(result, "daily"))
     return parse_composition(result.stdout or "")
 
 
