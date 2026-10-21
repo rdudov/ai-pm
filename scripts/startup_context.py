@@ -28,10 +28,6 @@ import thread_state
 
 
 HISTORICAL_SNAPSHOT_SECTION = "Журнал эффекта"
-TASK_RECORD_NAMES = {
-    "task.md", "plan.md", "findings.md", "verification.md", "status.json",
-    "progress.json", "manifest.json",
-}
 MAX_RECORD_BYTES = 65_536
 # Keep unread bodies at their existing durable addresses. The current decision
 # blocks already fill most of a tick's initial input; copying the unread tail
@@ -249,19 +245,13 @@ def post_cursor(plan: dict, frozen_at: datetime | None = None,
         stamp = path.stat().st_mtime
         if cursor < stamp <= ceiling:
             paths.add(path)
-    config = product_memory.installation()
-    task_root = Path(config.get("tasks_repo") or "") / "tasks"
     task_ids = {task for link in plan.get("outcome_links", [])
                 for task in link.get("tasks", [])}
     task_ids.update(plan.get("unread_tasks", []))
-    if task_root.is_dir():
-        for task_id in task_ids:
-            for directory in task_root.glob(f"{int(task_id)}-*"):
-                for path in directory.rglob("*"):
-                    if (path.is_file() and ".runner" not in path.parts
-                            and path.name in TASK_RECORD_NAMES
-                            and cursor < path.stat().st_mtime <= ceiling):
-                        paths.add(path)
+    for task_id in task_ids:
+        for path in product_memory.task_records(task_id):
+            if cursor < path.stat().st_mtime <= ceiling:
+                paths.add(path)
     records = []
     used = 0
     for path in sorted(paths, key=str):

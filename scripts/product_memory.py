@@ -58,6 +58,10 @@ LOCK = ".lock"
 MAX_PLAN_CHARS = 6_000
 MAX_SNAPSHOT_CHARS = 4_000
 MAX_GOAL_CHARS = 3_000
+TASK_RECORD_NAMES = {
+    "task.md", "plan.md", "findings.md", "verification.md", "status.json",
+    "progress.json", "manifest.json",
+}
 
 # The sections a snapshot is allowed to carry. Everything dated, technical or
 # historical belongs to `history/`, which is why the list is short and closed:
@@ -630,6 +634,16 @@ def validate_outcome_links(plan: dict) -> dict[int, dict]:
     return links
 
 
+def task_records(task_id: int):
+    """The task sources shared by plan acknowledgement and startup reading."""
+    task_root = Path(installation().get("tasks_repo") or "") / "tasks"
+    for directory in task_root.glob(f"{int(task_id)}-*"):
+        for path in directory.rglob("*"):
+            if (path.is_file() and ".runner" not in path.parts
+                    and path.name in TASK_RECORD_NAMES):
+                yield path
+
+
 def publish_plan(plan: dict, base: Path | None = None,
                  expect_revision: int | None = None) -> Path:
     """Publish the next revision, or refuse because someone else published one.
@@ -673,8 +687,11 @@ def publish_plan(plan: dict, base: Path | None = None,
         raise ContentError("план: неверная граница read_through") from error
     retained = (set((previous or {}).get("unread_tasks", [])) |
                 {task for link in (previous or {}).get("outcome_links", [])
-                 for task in link.get("tasks", [])}) if (
-                     old_boundary and read_through <= datetime.fromisoformat(old_boundary)) else set()
+                 for task in link.get("tasks", [])})
+    if old_boundary and read_through > datetime.fromisoformat(old_boundary):
+        retained = {task for task in retained if any(
+            path.stat().st_mtime > read_through.timestamp()
+            for path in task_records(task))}
     document["unread_tasks"] = sorted(retained | {
         task for link in document.get("outcome_links", []) for task in link.get("tasks", [])})
     for field in PLAN_FIELDS:

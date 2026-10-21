@@ -272,6 +272,61 @@ class FailedWakeStaysInTheServiceJournal(unittest.TestCase):
                                  __import__("hashlib").sha256(body.encode()).hexdigest())
         self.mail.assert_not_called()
 
+    def test_observation_report_watches_explicit_return_paths_through_ordinary_ticks(self):
+        from datetime import timedelta
+        for shape in ("return_directories", "directories"):
+            with self.subTest(shape=shape):
+                source = self.goals.parent / f"{shape}.json"
+                returns = self.goals.parent / shape
+                returns.mkdir()
+                entry = {"directory" if shape == "return_directories" else "path": str(returns)}
+                source.write_text(json.dumps({shape: [entry], "limits": "Local files only; no archive extraction."}))
+                report_bytes = source.read_bytes()
+                opened = product_goal.open_goal("companion", "Compare returned evidence",
+                                               ["Evidence compared by owner"], 100)
+                watch_paths = [entry.get("directory", entry.get("path"))]
+                product_goal.wait(opened["id"], "Waiting for original evidence", "Compare on return",
+                                  str(source), watch_paths=watch_paths)
+                tick.goal_watch.side_effect = REAL_GOAL_WATCH
+                self.state_dir.mkdir(parents=True, exist_ok=True)
+                (self.state_dir / "companion.json").write_text(json.dumps({
+                    "snapshot": tick.snapshot(self.report), "goals": product_goal.panel("companion")}))
+
+                def agent(*args, **kwargs):
+                    # Existing owner records its continuing decision; no automatic closure.
+                    product_goal.wait(opened["id"], "Waiting for original evidence", "Compare on return", str(source))
+                    return subprocess.CompletedProcess([], 0, "SILENT", "")
+
+                def goal_bytes():
+                    return {str(p.relative_to(self.goals)): p.read_bytes()
+                            for p in self.goals.rglob("*") if p.is_file() and p.name != product_goal.LOCK}
+
+                self.engine.side_effect = agent
+                before = goal_bytes()
+                with mock.patch.object(product_goal, "observe", return_value=[]), \
+                        mock.patch.object(tick, "datetime", wraps=datetime) as clock:
+                    for number in range(3):
+                        clock.now.return_value = AT + timedelta(minutes=20 * number)
+                        self.assertEqual(self.run_tick(None)[0], 0)
+                        self.assertEqual(goal_bytes(), before)
+                        state = json.loads((self.state_dir / "companion.json").read_text())
+                        self.assertNotIn("изменился источник ожидания", " ".join(state.get("last_events", [])))
+                    for number, body in enumerate(("original file", "changed bytes"), 3):
+                        calls = self.engine.call_count
+                        (returns / "returned.bin").write_text(body)
+                        clock.now.return_value = AT + timedelta(minutes=20 * number)
+                        self.assertEqual(self.run_tick(None)[0], 0)
+                        state = json.loads((self.state_dir / "companion.json").read_text())
+                        self.assertIn("изменился источник ожидания", " ".join(state["last_events"]))
+                        self.assertEqual(self.engine.call_count, calls + 1)
+                        current = product_goal.load(opened["id"])
+                        self.assertEqual(current["waiting"]["watch_paths"], watch_paths)
+                        self.assertEqual(current["state"], "active")
+                        self.assertEqual(current["waiting"]["src"], str(source))
+                        self.assertEqual(source.read_bytes(), report_bytes)
+                product_goal.pause(opened["id"], "Fixture finished", str(source))
+        self.mail.assert_not_called()
+
     def test_unexplained_silence_fails_and_a_useful_linked_run_succeeds(self):
         opened = self.standing_goal("Repair is not installed.", "Start the available author task.")
         result = subprocess.CompletedProcess([], 0, "SILENT", "")

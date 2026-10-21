@@ -404,8 +404,23 @@ def set_fields(goal_id: str, gap: str | None = None,
         return _save(goal, "set", {"gap": goal["gap"], "next": goal["next_transition"]})
 
 
-def wait_source_sha256(src: str) -> str | None:
-    """Observe only the exact file the owner named, never infer return paths."""
+def wait_source_sha256(src: str, watch_paths: list[str] | None = None) -> str | None:
+    """Hash the evidence and explicitly named return paths; never parse prose."""
+    if watch_paths:
+        observations = [(src, wait_source_sha256(src))]
+        for name in sorted(set(watch_paths)):
+            path = Path(name)
+            if not path.is_absolute():
+                path = product_memory.HOME / path
+            if path.is_dir():
+                entries = [(str(item.relative_to(path)), wait_source_sha256(str(item)))
+                           for item in sorted(path.rglob("*")) if item.is_file()
+                           and not {".runner", ".git"}.intersection(item.relative_to(path).parts)]
+                observations.append((name, entries))
+            else:
+                observations.append((name, wait_source_sha256(str(path))))
+        return hashlib.sha256(json.dumps(observations, ensure_ascii=False,
+                                         separators=(",", ":")).encode()).hexdigest()
     path = Path(src)
     if not path.is_absolute():
         path = product_memory.HOME / path
@@ -418,7 +433,8 @@ def wait_source_sha256(src: str) -> str | None:
     return digest.hexdigest()
 
 
-def wait(goal_id: str, reason: str, next_transition: str, src: str) -> dict:
+def wait(goal_id: str, reason: str, next_transition: str, src: str,
+         watch_paths: list[str] | None = None) -> dict:
     """Record the owner's decision that an obstacle prevents useful action.
 
     A plan is not this decision. The owner names the necessary obstacle and
@@ -432,14 +448,23 @@ def wait(goal_id: str, reason: str, next_transition: str, src: str) -> dict:
         goal = load(goal_id)
         if goal["state"] != ACTIVE:
             raise GoalError("ожидание записывается только для активной цели")
-        source_hash = wait_source_sha256(src.strip())
+        if watch_paths is None:
+            watch_paths = (goal.get("waiting") or {}).get("watch_paths", [])
+        if not isinstance(watch_paths, list) or any(
+                not isinstance(path, str) or not path.strip() for path in watch_paths):
+            raise GoalError("ожидание: watch_paths требует точные непустые адреса")
+        watch_paths = sorted(set(path.strip() for path in watch_paths))
+        source_hash = wait_source_sha256(src.strip(), watch_paths)
         if (goal.get("next_transition") == next_transition.strip()
                 and (goal.get("waiting") or {}).get("reason") == reason.strip()
                 and (goal.get("waiting") or {}).get("src") == src.strip()
+                and (goal.get("waiting") or {}).get("watch_paths", []) == watch_paths
                 and (goal.get("waiting") or {}).get("source_sha256") == source_hash):
             return goal
         goal["next_transition"] = next_transition.strip()
         goal["waiting"] = {"reason": reason.strip(), "src": src.strip(), "at": now()}
+        if watch_paths:
+            goal["waiting"]["watch_paths"] = watch_paths
         if source_hash is not None:
             goal["waiting"]["source_sha256"] = source_hash
         return _save(goal, "wait", {**goal["waiting"], "next": goal["next_transition"]})
@@ -456,8 +481,9 @@ def waiting_decision(goal: dict) -> dict | None:
         return None
     return {"reason": record["reason"], "src": record["src"],
             "at": record.get("at"), "next_transition": goal["next_transition"],
+            "watch_paths": record.get("watch_paths", []),
             "source_sha256": record.get("source_sha256"),
-            "current_source_sha256": wait_source_sha256(record["src"])}
+            "current_source_sha256": wait_source_sha256(record["src"], record.get("watch_paths"))}
 
 
 def add_signal(goal_id: str, code: str, text: str, src: str,
@@ -1042,6 +1068,8 @@ def main() -> int:
     waiter.add_argument("--reason", required=True)
     waiter.add_argument("--next", dest="next_transition", required=True)
     waiter.add_argument("--src", required=True)
+    waiter.add_argument("--watch", action="append", default=None,
+                        help="точный файл или каталог возврата; можно повторить")
 
     signal = sub.add_parser("signal", help="записать признак отклонения")
     signal.add_argument("id")
@@ -1115,7 +1143,8 @@ def main() -> int:
             _print(set_fields(args.id, args.gap, args.next_transition), False)
             return 0
         if args.command == "wait":
-            _print(wait(args.id, args.reason, args.next_transition, args.src), False)
+            _print(wait(args.id, args.reason, args.next_transition, args.src,
+                        args.watch), False)
             return 0
         if args.command == "signal":
             _print(add_signal(args.id, args.code, args.text, args.src), False)

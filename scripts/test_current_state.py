@@ -84,6 +84,40 @@ def test_removing_a_plan_result_preserves_its_unread_task_scope(tmp_path, monkey
     assert memory.current_plan()["unread_tasks"] == []
 
 
+def test_read_prefix_keeps_newer_records_in_former_tasks(tmp_path, monkeypatch):
+    content, repo = tmp_path / "content", tmp_path / "repo"
+    monkeypatch.setattr(memory, "ROOT", content)
+    monkeypatch.setattr(memory, "installation", lambda: {"tasks_repo": str(repo)})
+    boundary = "2026-01-01T00:00:00+00:00"
+    prefix = "2026-01-02T00:00:00+00:00"
+    memory.publish_plan({"read_through": boundary, "now": ["old result"],
+                         "outcome_links": [{"now": 1, "next": [], "tasks": [101, 102]}]})
+    paths = {}
+    for number, filename, stamp in ((101, "task.md", prefix),
+                                     (101, "status.json", "2026-01-03T00:00:00+00:00"),
+                                     (102, "task.md", prefix)):
+        path = repo / "tasks" / f"{number}-example" / filename
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(filename)
+        timestamp = datetime.fromisoformat(stamp).timestamp()
+        os.utime(path, (timestamp, timestamp))
+        paths[number, filename] = path
+    memory.publish_plan({"now": ["different result"]}, expect_revision=1)
+    old = memory.current_plan()
+    assert old["unread_tasks"] == [101, 102]
+    old_bytes = (content / "plan/revisions/000002.json").read_bytes()
+    memory.publish_plan({"read_through": prefix}, expect_revision=2)
+    current = json.loads((content / "plan/revisions/000003.json").read_text())
+    assert current["unread_tasks"] == [101]
+    visible = {row["source"] for row in startup.post_cursor(current)}
+    assert visible == {str(paths[101, "status.json"])}
+    memory.publish_plan({"now": ["selective event read"]}, expect_revision=3)
+    assert startup.post_cursor(memory.current_plan()) == startup.post_cursor(current)
+    assert (content / "plan/revisions/000002.json").read_bytes() == old_bytes
+    memory.publish_plan({"read_through": "2026-01-04T00:00:00+00:00"}, expect_revision=4)
+    assert memory.current_plan()["unread_tasks"] == []
+
+
 def test_snapshot_archive_is_exact_and_duplicate_work_is_noop(tmp_path, monkeypatch):
     monkeypatch.setattr(memory, "ROOT", tmp_path)
     path = memory.start_product("alpha")
