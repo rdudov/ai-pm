@@ -91,6 +91,9 @@ class FailedWakeStaysInTheServiceJournal(unittest.TestCase):
                 self.assertIn(f"код {engine_code}", journal)
                 self.assertIn("stderr:\n" + err, journal)
                 self.assertIn("stdout:\n" + out, journal)
+                failure = json.loads((self.state_dir / "companion.json").read_text())["wake_failure"]
+                self.assertIn(f"код {engine_code}", failure["reason"])
+                self.assertIn((err or out)[-2000:], failure["reason"])
                 self.mail.assert_not_called()
                 data = json.loads(self.ledger.read_text())
                 self.assertEqual(data["threads"]["companion"]["letters"], [])
@@ -103,6 +106,7 @@ class FailedWakeStaysInTheServiceJournal(unittest.TestCase):
         code, printed, journal = self.run_tick(
             subprocess.CompletedProcess([], 0, "SILENT\n", route + "\nmodel transcript"), "--force")
         self.assertEqual((code, printed, journal), (0, "SILENT\n", route + "\n"))
+        self.assertNotIn("wake_failure", json.loads((self.state_dir / "companion.json").read_text()))
         self.mail.assert_not_called()
         code, _, _ = self.run_tick(subprocess.CompletedProcess([], 0, composed(), ""), "--force")
         self.assertEqual(code, 0)
@@ -110,6 +114,31 @@ class FailedWakeStaysInTheServiceJournal(unittest.TestCase):
         letters = json.loads(self.ledger.read_text())["threads"]["companion"]["letters"]
         self.assertEqual([letter["kind"] for letter in letters], ["report"])
         self.assertEqual(letters[0]["event_id"], "report:task-1280:accepted")
+
+    def test_too_small_complete_input_refuses_before_model_and_retains_retry_state(self):
+        self.state_dir.mkdir()
+        previous = tick.snapshot(self.report)
+        (self.state_dir / "companion.json").write_text(json.dumps({"snapshot": previous}))
+        with mock.patch.object(tick.startup_context, "MAX_PROMPT_CHARS", 1):
+            code, _, journal = self.run_tick(None, "--force")
+        self.assertEqual(code, 1)
+        self.engine.assert_not_called()
+        self.mail.assert_not_called()
+        state = json.loads((self.state_dir / "companion.json").read_text())
+        self.assertEqual(state["snapshot"], previous)
+        self.assertIn("complete prompt", state["wake_failure"]["reason"])
+        self.assertIn("не состоялось", state["check"]["outcome"])
+        self.assertIn("модель не вызвана", journal)
+
+    def test_source_manifest_overflow_is_durable_and_costs_no_model_call(self):
+        with mock.patch.object(tick.startup_context, "packet", side_effect=
+                               tick.startup_context.InputLimitError("post_cursor_records manifest too large")):
+            code, _, _ = self.run_tick(None, "--force")
+        self.assertEqual(code, 1)
+        self.engine.assert_not_called()
+        self.mail.assert_not_called()
+        state = json.loads((self.state_dir / "companion.json").read_text())
+        self.assertIn("post_cursor_records", state["wake_failure"]["reason"])
 
     def test_quiet_and_dry_run_ticks_do_not_call_the_engine_or_send_mail(self):
         self.state_dir.mkdir()

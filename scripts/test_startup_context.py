@@ -160,9 +160,158 @@ current bet
                                   return_value=observation), \
                 mock.patch.object(startup.codex_budget, "latest", return_value={}), \
                 mock.patch.object(startup.product_goal, "active", return_value=[]):
-            value = startup.packet()
-        self.assertIn("не запускай работу", value["portfolio_plan"])
-        self.assertEqual(value["post_cursor_records"], [])
+            with self.assertRaisesRegex(startup.InputLimitError, "Портфельный план не читается"):
+                startup.packet()
+
+
+
+class HardInputBounds(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.plan = {"revision": 1, "accepted_at": "2026-01-01T00:00:00+00:00",
+                     "now": ["first user decision", "second user decision"],
+                     "paused": ["third stays paused"]}
+        revisions = self.root / "plan" / "revisions"
+        revisions.mkdir(parents=True)
+        (revisions / "000001.json").write_text(json.dumps(self.plan))
+        self.goal_path = self.root / "goals" / "1.json"
+        self.goal_path.parent.mkdir()
+        self.goal_path.write_text('{"id":"1","outcome":"current user words"}')
+        for slug in ("demo", "other"):
+            path = self.root / "products" / slug / "snapshot.md"
+            path.parent.mkdir(parents=True)
+            path.write_text("## Концепция\n" + slug + " exact user words  \n")
+        for patch in (
+            mock.patch.object(startup.product_memory, "root", return_value=self.root),
+            mock.patch.object(startup.product_memory, "revisions_dir", return_value=revisions),
+            mock.patch.object(startup.product_memory, "installation", return_value={
+                "threads": {"demo": {"products": ["demo"]}}}),
+            mock.patch.object(startup.product_goal, "root", return_value=self.root / "goals"),
+        ):
+            patch.start(); self.addCleanup(patch.stop)
+        snapshots = {}
+        for slug in ("demo", "other"):
+            text = (self.root / "products" / slug / "snapshot.md").read_text()
+            with mock.patch.object(startup.product_memory, "read_snapshot", return_value=text):
+                snapshots[slug] = startup.snapshot_view(slug)
+        self.value = {
+            "contract": {}, "portfolio_plan": startup.product_memory.plan_text(self.plan),
+            "product_snapshots": snapshots,
+            "thread_states": {"demo": {"thread": "demo", "title": "Demo",
+                                       "decision": "only-current-thread-report"}},
+            "model_budgets": {"codex": None, "route": {}},
+            "active_goals": [{"id": "1", "outcome": "current user words"}],
+            "post_cursor_records": [],
+        }
+
+    def bounded(self):
+        return startup.bounded_packet(self.value, "demo", self.plan)
+
+    def test_omit_unrelated_inline_but_keep_all_sources_and_exact_relevant_words(self):
+        result = self.bounded()
+        self.assertEqual(result["portfolio_plan"], self.value["portfolio_plan"])
+        self.assertEqual(result["active_goals"], self.value["active_goals"])
+        views = result["product_snapshots"]
+        self.assertEqual(views["demo"]["sections"]["Концепция"], "demo exact user words  ")
+        self.assertTrue(views["other"]["manifested"])
+        path = Path(views["other"]["source"])
+        self.assertEqual(startup.digest_text(path.read_text()), views["other"]["source_sha256"])
+        self.assertEqual(set(views), {"demo", "other"})
+
+    def test_growing_text_becomes_whole_openable_originals_without_mutation(self):
+        huge = "полные слова пользователя 😺\n" * 60_000
+        self.plan["grounds"] = [huge]
+        (self.root / "plan/revisions/000001.json").write_text(json.dumps(self.plan))
+        self.value["portfolio_plan"] = startup.product_memory.plan_text(self.plan)
+        self.value["product_snapshots"]["demo"]["sections"]["В работе"] = huge
+        self.value["active_goals"][0]["outcome"] = huge
+        self.goal_path.write_text(json.dumps(self.value["active_goals"][0], ensure_ascii=False))
+        before = startup.render(self.value)
+        result = self.bounded()
+        self.assertEqual(before, startup.render(self.value))
+        self.assertLessEqual(len(startup.render(result)), startup.MAX_PACKET_CHARS)
+        plan = result["portfolio_plan"]
+        self.assertTrue(plan["read_before_decision"])
+        self.assertEqual(plan["revision"], 1)
+        self.assertEqual(json.loads(Path(plan["source"]).read_text())["now"], self.plan["now"])
+        goal = result["active_goals"][0]
+        raw = Path(goal["source"]).read_bytes()
+        self.assertEqual(hashlib.sha256(raw).hexdigest(), goal["source_sha256"])
+        self.assertEqual(json.loads(raw)["outcome"], huge)
+        self.assertNotIn(huge[:200], startup.render(result))
+
+    def test_many_metadata_records_fit_or_refuse_whole_never_silently_drop(self):
+        records = [{"source": f"record-{index}.md", "sha256": "a" * 64,
+                    "bytes": 1_000_000, "manifested": True} for index in range(408)]
+        self.value["post_cursor_records"] = records
+        self.assertEqual(self.bounded()["post_cursor_records"], records)
+        self.value["post_cursor_records"] = records * 100
+        with self.assertRaisesRegex(startup.InputLimitError, "post_cursor_records"):
+            self.bounded()
+        self.value["post_cursor_records"] = []
+        self.value["active_goals"] *= 10_000
+        with self.assertRaisesRegex(startup.InputLimitError, "active_goals"):
+            self.bounded()
+
+    def test_char_limits_are_inclusive_and_distinct_from_utf8_bytes(self):
+        text = "😺" * 100
+        self.assertEqual(startup.require_size(text, 100, "test"), text)
+        self.assertGreater(len(text.encode()), 100)
+        with self.assertRaises(startup.InputLimitError):
+            startup.require_size(text, 99, "test")
+        language = startup.claude_product_owner.plain_russian.as_paragraph() + "\n\n"
+        with mock.patch.object(startup, "MAX_PROMPT_CHARS", len(language) + 100):
+            self.assertEqual(startup.checked_prompt(text), text)
+            with self.assertRaises(startup.InputLimitError):
+                startup.checked_prompt(text + "a")
+
+    def test_final_prompt_bounds_events_reasons_letters_and_runtime_wrapper(self):
+        import thread_tick
+        report = self.value["thread_states"]["demo"]
+        huge = "не резать эти слова" * 100_000
+        text = thread_tick.prompt(report, [huge], [{"text": huge, "src": "original"}],
+                                  [{"at": "2026-01-01", "event_id": huge,
+                                    "subject": huge, "excerpt": huge}],
+                                  startup.render(self.bounded()))
+        self.assertLessEqual(len(text) + len(thread_tick.plain_russian.as_paragraph()) + 2,
+                             startup.MAX_PROMPT_CHARS)
+        self.assertIn("state/threads/demo.json#/check/events", text)
+        self.assertIn("state/threads/demo.json#/check/reasons", text)
+        self.assertIn(str(thread_tick.outbound.LEDGER), text)
+        self.assertEqual(text.count("only-current-thread-report"), 1)
+        with mock.patch.object(startup, "MAX_PROMPT_CHARS", 50):
+            with self.assertRaises(startup.InputLimitError):
+                thread_tick.prompt(report, [], [], [], startup.render(self.bounded()))
+
+    def test_packet_limit_catches_even_contract_or_structural_growth(self):
+        self.value["contract"] = {"extra": "x" * startup.MAX_PACKET_CHARS}
+        with self.assertRaisesRegex(startup.InputLimitError, "startup packet"):
+            self.bounded()
+
+    def test_many_snapshot_and_thread_addresses_are_bounded_too(self):
+        self.value["product_snapshots"] = {
+            f"snapshot-{index}": self.value["product_snapshots"]["demo"]
+            for index in range(10_000)}
+        with self.assertRaisesRegex(startup.InputLimitError, "product_snapshots"):
+            self.bounded()
+        self.value["product_snapshots"] = {}
+        self.value["thread_states"] = {f"thread-{index}": {} for index in range(10_000)}
+        with self.assertRaisesRegex(startup.InputLimitError, "thread_states"):
+            self.bounded()
+
+    def test_multibyte_plan_fits_by_characters_not_utf8_bytes(self):
+        text = "я" * (startup.SECTION_CHARS["portfolio_plan"] - 2)
+        self.value["portfolio_plan"] = text
+        self.assertEqual(self.bounded()["portfolio_plan"], text)
+        self.assertGreater(len(text.encode()), startup.SECTION_CHARS["portfolio_plan"])
+
+    def test_unreadable_required_record_is_a_refusal_not_an_empty_tail(self):
+        record = self.root / "new.md"
+        record.write_bytes(b"\xff")
+        with self.assertRaisesRegex(startup.InputLimitError, "new.md"):
+            startup.post_cursor({**self.plan, "outcome_links": []})
 
 
 if __name__ == "__main__":

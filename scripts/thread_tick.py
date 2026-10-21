@@ -812,6 +812,17 @@ def persist_composer_failure(state_path: Path, state: dict,
                        "src": f"stdout составителя; {state_path}"})
 
 
+def persist_wake_failure(state_path: Path, state: dict, reason: str,
+                         retry_snapshot: dict) -> None:
+    """One current health observation, no mail and no consumed transition."""
+    state["snapshot"] = retry_snapshot
+    state["wake_failure"] = {"at": state["updated_at"], "reason": reason,
+                             "src": str(state_path)}
+    state["check"]["outcome"] = "пробуждение не состоялось: " + reason
+    state["check"]["outcome_src"] = f"wake_failure; {state_path}"
+    state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2))
+
+
 def deliver(thread: str, kind: str, subject: str, body: str, moment: datetime,
             *, reply_to_message_id: str | None = None,
             attachments: list[str] | None = None,
@@ -1196,18 +1207,29 @@ def verdict_block() -> str:
 
 def prompt(report: dict, events: list[str], reasons: list[dict],
            said: list[dict], startup: str = "") -> str:
+    state_source = f"state/threads/{report.get('thread', '')}.json"
+    event_text = startup_context.fit(
+        events, startup_context.reference(events, state_source + "#/check/events"),
+        20_000, "wake events")
+    reason_text = startup_context.fit(
+        reasons, startup_context.reference(reasons, state_source + "#/check/reasons"),
+        20_000, "wake reasons")
+    heard = heard_block(said)
+    if len(heard) > 20_000:
+        heard = startup_context.render(startup_context.reference(said, str(outbound.LEDGER)))
     # Shown only when there is something observed to show. A heading over an
     # empty list reads as «причин нет», which is a different claim.
     seen = ("\nЧто наблюдение говорит о простое (это не приговор, а то, что видно с диска):\n"
-            + "\n".join(f"- {item['text']} [{item['src']}]" for item in reasons) + "\n"
+            + ("\n".join(f"- {item['text']} [{item['src']}]" for item in reasons)
+               if reason_text is reasons else startup_context.render(reason_text)) + "\n"
             ) if reasons else ""
     bounded = startup.lstrip().startswith("{")
     startup_block = (f"""
 Ограниченный стартовый пакет ниже уже собран из всех обязательных источников.
-Не перечитывай AGENTS.md, план, снимки, состояния, бюджеты и цели второй раз.
-Историческую подробность по хешу открывай адресно только для события этого тика.
-Непрочитанные записи после курсора указаны манифестом: открой полные оригиналы,
-относящиеся к событиям этого тика, до решения; манифест не означает, что они прочитаны.
+Не перечитывай уже включённый дословно текст. Ссылки заменяют полные источники,
+а не их чтение: до решения открой текущую редакцию плана с порядком работ и все
+относящиеся к событию оригиналы снимков, целей, наблюдений и записей после курсора.
+Манифест не означает прочтение и не сдвигает курсор. Не решай по обрезанному тексту.
 {startup}
 """ if bounded else plan_block() + startup)
     report_block = ("Наблюдаемое состояние этого треда уже приведено в thread_states "
@@ -1215,12 +1237,12 @@ def prompt(report: dict, events: list[str], reasons: list[dict],
                     if bounded else
                     "Наблюдаемое состояние треда (собрано механически, не со слов исполнителя):\n"
                     + json.dumps(report, ensure_ascii=False, indent=2))
-    return f"""Ты продакт-агент на фоновом пробуждении треда «{report['title']}».
+    return startup_context.checked_prompt(f"""Ты продакт-агент на фоновом пробуждении треда «{report['title']}».
 {startup_block}
-{heard_block(said)}
+{heard}
 
 Произошло с прошлого пробуждения:
-{chr(10).join('- ' + event for event in events)}
+{chr(10).join('- ' + event for event in events) if event_text is events else startup_context.render(event_text)}
 {seen}
 {report_block}
 
@@ -1265,7 +1287,7 @@ def prompt(report: dict, events: list[str], reasons: list[dict],
 пользу, — а не по режиму песочницы. Единственный ограничитель запуска здесь
 физический: занятое рабочее дерево, где уже живёт другой ребёнок.
 Не читай транскрипты детей: только артефакты задач и наблюдаемое состояние.
-"""
+""")
 
 
 def main() -> int:
@@ -1355,6 +1377,7 @@ def main() -> int:
         """The direction's state file, in the one shape the board reads."""
         return {
             "thread": args.thread, "updated_at": now, "snapshot": current,
+            **({"wake_failure": stored["wake_failure"]} if stored.get("wake_failure") else {}),
             "long_lived_processes": long_lived_processes,
             "long_lived_processes_observation": process_observation(report),
             "last_events": events, **standing,
@@ -1467,13 +1490,20 @@ def main() -> int:
         said = outbound.already_said(ledger.thread(args.thread))
 
     environment = {**os.environ, "IS_SANDBOX": "1"}
-    result = subprocess.run(
-        [str(CLAUDE_PRODUCT_OWNER), "--entry", "print"],
-        input=prompt(report, events, reasons, said,
-                     startup_context.render(startup_context.packet((args.thread, report)))),
-        env=environment,
-        capture_output=True, text=True, cwd=HOME, timeout=WAKE_TIMEOUT,
-    )
+    try:
+        model_input = prompt(report, events, reasons, said,
+                             startup_context.render(startup_context.packet((args.thread, report))))
+        result = subprocess.run(
+            [str(CLAUDE_PRODUCT_OWNER), "--entry", "print"],
+            input=model_input, env=environment,
+            capture_output=True, text=True, cwd=HOME, timeout=WAKE_TIMEOUT,
+        )
+    except (startup_context.InputLimitError, product_memory.ContentError,
+            OSError, subprocess.TimeoutExpired) as error:
+        reason = str(error)
+        persist_wake_failure(state_path, record(None, True), reason, previous)
+        print(f"[{args.thread}] {reason}", file=sys.stderr)
+        return 1
     if result.returncode != 0:
         # The existing service journal owns engine failures, including output
         # before a final answer. A changing runtime banner is not a mail event.
@@ -1481,7 +1511,13 @@ def main() -> int:
               f"код {result.returncode}", file=sys.stderr)
         print(f"stderr:\n{result.stderr or ''}", file=sys.stderr)
         print(f"stdout:\n{result.stdout or ''}", file=sys.stderr)
+        persist_wake_failure(
+            state_path, record(None, True),
+            f"движок вернул код {result.returncode}; "
+            f"{(result.stderr or result.stdout or 'диагностика отсутствует')[-2000:]} "
+            "(полная диагностика в журнале службы)", previous)
         return 1
+    stored.pop("wake_failure", None)
     for diagnostic in route_diagnostics(result.stderr or ""):
         print(diagnostic, file=sys.stderr)
     message = (result.stdout or "").strip()

@@ -153,6 +153,54 @@ class DailyStandupRendering(unittest.TestCase):
         self.assertEqual(record["message_id"], "gmail-daily")
         self.assertEqual(send.call_args.kwargs["raw_message"], b"To: user@example.test\n\nbody")
 
+    def test_real_state_failure_survives_composer_silence_into_daily_mail(self):
+        import copy
+        at = datetime(2026, 8, 15, 10, 20, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as home:
+            directory = Path(home)
+            state_path = directory / "demo.json"
+            reason = "Input exceeds the maximum length of 1048576 characters"
+            thread_tick.persist_wake_failure(state_path, {
+                "updated_at": at.isoformat(), "check": {}}, reason, {})
+            value = {"portfolio_plan": "first then second", "product_snapshots": {},
+                     "thread_states": {}, "contract": {}}
+            with mock.patch.object(thread_tick, "STATE_DIR", directory), \
+                    mock.patch.object(outbound, "LEDGER", directory / "outbound.json"), \
+                    mock.patch.object(daily.product_memory, "installation", return_value={
+                        "threads": {"demo": {"title": "Demo"}}}), \
+                    mock.patch.object(daily.startup_context, "packet", return_value=value), \
+                    mock.patch.object(daily, "sent_today", return_value=False), \
+                    mock.patch.object(daily, "compose", return_value=copy.deepcopy(SAMPLE)), \
+                    mock.patch.object(thread_tick, "MAIL_TO", "user@example.test"), \
+                    mock.patch.object(thread_tick, "MAIL_SCRIPT", Path(__file__)), \
+                    mock.patch.object(thread_tick, "MAIL_PYTHON", Path(__file__)), \
+                    mock.patch.object(thread_tick, "deliver", return_value={"action": "send"}) as deliver:
+                self.assertEqual(daily.maybe_send(at)["action"], "send")
+            plain = deliver.call_args.args[3]
+            self.assertIn(reason, plain)
+            self.assertIn("Пробуждение не состоялось", plain)
+            message = BytesParser(policy=policy.default).parsebytes(deliver.call_args.kwargs["raw_message"])
+            html = message.get_body(preferencelist=("html",)).get_content()
+            self.assertIn(reason, html)
+            self.assertEqual(deliver.call_args.args[1], "daily")
+
+    def test_daily_bound_refuses_model_but_sends_one_readable_daily_failure(self):
+        at = datetime(2026, 8, 15, 10, 20, tzinfo=timezone.utc)
+        with mock.patch.object(daily, "sent_today", return_value=False), \
+                mock.patch.object(daily, "source_packet", return_value={
+                    "plan": "x" * 1_100_000, "snapshots": {}, "threads": {}}), \
+                mock.patch.object(daily, "wake_health", return_value=[]), \
+                mock.patch.object(daily.subprocess, "run") as run, \
+                mock.patch.object(thread_tick, "MAIL_TO", "user@example.test"), \
+                mock.patch.object(thread_tick, "MAIL_SCRIPT", Path(__file__)), \
+                mock.patch.object(thread_tick, "MAIL_PYTHON", Path(__file__)), \
+                mock.patch.object(thread_tick, "deliver", return_value={"action": "send"}) as deliver:
+            self.assertEqual(daily.maybe_send(at)["action"], "send")
+        run.assert_not_called()
+        deliver.assert_called_once()
+        self.assertIn("Оперативка не смогла прочитать источники", deliver.call_args.args[3])
+        self.assertIn("модель не вызвана", deliver.call_args.args[3])
+
 
 if __name__ == "__main__":
     unittest.main()

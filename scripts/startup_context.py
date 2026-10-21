@@ -5,8 +5,10 @@ The packet is ephemeral. It neither caches nor copies product state: every
 invocation reads the current plan, every snapshot, every thread, both routing
 budgets, every active goal and every textual record after the plan cursor.
 Historical effect entries and repeated goal-signal explanations remain at their
-durable addresses and are represented by a count and digest; current decision
-fields stay verbatim.
+durable addresses and are represented by a count and digest. Current decisions
+are verbatim inline or manifested whole, with required reading before deciding.
+Both serialized packet and complete caller input have hard character limits;
+even a manifest that cannot fit refuses, without a new cache or storage owner.
 """
 
 from __future__ import annotations
@@ -37,6 +39,113 @@ MAX_RECORD_BYTES = 65_536
 # as well exceeded the engine's turn/start limit. Its existing manifest keeps
 # every source, digest and size without advancing the plan cursor.
 MAX_POST_CURSOR_BYTES = 0
+
+# Python/JSON character counts, not UTF-8 bytes or provider tokens. Leave room
+# for the runtime's instructions/tools below the observed 1 Mi-character limit.
+MAX_PACKET_CHARS = 480_000
+MAX_PROMPT_CHARS = 600_000
+SECTION_CHARS = {
+    "portfolio_plan": 80_000, "product_snapshots": 80_000,
+    "thread_states": 60_000, "model_budgets": 10_000,
+    "active_goals": 60_000, "post_cursor_records": 160_000,
+}
+
+
+class InputLimitError(ValueError):
+    """Source completeness cannot be preserved within the input bound."""
+
+
+def require_size(text: str, limit: int, section: str) -> str:
+    if len(text) > limit:
+        raise InputLimitError(
+            f"{section}: {len(text)} символов > {limit}; "
+            "полный источник или его манифест не помещается; модель не вызвана")
+    return text
+
+
+def reference(value, source: str, **identity) -> dict:
+    """Name a complete original; hashes of projections are explicitly labelled."""
+    text = value if isinstance(value, str) else render(value)
+    return {"source": source, "manifested": True,
+            "projection_sha256": digest_text(text), "projection_chars": len(text),
+            "projection_bytes": len(text.encode("utf-8")),
+            "read_before_decision": True, **identity}
+
+
+def file_reference(value, path: Path) -> dict:
+    raw = path.read_bytes()
+    return reference(value, str(path), source_sha256=hashlib.sha256(raw).hexdigest(),
+                     source_bytes=len(raw))
+
+
+def fit(value, original: dict, limit: int, section: str):
+    candidate = value if len(render(value)) <= limit else original
+    require_size(render(candidate), limit, section)
+    return candidate
+
+
+def fit_items(values: dict, originals: dict, limit: int, section: str) -> dict:
+    """Bound every item and the whole manifest, including its keys/count."""
+    each = limit // max(1, len(values))
+    result = {key: fit(value, originals[key], each, section)
+              for key, value in values.items()}
+    require_size(render(result), limit, section)
+    return result
+
+
+def bounded_packet(value: dict, current_thread: str | None = None,
+                   plan: dict | None = None) -> dict:
+    """Reuse whole-source manifests; excessive manifest cardinality refuses."""
+    value = dict(value)
+    plan_path = (product_memory.revisions_dir() / f"{int(plan['revision']):06d}.json"
+                 if plan else None)
+    plan_source = str(plan_path) if plan_path else "python3 scripts/product_memory.py --plan"
+    plan_ref = (file_reference(value["portfolio_plan"], plan_path) if plan_path else
+                reference(value["portfolio_plan"], plan_source))
+    if plan_path:
+        plan_ref["revision"] = plan["revision"]
+        plan_ref["accepted_at"] = plan["accepted_at"]
+    value["portfolio_plan"] = fit(value["portfolio_plan"], plan_ref,
+                                  SECTION_CHARS["portfolio_plan"], "portfolio_plan")
+    snapshots = value["product_snapshots"]
+    refs = {slug: reference(
+                view, str(product_memory.root() / view["source"].removeprefix("content/")),
+                source_sha256=view["source_sha256"])
+            for slug, view in snapshots.items()}
+    if current_thread:
+        config = product_memory.installation().get("threads", {}).get(current_thread, {})
+        relevant = config.get("products", [])
+        snapshots = {slug: view if slug in relevant else refs[slug]
+                     for slug, view in snapshots.items()}
+    value["product_snapshots"] = fit_items(
+        snapshots, refs, SECTION_CHARS["product_snapshots"], "product_snapshots")
+    reports = value["thread_states"]
+    refs = {name: reference(report, f"python3 scripts/thread_state.py {name}")
+            for name, report in reports.items()}
+    value["thread_states"] = fit_items(reports, refs, SECTION_CHARS["thread_states"], "thread_states")
+    commands = {"codex": "python3 scripts/codex_budget.py",
+                "route": "python3 scripts/claude_product_owner.py --status"}
+    refs = {name: reference(budget, commands[name])
+            for name, budget in value["model_budgets"].items()}
+    value["model_budgets"] = fit_items(
+        value["model_budgets"], refs, SECTION_CHARS["model_budgets"], "model_budgets")
+    goals = {str(index): goal for index, goal in enumerate(value["active_goals"])}
+    refs = {index: file_reference(goal, product_goal.root() / f"{goal['id']}.json")
+            for index, goal in goals.items()}
+    value["active_goals"] = list(fit_items(
+        goals, refs, SECTION_CHARS["active_goals"], "active_goals").values())
+    # These records are already whole-source manifests. Never drop their tail.
+    require_size(render(value["post_cursor_records"]),
+                 SECTION_CHARS["post_cursor_records"], "post_cursor_records")
+    require_size(render(value), MAX_PACKET_CHARS, "startup packet")
+    return value
+
+
+def checked_prompt(text: str) -> str:
+    # The router prepends this exact language paragraph before codex exec.
+    require_size(claude_product_owner.plain_russian.as_paragraph() + "\n\n" + text,
+                 MAX_PROMPT_CHARS, "complete prompt including language wrapper")
+    return text
 
 
 def digest_text(text: str) -> str:
@@ -130,12 +239,12 @@ def post_cursor(plan: dict, frozen_at: datetime | None = None) -> list[dict]:
     for path in sorted(paths, key=str):
         try:
             text = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeError):
-            continue
+        except (OSError, UnicodeError) as error:
+            raise InputLimitError(f"не прочитан обязательный источник {path}: {error}") from error
         size = len(text.encode("utf-8"))
         if size > MAX_RECORD_BYTES or used + size > MAX_POST_CURSOR_BYTES:
             records.append({
-                "source": str(path), "manifested": True, "bytes": size,
+                "source": str(path), "manifested": True, "bytes": size, "chars": len(text),
                 "sha256": digest_text(text),
                 "reason": "post-cursor input bound; open this durable original addressably",
             })
@@ -149,9 +258,7 @@ def packet(current_thread: tuple[str, dict] | None = None) -> dict:
     try:
         plan = product_memory.current_plan()
     except product_memory.ContentError as error:
-        plan = None
-        plan_text = ("Портфельный план не читается: " + str(error)
-                     + ". Порядок работ не установлен; не запускай работу, меняющую пользу.")
+        raise InputLimitError(f"Портфельный план не читается: {error}; модель не вызвана") from error
     else:
         plan_text = product_memory.plan_text(plan)
     reports = {}
@@ -159,13 +266,17 @@ def packet(current_thread: tuple[str, dict] | None = None) -> dict:
         reports[name] = (current_thread[1] if current_thread and current_thread[0] == name
                          else thread_state.build(name))
     observation = claude_product_owner.inspect_observation("print")
-    return {
+    value = {
         "contract": {
-            "kind": "bounded-background-startup-v1",
+            "kind": "bounded-background-startup-v2",
+            "plan_available": plan is not None,
             "rules": "AGENTS.md is already loaded by the model runtime; do not read it twice",
             "historical_detail": (
                 "Counts, hashes and source addresses below manifest mandatory sources; "
-                "open historical detail only when the observed event requires it"
+                "open every relevant manifested original before deciding; inclusion "
+                "in a manifest is not reading and never advances the plan cursor. "
+                "Current decision text is verbatim when inline, otherwise open the "
+                "complete original, including the current plan revision and order"
             ),
         },
         "portfolio_plan": plan_text,
@@ -184,6 +295,7 @@ def packet(current_thread: tuple[str, dict] | None = None) -> dict:
         "active_goals": [goal_view(goal) for goal in product_goal.active()],
         "post_cursor_records": post_cursor(plan) if plan else [],
     }
+    return bounded_packet(value, current_thread[0] if current_thread else None, plan)
 
 
 def render(value: dict) -> str:

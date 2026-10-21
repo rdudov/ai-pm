@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import outbound  # noqa: E402
 import plain_russian  # noqa: E402
 import product_memory  # noqa: E402
-import thread_state  # noqa: E402
+import startup_context  # noqa: E402
 
 HOME = Path(__file__).resolve().parents[1]
 ROUTER = HOME / "scripts" / "claude_product_owner.py"
@@ -28,29 +28,52 @@ MODEL_TIMEOUT = 1800
 FAILURE_RETRY_SECONDS = 3600
 
 
-def compact_report(report: dict) -> dict:
-    keys = ("thread", "title", "live_runs", "needs_attention", "queued_by_plan",
-            "ready_to_start", "decided_not_done", "waiting_user", "undelivered")
-    return {key: report.get(key, []) for key in keys}
-
-
 def source_packet(moment: datetime) -> dict:
-    plan = product_memory.current_plan()
-    snapshots = {slug: product_memory.read_snapshot(slug)
-                 for slug in product_memory.slugs()}
-    config = product_memory.installation().get("threads", {})
-    reports = {name: compact_report(thread_state.build(name)) for name in config}
+    value = startup_context.packet()
     with outbound.Ledger() as ledger:
         recent = [letter for entry in ledger.data.get("threads", {}).values()
                   for letter in outbound.already_said(entry)]
-    return {"plan": product_memory.plan_text(plan) if plan else "",
-            "snapshots": snapshots, "threads": reports,
-            "recent_letters": sorted(recent, key=lambda item: item["at"])[-12:]}
+    recent = sorted(recent, key=lambda item: item["at"])[-12:]
+    plan = value.pop("portfolio_plan")
+    if not value["contract"].get("plan_available", True):
+        plan = ""
+    result = {"plan": plan,
+              "snapshots": value.pop("product_snapshots"),
+              "threads": value.pop("thread_states"), **value,
+              "wake_health": wake_health(),
+              "recent_letters": startup_context.fit(
+                  recent, startup_context.reference(recent, str(outbound.LEDGER)),
+                  20_000, "daily recent letters")}
+    startup_context.require_size(startup_context.render(result),
+                                 startup_context.MAX_PACKET_CHARS, "daily packet")
+    return result
+
+
+def wake_health() -> list[dict]:
+    """Read the same state a tick writes; no second registry or notifications."""
+    import thread_tick
+    result = []
+    for name, config in product_memory.installation().get("threads", {}).items():
+        path = thread_tick.STATE_DIR / f"{name}.json"
+        try:
+            failure = json.loads(path.read_text()).get("wake_failure")
+        except FileNotFoundError:
+            continue
+        if failure:
+            result.append({"product": config.get("title", name),
+                           "today": "Восстановить фоновую проверку",
+                           "state": "Пробуждение не состоялось",
+                           "blocker": failure["reason"], "source": str(path)})
+    startup_context.require_size(startup_context.render(result), 20_000, "wake health")
+    return result
 
 
 def mechanically_empty(packet: dict) -> bool:
-    return not (packet["plan"].strip()
-                or any(text.strip() for text in packet["snapshots"].values()) or any(
+    plan = packet["plan"]
+    return not ((plan.strip() if isinstance(plan, str) else plan)
+                or any(value.strip() if isinstance(value, str) else value
+                       for value in packet["snapshots"].values())
+                or packet.get("wake_health") or packet.get("active_goals") or any(
         any(report.get(key) for key in report if key not in {"thread", "title"})
         for report in packet["threads"].values()))
 
@@ -70,6 +93,10 @@ def prompt(packet: dict, local_date: str) -> str:
 - не выдумывай факты и не повторяй отложенный вопрос из другого предмета.
 - планы дня показывай всегда; статусы, вопросы и инициативы из recent_letters
   не пересказывай дословно, если с тех пор ничего не изменилось.
+- Манифесты заменяют текст, а не чтение: открой текущий план с порядком работ
+  и все относящиеся к решению полные оригиналы до составления оперативки.
+- wake_health — наблюдаемые отказы, а не обещание работающих проверок.
+  Эти строки дверь добавит сама; не дублируй их и не обещай выполненную проверку.
 
 Источник:
 {json.dumps(packet, ensure_ascii=False)}
@@ -104,9 +131,10 @@ def parse_composition(text: str) -> dict:
 
 
 def compose(packet: dict, local_date: str) -> dict:
+    model_input = startup_context.checked_prompt(prompt(packet, local_date))
     result = subprocess.run(
         [str(ROUTER), "--entry", "print"],
-        input=prompt(packet, local_date), text=True, capture_output=True,
+        input=model_input, text=True, capture_output=True,
         cwd=HOME, env={**os.environ, "IS_SANDBOX": "1"}, timeout=MODEL_TIMEOUT,
         check=False)
     if result.returncode != 0:
@@ -146,7 +174,8 @@ def render_plain(data: dict) -> str:
         for item in data["questions"]:
             parts += [f"- {item['question']}", f"  Рекомендация: {item['recommendation']}",
                       f"  Цена вариантов: {item['tradeoff']}"]
-    parts += ["", "Что ещё стоит попробовать"]
+    if data["initiatives"]:
+        parts += ["", "Что ещё стоит попробовать"]
     for item in data["initiatives"]:
         parts.append(f"- {ends_sentence(item['idea'])} "
                      f"Эффект: {ends_sentence(item['effect'])} "
@@ -174,6 +203,8 @@ def render_html(data: dict) -> str:
         for item in data["initiatives"])
     question_section = (f"<h2>Нужен ваш выбор</h2><ol>{questions}</ol>"
                         if questions else "")
+    initiative_section = (f"<h2>Что ещё стоит попробовать</h2><ol>{initiatives}</ol>"
+                          if initiatives else "")
     return f"""<!doctype html><html lang=ru><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width, initial-scale=1">
 <style>
@@ -190,7 +221,7 @@ td{{border:0;padding:5px 8px 5px 38%;position:relative;min-height:20px}}td:befor
 </style></head><body><main class=card><h1>Продуктовая оперативка</h1>
 <p>{escape(data['intro'])}</p><h2>Планы на сегодня</h2>
 <table><thead><tr><th>Продукт</th><th>Сегодня</th><th>Состояние</th><th>Что мешает</th></tr></thead><tbody>{plans}</tbody></table>
-{question_section}<h2>Что ещё стоит попробовать</h2><ol>{initiatives}</ol></main></body></html>"""
+{question_section}{initiative_section}</main></body></html>"""
 
 
 def raw_message(to: str, subject: str, plain: str, html: str) -> bytes:
@@ -228,10 +259,24 @@ def maybe_send(moment: datetime | None = None, force: bool = False,
             and thread_tick.MAIL_PYTHON.is_file()):
         return {"action": "fail", "at": moment.isoformat(),
                 "reason": "почтовая дверь недоступна — оперативка не собиралась"}
-    packet = source_packet(moment)
-    if mechanically_empty(packet):
-        return {"action": "skip", "reason": "all mechanical sources are empty"}
-    data = compose(packet, local.date().isoformat())
+    try:
+        packet = source_packet(moment)
+        if mechanically_empty(packet):
+            return {"action": "skip", "reason": "all mechanical sources are empty"}
+        data = compose(packet, local.date().isoformat())
+    except (startup_context.InputLimitError, RuntimeError) as error:
+        # A failed composer cannot explain its own absence. Use the same daily
+        # letter and receipt, never per-tick failure mail or another transport.
+        data = {"intro": "Оперативка не смогла прочитать источники: " + str(error),
+                "plans": [{"product": "Портфель", "today": "Восстановить сборку оперативки",
+                           "state": "Планы не проверены", "blocker": str(error)}],
+                "questions": [], "initiatives": []}
+        try:
+            packet = {"wake_health": wake_health()}
+        except startup_context.InputLimitError:
+            packet = {}
+    data["plans"].extend({key: row[key] for key in ("product", "today", "state", "blocker")}
+                         for row in packet.get("wake_health", []))
     plain, html = render_plain(data), render_html(data)
     subject = f"Продуктовая оперативка — {local:%d.%m}"
     return thread_tick.deliver(
