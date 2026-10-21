@@ -3363,6 +3363,39 @@ class OneObserver(unittest.TestCase):
     def source(self) -> str:
         return Path(state.HOME / "scripts" / "thread_state.py").read_text()
 
+    def test_a_finished_blocked_turn_is_not_an_abandoned_run(self):
+        for run_state, alive, abandoned in (("blocked", False, False),
+                                           ("blocked", True, False),
+                                           ("running", False, True),
+                                           ("unknown", False, True)):
+            with self.subTest(state=run_state, alive=alive):
+                task = a_task(status="blocked", run={"state": run_state, "pid": 123,
+                                                    "alive": alive})
+                self.assertEqual(thread.run_projection(task)["abandoned_run"], abandoned)
+                self.assertEqual(thread.run_projection(task)["process_alive"], alive)
+                observed = {"threads": [{"title": "Alpha", "products": [],
+                             "tasks": [task], "repos": [], "task_count": 1}],
+                            "owners_awake": []}
+                with (mock.patch.object(thread, "load_thread", return_value={"repos": []}),
+                      mock.patch.object(thread.observer, "build", return_value=observed),
+                      mock.patch.object(thread, "process_inventory", return_value=[]),
+                      mock.patch.object(thread.observer, "write_owner_observations")):
+                    report = thread.build("alpha")
+                self.assertEqual([item["id"] for item in report["needs_attention"]], [task["id"]])
+                self.assertEqual(bool(report["live_runs"]), alive)
+        # A finished turn can still have work outside it or a failed delivery.
+        task = a_task(status="blocked", flags=["work_outside_owner"],
+                      run={"state": "blocked", "pid": 123, "alive": False},
+                      detail={"delivery": {"unresolved": {"current": True, "reason": "send failed"}}})
+        observed["threads"][0]["tasks"] = [task]
+        with (mock.patch.object(thread, "load_thread", return_value={"repos": []}),
+              mock.patch.object(thread.observer, "build", return_value=observed),
+              mock.patch.object(thread, "process_inventory", return_value=[]),
+              mock.patch.object(thread.observer, "write_owner_observations")):
+            report = thread.build("alpha")
+        self.assertTrue(report["needs_attention"][0]["run"]["work_outside_owner"])
+        self.assertEqual(report["needs_attention"][0]["undelivered_notification"]["reason"], "send failed")
+
     def test_the_wake_up_reads_the_collector_rather_than_the_disk(self):
         source = self.source()
         self.assertIn("import process_map_state as observer", source)

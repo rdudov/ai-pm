@@ -523,7 +523,11 @@ def goal_watch(thread: str, report: dict, stored: dict, moment: datetime) -> dic
             old_hash = (was.get("waiting") or {}).get("current_source_sha256")
             new_hash = goal["waiting"].get("current_source_sha256")
             if old_hash != new_hash:
-                transitions_seen.append(f"изменился источник ожидания цели {goal['id']}")
+                if product_goal.waiting_unchanged(goal["waiting"]):
+                    transitions_seen.append(f"обновлено явное ожидание цели {goal['id']}; "
+                                            "источник подтверждён решением владельца")
+                else:
+                    transitions_seen.append(f"изменился источник ожидания цели {goal['id']}")
 
     reminder = stored.get("goal_reminder")
     standing_now = []

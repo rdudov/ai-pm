@@ -55,7 +55,7 @@ CONFIG = observer.CONFIG
 REPO = observer.REPO
 # States a run record may hold once nobody is expected to come back to it.
 # Anything else, with the process gone, means work was left outstanding.
-TERMINAL_RUN_STATES = {"completed", "complete", "superseded"}
+TERMINAL_RUN_STATES = {"completed", "complete", "superseded", "blocked"}
 # Statuses in which the task itself is closed on purpose. A leftover run record
 # under one of these is history, not an abandoned run.
 CLOSED_TASK_STATUSES = {"completed", "cancelled"}

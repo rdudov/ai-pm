@@ -361,6 +361,33 @@ def test_wait_change_restores_standing_and_requires_a_fresh_owner_decision(tmp_p
     assert goal_session.post_check("alpha", changed["objects"], [], "SILENT", moment)["resolved"]
 
 
+def test_new_owner_wait_is_visible_without_claiming_an_unreviewed_source_change(tmp_path, monkeypatch):
+    monkeypatch.setenv("PRODUCT_OWNER_GOALS", str(tmp_path / "goals"))
+    source = tmp_path / "decision.md"
+    source.write_text("Previous observation")
+    goal = goals.open_goal("alpha", "Promised result", ["Real acceptance"], 100)
+    goals.pause(goal["id"], "Owner pause", "owner.md")
+    goals.add_corrective(goal["id"], 101, "Still owed", "Installed result")
+    goals.wait(goal["id"], "External return pending", "Verify the return", str(source))
+    moment = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    before = thread_tick.goal_watch("alpha", {"live_runs": []}, {}, moment)
+    source.write_text("New observation already reviewed by the owner")
+    goals.wait(goal["id"], "Owner confirmed the new obstacle", "Verify the return", str(source))
+    after = thread_tick.goal_watch("alpha", {"live_runs": []}, {"goals": before["panel"]}, moment)
+    assert after["transitions"] == [f"обновлено явное ожидание цели {goal['id']}; "
+                                     "источник подтверждён решением владельца"]
+    assert after["objects"] == after["standing"] == []
+    assert after["panel"][0]["waiting"]["reason"] == "Owner confirmed the new obstacle"
+    assert goals.load(goal["id"])["pause"]["reason"] == "Owner pause"
+    assert goals.pending(goals.load(goal["id"])) == [101]
+    # A later unreviewed return still demands a real outcome on the same path.
+    source.write_text("A genuinely new return")
+    changed = thread_tick.goal_watch("alpha", {"live_runs": []}, {"goals": after["panel"]}, moment)
+    assert any("изменился источник" in event for event in changed["transitions"])
+    assert changed["objects"] and changed["standing"]
+    assert not goal_session.post_check("alpha", changed["objects"], [], "SILENT", moment)["resolved"]
+
+
 @pytest.mark.parametrize("unavailable", ["missing", "unreadable", "unreadable_watch", "legacy"])
 def test_unknown_wait_keeps_owner_decision_and_requires_outcome(tmp_path, monkeypatch, unavailable):
     monkeypatch.setenv("PRODUCT_OWNER_GOALS", str(tmp_path / "goals"))
