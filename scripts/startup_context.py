@@ -105,6 +105,7 @@ def bounded_packet(value: dict, current_thread: str | None = None,
     if plan_path:
         plan_ref["revision"] = plan["revision"]
         plan_ref["accepted_at"] = plan["accepted_at"]
+    sources = {"portfolio_plan": plan_ref}
     value["portfolio_plan"] = fit(value["portfolio_plan"], plan_ref,
                                   SECTION_CHARS["portfolio_plan"], "portfolio_plan")
     snapshots = value["product_snapshots"]
@@ -112,6 +113,7 @@ def bounded_packet(value: dict, current_thread: str | None = None,
                 view, str(product_memory.root() / view["source"].removeprefix("content/")),
                 source_sha256=view["source_sha256"])
             for slug, view in snapshots.items()}
+    sources["product_snapshots"] = {slug: ref["source"] for slug, ref in refs.items()}
     if current_thread:
         config = product_memory.installation().get("threads", {}).get(current_thread, {})
         relevant = config.get("products", [])
@@ -122,9 +124,11 @@ def bounded_packet(value: dict, current_thread: str | None = None,
     reports = value["thread_states"]
     refs = {name: reference(report, f"python3 scripts/thread_state.py {name}")
             for name, report in reports.items()}
+    sources["thread_states"] = {name: ref["source"] for name, ref in refs.items()}
     value["thread_states"] = fit_items(reports, refs, SECTION_CHARS["thread_states"], "thread_states")
     commands = {"codex": "python3 scripts/codex_budget.py",
                 "route": "python3 scripts/claude_product_owner.py --status"}
+    sources["model_budgets"] = commands
     refs = {name: reference(budget, commands[name])
             for name, budget in value["model_budgets"].items()}
     value["model_budgets"] = fit_items(
@@ -132,11 +136,15 @@ def bounded_packet(value: dict, current_thread: str | None = None,
     goals = {str(index): goal for index, goal in enumerate(value["active_goals"])}
     refs = {index: file_reference(goal, product_goal.root() / f"{goal['id']}.json")
             for index, goal in goals.items()}
+    sources["active_goals"] = [ref["source"] for ref in refs.values()]
     value["active_goals"] = list(fit_items(
         goals, refs, SECTION_CHARS["active_goals"], "active_goals").values())
     # These records are already whole-source manifests. Never drop their tail.
     require_size(render(value["post_cursor_records"]),
                  SECTION_CHARS["post_cursor_records"], "post_cursor_records")
+    # Inline projections still name their originals; records already carry
+    # their own addresses. The final cap also counts this source catalog.
+    value["contract"] = {**value["contract"], "sources": sources}
     require_size(render(value), MAX_PACKET_CHARS, "startup packet")
     return value
 

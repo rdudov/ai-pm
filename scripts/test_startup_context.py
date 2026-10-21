@@ -219,6 +219,10 @@ class HardInputBounds(unittest.TestCase):
         path = Path(views["other"]["source"])
         self.assertEqual(startup.digest_text(path.read_text()), views["other"]["source_sha256"])
         self.assertEqual(set(views), {"demo", "other"})
+        sources = result["contract"]["sources"]
+        self.assertEqual(sources["active_goals"], [str(self.goal_path)])
+        self.assertIn("demo", sources["thread_states"])
+        self.assertEqual(set(sources["model_budgets"]), {"codex", "route"})
 
     def test_growing_text_becomes_whole_openable_originals_without_mutation(self):
         huge = "полные слова пользователя 😺\n" * 60_000
