@@ -213,8 +213,10 @@ class FailedWakeStaysInTheServiceJournal(unittest.TestCase):
         opened = self.standing_goal(
             "The original snapshot is unavailable; another run cannot reconstruct it.",
             "Wait for the archive, then compare the original values.")
+        source = self.goals.parent / "observation.md"
+        source.write_text("The original snapshot is unavailable.")
         product_goal.wait(opened["id"], opened["gap"], opened["next_transition"],
-                          "Archive inspection")
+                          str(source))
         code, printed, journal = self.run_tick(
             subprocess.CompletedProcess([], 0, "SILENT", ""), "--force")
         self.assertEqual((code, printed, journal), (0, "SILENT\n", ""))
@@ -235,9 +237,12 @@ class FailedWakeStaysInTheServiceJournal(unittest.TestCase):
         """Real tick/goal paths; only the external model and transports are fixtures."""
         from datetime import timedelta
         source = self.goals.parent / "return.json"
+        observation = self.goals.parent / "observation.md"
+        observation.write_text("The named return file has not arrived.")
         opened = product_goal.open_goal("companion", "Compare the old values",
                                        ["Original values compared"], 100)
-        product_goal.wait(opened["id"], "Waiting for the named file", "Compare on return", str(source))
+        product_goal.wait(opened["id"], "Waiting for the named file", "Compare on return",
+                          str(observation), watch_paths=[str(source)])
         tick.goal_watch.side_effect = REAL_GOAL_WATCH
         self.state_dir.mkdir(parents=True, exist_ok=True)
         initial_panel = product_goal.panel("companion")
@@ -245,7 +250,8 @@ class FailedWakeStaysInTheServiceJournal(unittest.TestCase):
             "snapshot": tick.snapshot(self.report), "goals": initial_panel}))
 
         def agent(*args, **kwargs):
-            product_goal.wait(opened["id"], "Waiting for the named file", "Compare on return", str(source))
+            product_goal.wait(opened["id"], "Waiting for the named file", "Compare on return",
+                              str(observation), watch_paths=[str(source)])
             return subprocess.CompletedProcess([], 0, "SILENT", "")
 
         def goal_bytes():
@@ -269,7 +275,7 @@ class FailedWakeStaysInTheServiceJournal(unittest.TestCase):
                 state = json.loads((self.state_dir / "companion.json").read_text())
                 self.assertIn("изменился источник ожидания", " ".join(state["last_events"]))
                 self.assertEqual(product_goal.load(opened["id"])["waiting"]["source_sha256"],
-                                 __import__("hashlib").sha256(body.encode()).hexdigest())
+                                 product_goal.wait_source_sha256(str(observation), [str(source)]))
         self.mail.assert_not_called()
 
     def test_wait_bound_queue_keeps_window_checks_without_idle_letters_or_history(self):

@@ -189,8 +189,10 @@ def test_paused_wait_preserves_pause_promises_and_postcheck_across_ticks(tmp_pat
     moment = datetime(2026, 1, 1, tzinfo=timezone.utc)
     # A pause or next-transition plan alone is never an implicit wait.
     assert not goal_session.post_check("alpha", [projected], [], "SILENT", moment)["resolved"]
+    source = tmp_path / "observation.md"
+    source.write_text("The required external input is absent.")
     goals.wait(goal["id"], "The required external input is absent.",
-               "Check the input on arrival; keep the main work paused.", "Observed absence")
+               "Check the input on arrival; keep the main work paused.", str(source))
     current = goals.load(goal["id"])
     for key in before.keys() - {"waiting", "next_transition", "updated_at"}:
         assert current[key] == before[key]
@@ -320,16 +322,32 @@ def test_event_without_explicit_wait_keeps_gap_and_unsettled_promises(tmp_path, 
     assert goal["gap"] not in event
 
 
-def test_wait_change_restores_standing_and_requires_a_fresh_owner_decision(tmp_path, monkeypatch):
+@pytest.mark.parametrize("anchor", ["", "#цель-0002", "#цель-0030", "#цель-0044", "#цель-0047"])
+@pytest.mark.parametrize("relative", [False, True])
+def test_wait_change_restores_standing_and_requires_a_fresh_owner_decision(tmp_path, monkeypatch, anchor, relative):
     monkeypatch.setenv("PRODUCT_OWNER_GOALS", str(tmp_path / "goals"))
-    source = tmp_path / "return.txt"
+    monkeypatch.setattr(memory, "ROOT", tmp_path / "content")
+    monkeypatch.setattr(memory, "HOME", tmp_path / "unrelated-home")
+    source = memory.root() / "products/alpha/history/decision.md"
+    source.parent.mkdir(parents=True)
     source.write_text("old")
     goal = goals.open_goal("alpha", "Installed result", ["Real acceptance"], 100)
-    goals.wait(goal["id"], "External return is pending", "Verify new bytes", str(source))
+    goals.pause(goal["id"], "Owner pause", "owner.md")
+    goals.add_corrective(goal["id"], 101, "Unsettled promise", "Installed result")
+    src = ("content/" + str(source.relative_to(memory.root())) if relative else str(source)) + anchor
+    goals.wait(goal["id"], "External return is pending", "Verify new bytes", src)
     report = {"live_runs": []}
     moment = datetime(2026, 1, 1, tzinfo=timezone.utc)
     first = thread_tick.goal_watch("alpha", report, {}, moment)
     assert first["standing"] == first["objects"] == []
+    before = files(tmp_path)
+    for minutes in (20, 40, 61):
+        repeated = thread_tick.goal_watch("alpha", report, {"goals": first["panel"]},
+                                          moment + timedelta(minutes=minutes))
+        assert repeated["standing"] == repeated["objects"] == repeated["transitions"] == []
+        current = goals.load(goal["id"])
+        goals.wait(goal["id"], current["waiting"]["reason"], current["next_transition"], src)
+    assert files(tmp_path) == before
     stored = {"goals": first["panel"]}
     source.write_text("new")
     changed = thread_tick.goal_watch("alpha", report, stored, moment)
@@ -337,14 +355,72 @@ def test_wait_change_restores_standing_and_requires_a_fresh_owner_decision(tmp_p
     assert any("изменился источник" in event for event in changed["transitions"])
     assert not goal_session.post_check("alpha", changed["objects"], [], "SILENT", moment)["resolved"]
     current = goals.load(goal["id"])
-    goals.wait(goal["id"], current["waiting"]["reason"], current["next_transition"], str(source))
+    assert current["state"] == goals.PAUSED and current["pause"]["reason"] == "Owner pause"
+    assert goals.pending(current) == [101]
+    goals.wait(goal["id"], current["waiting"]["reason"], current["next_transition"], src)
     assert goal_session.post_check("alpha", changed["objects"], [], "SILENT", moment)["resolved"]
+
+
+@pytest.mark.parametrize("unavailable", ["missing", "unreadable", "unreadable_watch", "legacy"])
+def test_unknown_wait_keeps_owner_decision_and_requires_outcome(tmp_path, monkeypatch, unavailable):
+    monkeypatch.setenv("PRODUCT_OWNER_GOALS", str(tmp_path / "goals"))
+    source, returned = tmp_path / "decision.md", tmp_path / "return.txt"
+    source.write_text("Owner observation")
+    returned.write_text("Return")
+    src = str(source) + "#цель-0002"
+    goal = goals.open_goal("alpha", "Installed result", ["Acceptance"], 100)
+    goals.pause(goal["id"], "Keep owner pause", "owner.md")
+    goals.add_corrective(goal["id"], 101, "Keep promise", "Acceptance")
+    goals.wait(goal["id"], "External obstacle", "Read actual return", src,
+               watch_paths=[str(returned)] if unavailable == "unreadable_watch" else [])
+    previous = goals.panel("alpha")
+    if unavailable == "legacy":
+        path = goals.root() / f"{goal['id']}.json"
+        value = json.loads(path.read_text())
+        value["waiting"].pop("source_sha256")
+        path.write_text(json.dumps(value))
+    elif unavailable == "missing":
+        source.unlink()
+    else:
+        original = Path.open
+        denied = returned if unavailable == "unreadable_watch" else source
+        def deny(path, *args, **kwargs):
+            if path == denied:
+                raise PermissionError("fixture unreadable source")
+            return original(path, *args, **kwargs)
+        monkeypatch.setattr(Path, "open", deny)
+    before = files(goals.root())
+    current = goals.load(goal["id"])
+    decision = goals.waiting_decision(current)
+    assert decision and decision["src"] == src
+    assert decision["source_sha256" if unavailable == "legacy" else "current_source_sha256"] is None
+    assert not goals.waiting_unchanged(decision)
+    assert not goals.waiting_unchanged({"source_sha256": None, "current_source_sha256": None})
+    moment = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    watch = thread_tick.goal_watch("alpha", {"live_runs": []}, {"goals": previous}, moment)
+    assert watch["standing"] and watch["objects"]
+    if unavailable != "legacy":
+        assert any("изменился источник" in event for event in watch["transitions"])
+    assert not goal_session.post_check("alpha", watch["objects"], [], "SILENT", moment)["resolved"]
+    monkeypatch.setattr(memory, "current_plan", lambda: {
+        "outcome_links": [{"tasks": [100, 101], "goals": [goal["id"]]}]})
+    monkeypatch.setattr(thread_tick, "codex_window", lambda: None)
+    report = {"live_runs": [], "waiting_user": [], "can_pick_up": [{"id": 101}],
+              "queued_by_plan": [], "ready_to_start": [], "decided_not_done": [],
+              "needs_attention": [], "repos": [], "undelivered": []}
+    assert thread_tick.idle_reasons(report, {}, watch["panel"])[0]["code"] == "none_observed"
+    assert current["state"] == goals.PAUSED and goals.pending(current) == [101]
+    assert current["waiting"]["reason"] == "External obstacle"
+    assert current["next_transition"] == "Read actual return"
+    assert files(goals.root()) == before
 
 
 def test_wait_reason_covers_only_explicit_plan_bindings_and_keeps_window_checks(tmp_path, monkeypatch):
     monkeypatch.setenv("PRODUCT_OWNER_GOALS", str(tmp_path / "goals"))
     goal = goals.open_goal("alpha", "Installed result", ["Real acceptance"], 100)
-    goals.wait(goal["id"], "Agreed future installation window", "Install in the window", "owner.md")
+    source = tmp_path / "owner.md"
+    source.write_text("Agreed future installation window")
+    goals.wait(goal["id"], "Agreed future installation window", "Install in the window", str(source))
     plan = {"outcome_links": [{"tasks": [100, 101], "goals": [goal["id"]]}]}
     monkeypatch.setattr(memory, "current_plan", lambda: plan)
     monkeypatch.setattr(thread_tick, "codex_window", lambda: None)

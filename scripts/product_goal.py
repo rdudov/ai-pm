@@ -405,23 +405,35 @@ def set_fields(goal_id: str, gap: str | None = None,
 
 
 def wait_source_sha256(src: str, watch_paths: list[str] | None = None) -> str | None:
-    """Hash the evidence and explicitly named files; never traverse directories."""
-    if watch_paths:
-        observations = [(src, wait_source_sha256(src))]
-        for name in sorted(set(watch_paths)):
-            observations.append((name, wait_source_sha256(name)))
-        return hashlib.sha256(json.dumps(observations, ensure_ascii=False,
-                                         separators=(",", ":")).encode()).hexdigest()
-    path = Path(src)
-    if not path.is_absolute():
-        path = product_memory.HOME / path
-    if not path.is_file():
+    """Observe named files, resolving document anchors without traversing history.
+
+    A missing return file is an observed pending return; missing evidence or
+    unreadable files cannot confirm the owner's wait as unchanged.
+    """
+    observations = []
+    try:
+        for name in [src, *sorted(set(watch_paths or []))]:
+            path = Path(name.partition("#")[0])
+            if not path.is_absolute():
+                path = (product_memory.root().joinpath(*path.parts[1:])
+                        if path.parts and path.parts[0] == "content"
+                        else product_memory.HOME / path)
+            digest = None
+            if path.is_file():
+                hasher = hashlib.sha256()
+                with path.open("rb") as stream:
+                    for chunk in iter(lambda: stream.read(65_536), b""):
+                        hasher.update(chunk)
+                digest = hasher.hexdigest()
+            if not observations and digest is None:
+                return None
+            observations.append((name, digest))
+    except OSError:
         return None
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(65_536), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+    if not watch_paths:
+        return observations[0][1]
+    return hashlib.sha256(json.dumps(observations, ensure_ascii=False,
+                                     separators=(",", ":")).encode()).hexdigest()
 
 
 def _allows_wait(goal: dict) -> bool:
@@ -489,6 +501,7 @@ def waiting_decision(goal: dict) -> dict | None:
 def waiting_unchanged(decision: dict | None) -> bool:
     """An explicit owner wait still observes the bytes it was decided on."""
     return bool(decision and decision.get("source_sha256")
+                and decision.get("source_sha256")
                 == decision.get("current_source_sha256"))
 
 

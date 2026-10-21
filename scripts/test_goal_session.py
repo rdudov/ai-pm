@@ -442,8 +442,10 @@ class StandingGoalOutcome(unittest.TestCase):
     def test_the_wait_is_read_after_the_turn_instead_of_from_the_wake_projection(self):
         opened = goals.open_goal("process", "Recover original values", ["Compare values"], 1094)
         before = goals.projection(opened)
+        source = self.root / "observation.md"
+        source.write_text("Original values are missing.")
         goals.wait(opened["id"], "Original values are missing.",
-                   "Wait for the archive, then compare.", "Archive inspection")
+                   "Wait for the archive, then compare.", str(source))
         checked = session.post_check("process", [before], [], "", self.moment())
         self.assertTrue(checked["resolved"])
         self.assertIn("Original values", checked["waiting"][0]["reason"])
@@ -456,7 +458,12 @@ class StandingGoalOutcome(unittest.TestCase):
 
     def test_incomplete_unreadable_and_other_goal_decisions_do_not_excuse_silence(self):
         original = self.root / "0001.json"
-        decision = {"reason": "Original values are missing.", "src": "Archive inspection"}
+        source = self.root / "observation.md"
+        source.write_text("Original values are missing.")
+        decision = {"reason": "Original values are missing.", "src": str(source),
+                    "source_sha256": goals.wait_source_sha256(str(source))}
+        original.write_text(json.dumps({**goal(), "waiting": decision}))
+        self.assertTrue(session.post_check("process", [goal()], [], "SILENT", self.moment())["resolved"])
         for change in ({"waiting": None}, {"waiting": True}, {"waiting": {}},
                        {"waiting": {**decision, "reason": " "}},
                        {"waiting": {**decision, "src": ""}}, {"next_transition": "   "},
@@ -479,8 +486,10 @@ class StandingGoalOutcome(unittest.TestCase):
 
     def test_each_goal_needs_its_own_run_or_recorded_reason(self):
         (self.root / "0001.json").write_text(json.dumps(goal()))
+        source = self.root / "observation.md"
+        source.write_text("Owner's archive is required before any comparison.")
         goals.wait("0001", "Owner's archive is required before any comparison.",
-                   "Compare when the owner supplies the archive.", "Owner's recorded reply")
+                   "Compare when the owner supplies the archive.", str(source))
         other = goal(goal_id="0002", waiting=[1100])
         (self.root / "0002.json").write_text(json.dumps(other))
         with mock.patch("sys.stderr"):
@@ -632,8 +641,10 @@ class OneConversation(unittest.TestCase):
         self.assertNotIn("composer_failure", turn)
 
     def test_a_session_turn_accepts_recorded_waiting_without_composing_mail(self):
+        source = self.root / "observation.md"
+        source.write_text("Original snapshot is missing.")
         goals.wait("0001", "Original snapshot is missing.",
-                   "Wait for the archive, then compare.", "Archive inspection")
+                   "Wait for the archive, then compare.", str(source))
         self.observations = [look(live=[])]
         session.MIN_TURN_GAP_SECONDS = 0
         session.run_turn = lambda *args, **kwargs: {
