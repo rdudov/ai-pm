@@ -120,7 +120,8 @@ class GoalStore(unittest.TestCase):
             with self.subTest(args=args), self.assertRaises(goals.GoalError):
                 goals.wait(opened["id"], *args)
             self.assertEqual(goals.load(opened["id"]), before)
-        goals.pause(opened["id"], "Task needs a corrective repair.", "Observed refusal")
+        with mock.patch.object(goals, "task_status", return_value="completed"):
+            goals.close(opened["id"], "Installed product checked.", "Live evidence")
         with self.assertRaises(goals.GoalError):
             goals.wait(opened["id"], "reason", "next", "source")
 

@@ -424,6 +424,15 @@ def wait_source_sha256(src: str, watch_paths: list[str] | None = None) -> str | 
     return digest.hexdigest()
 
 
+def _allows_wait(goal: dict) -> bool:
+    if goal.get("state") == ACTIVE:
+        return True
+    pause = goal.get("pause")
+    return (goal.get("state") == PAUSED and isinstance(pause, dict)
+            and all(isinstance(pause.get(key), str) and pause[key].strip()
+                    for key in ("reason", "src")))
+
+
 def wait(goal_id: str, reason: str, next_transition: str, src: str,
          watch_paths: list[str] | None = None) -> dict:
     """Record the owner's decision that an obstacle prevents useful action.
@@ -437,8 +446,8 @@ def wait(goal_id: str, reason: str, next_transition: str, src: str,
                         "перехода и источника наблюдения")
     with _Lock():
         goal = load(goal_id)
-        if goal["state"] != ACTIVE:
-            raise GoalError("ожидание записывается только для активной цели")
+        if not _allows_wait(goal):
+            raise GoalError("ожидание требует активную цель либо цель с явной паузой")
         if watch_paths is None:
             watch_paths = (goal.get("waiting") or {}).get("watch_paths", [])
         if not isinstance(watch_paths, list) or any(
@@ -464,7 +473,7 @@ def wait(goal_id: str, reason: str, next_transition: str, src: str,
 def waiting_decision(goal: dict) -> dict | None:
     """Read only an explicit complete decision; legacy plans imply no wait."""
     record = goal.get("waiting")
-    if (goal.get("state") != ACTIVE or not isinstance(record, dict)
+    if (not _allows_wait(goal) or not isinstance(record, dict)
             or not all(isinstance(record.get(key), str) and record[key].strip()
                        for key in ("reason", "src"))
             or not isinstance(goal.get("next_transition"), str)
@@ -966,7 +975,7 @@ def block(thread: str) -> str:
 Долговечные цели этого направления (хранятся в продуктовом контуре на диске и
 переживают смену процесса, сеанса и модели — читай их до решения о запуске):
 {chr(10).join(lines)}
-По каждой активной цели на этом пробуждении обязателен один из двух исходов:
+По каждой показанной цели на этом пробуждении обязателен один из двух исходов:
 запущен следующий безопасный шаг по названной задаче — или назван конкретный
 внешний блокер обычными словами. Необходимое ожидание независимо от письма
 записывается через `product_goal.py wait <id> --reason "что мешает полезному
@@ -1054,7 +1063,7 @@ def main() -> int:
     setter.add_argument("--gap")
     setter.add_argument("--next", dest="next_transition")
 
-    waiter = sub.add_parser("wait", help="явное необходимое ожидание активной цели")
+    waiter = sub.add_parser("wait", help="явное необходимое ожидание активной или приостановленной цели")
     waiter.add_argument("id")
     waiter.add_argument("--reason", required=True)
     waiter.add_argument("--next", dest="next_transition", required=True)

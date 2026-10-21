@@ -2,7 +2,7 @@
 import hashlib
 import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -12,6 +12,8 @@ import daily_standup
 import product_goal as goals
 import product_memory as memory
 import startup_context as startup
+import goal_session
+import thread_tick
 
 
 def files(root):
@@ -174,3 +176,74 @@ def test_event_base_counts_actual_loaded_rules_and_language_as_characters(tmp_pa
     monkeypatch.setattr(startup, "MAX_EVENT_BASE_CHARS", size - 1)
     with pytest.raises(startup.InputLimitError, match="loaded AGENTS"):
         startup.checked_prompt("event payload", event_base=base)
+
+
+def test_paused_wait_preserves_pause_promises_and_postcheck_across_ticks(tmp_path, monkeypatch):
+    monkeypatch.setenv("PRODUCT_OWNER_GOALS", str(tmp_path / "goals"))
+    goal = goals.open_goal("alpha", "An installed result", ["A real user path"], 100)
+    goals.pause(goal["id"], "Owner has paused the main work.", "Owner decision")
+    goals.add_corrective(goal["id"], 101, "Repair still owed", "Installed verification")
+    monkeypatch.setattr(goals, "task_status", lambda _: "blocked")
+    before = goals.load(goal["id"])
+    projected = goals.projection(before)
+    moment = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    # A pause or next-transition plan alone is never an implicit wait.
+    assert not goal_session.post_check("alpha", [projected], [], "SILENT", moment)["resolved"]
+    goals.wait(goal["id"], "The required external input is absent.",
+               "Check the input on arrival; keep the main work paused.", "Observed absence")
+    current = goals.load(goal["id"])
+    for key in before.keys() - {"waiting", "next_transition", "updated_at"}:
+        assert current[key] == before[key]
+    assert current["state"] == goals.PAUSED
+    assert goals.pending(current) == [101]
+    saved = files(tmp_path)
+    report = {"live_runs": [], "continuation_holds": []}
+    stored = {}
+    for index in range(3):
+        observed_at = moment + timedelta(minutes=20 * index)
+        # Ordinary tick's real wait reader and post-check, no model/transport.
+        watch = thread_tick.goal_watch("alpha", report, stored, observed_at)
+        assert watch["panel"][0]["waiting"]["reason"] == current["waiting"]["reason"]
+        checked = goal_session.post_check("alpha", watch["objects"], [], "SILENT", observed_at)
+        assert checked["resolved"] and checked["waiting"][0]["id"] == goal["id"]
+        goals.wait(goal["id"], current["waiting"]["reason"], current["next_transition"],
+                   current["waiting"]["src"])
+        assert files(tmp_path) == saved
+        stored = {"goals": watch["panel"], "goal_reminder": watch["reminder"]}
+    # Changing the current plan withdraws wait but never resumes a pause.
+    goals.set_fields(goal["id"], gap="A new input requires a fresh decision.")
+    assert goals.load(goal["id"])["pause"] == before["pause"]
+    assert not goal_session.post_check("alpha", [projected], [], "SILENT", moment)["resolved"]
+
+
+def test_paused_wait_overflow_refuses_before_any_history_or_goal_write(tmp_path, monkeypatch):
+    monkeypatch.setenv("PRODUCT_OWNER_GOALS", str(tmp_path / "goals"))
+    goal = goals.open_goal("alpha", "Keep the promise", ["Installed acceptance"], 100)
+    goals.pause(goal["id"], "Owner pause", "Owner decision")
+    goals.add_corrective(goal["id"], 101, "Unsettled repair", "A real check")
+    before = files(tmp_path)
+    with pytest.raises(goals.GoalError, match="3000"):
+        goals.wait(goal["id"], "я" * 3000, "Wait without resuming.", "Observation")
+    assert files(tmp_path) == before
+    assert goals.pending(goals.load(goal["id"])) == [101]
+
+
+def test_event_prompt_separates_shared_base_from_event_sources(tmp_path, monkeypatch):
+    (tmp_path / "AGENTS.md").write_text("rules")
+    monkeypatch.setattr(startup.claude_product_owner, "HOME", tmp_path)
+    captured = {}
+    original = startup.checked_prompt
+    def check(text, event_base=None):
+        captured.update(text=text, base=event_base)
+        return original(text, event_base)
+    monkeypatch.setattr(startup, "checked_prompt", check)
+    payload = json.dumps({"source": "event-address", "data": "x" * 20000})
+    prompt = thread_tick.prompt({"thread": "alpha", "title": "Alpha"},
+                                ["the actual event"], [], [], payload)
+    assert "event-address" in prompt and "the actual event" in prompt
+    assert "event-address" not in captured["base"]
+    assert "the actual event" not in captured["base"]
+    assert len(captured["base"]) < 8000
+    monkeypatch.setattr(startup, "MAX_PROMPT_CHARS", len(prompt) - 1)
+    with pytest.raises(startup.InputLimitError, match="complete prompt"):
+        thread_tick.prompt({"thread": "alpha", "title": "Alpha"}, [], [], [], payload)

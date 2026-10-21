@@ -1221,21 +1221,23 @@ def prompt(report: dict, events: list[str], reasons: list[dict],
                if reason_text is reasons else startup_context.render(reason_text)) + "\n"
             ) if reasons else ""
     bounded = startup.lstrip().startswith("{")
-    startup_block = (f"""
+    startup_intro = ("""
 Стартовый пакет: общий текущий план и материалы этого направления.
 Дословно включённое не перечитывай. До решения открой относящиеся полные
 оригиналы по адресам; остальные источники доступны при зависимости.
 Манифест и выборочное чтение не сдвигают read_through.
-{startup}
-""" if bounded else plan_block() + startup)
-    report_block = ("Наблюдаемое состояние этого треда уже приведено в thread_states "
-                    "стартового пакета (собрано механически, не со слов исполнителя)."
+""" if bounded else "")
+    startup_block = startup if bounded else plan_block() + startup
+    report_block = ("thread_states пакета содержит текущее наблюдение либо его адрес "
+                    "и хеш. Если это ссылка, открой относящиеся поля наблюдения; "
+                    "не считай ссылку прочитанным состоянием."
                     if bounded else
                     "Наблюдаемое состояние треда (собрано механически, не со слов исполнителя):\n"
                     + json.dumps(report, ensure_ascii=False, indent=2))
-    def compose(event_rows: str, heard: str, seen: str) -> str:
+    def compose(event_rows: str, heard: str, seen: str, sources: str) -> str:
         return f"""Ты продакт на фоновом событии «{report['title']}».
-{startup_block}
+{startup_intro}
+{sources}
 {heard}
 События:
 {event_rows}
@@ -1251,13 +1253,16 @@ def prompt(report: dict, events: list[str], reasons: list[dict],
 Событие сохраняй в history/ только при новом наблюдении или решении.
 При прежнем ожидании не повторяй history, wait, снимок и письмо.
 Новый файл возврата или новые байты — новое наблюдение.
+Обычный тик не требует повторного чтения инструкций разработки, маршрутизации
+или полного справочника. Нужную процедуру открывай по заголовку только перед
+соответствующим действием. Для ответа SILENT процедуры доставки не нужны.
 Верни SILENT или одно сообщение по контракту:
 {verdict_block()}
 """
     rows = ("\n".join("- " + event for event in events) if event_text is events
             else startup_context.render(event_text))
-    text = compose(rows, heard, seen)
-    return startup_context.checked_prompt(text, event_base=compose("", "", "") if bounded else None)
+    text = compose(rows, heard, seen, startup_block)
+    return startup_context.checked_prompt(text, event_base=compose("", "", "", "") if bounded else None)
 
 
 
