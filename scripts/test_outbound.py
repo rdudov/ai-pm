@@ -274,7 +274,8 @@ class FailedWakeStaysInTheServiceJournal(unittest.TestCase):
 
     def test_observation_report_watches_explicit_return_paths_through_ordinary_ticks(self):
         from datetime import timedelta
-        for shape in ("return_directories", "directories"):
+        for shape, file_names in (("return_directories", ["review.md"]),
+                                  ("directories", ["first/statistics.pkl", "second/statistics.pkl"])):
             with self.subTest(shape=shape):
                 source = self.goals.parent / f"{shape}.json"
                 returns = self.goals.parent / shape
@@ -284,7 +285,7 @@ class FailedWakeStaysInTheServiceJournal(unittest.TestCase):
                 report_bytes = source.read_bytes()
                 opened = product_goal.open_goal("companion", "Compare returned evidence",
                                                ["Evidence compared by owner"], 100)
-                watch_paths = [entry.get("directory", entry.get("path"))]
+                watch_paths = [str(returns / name) for name in file_names]
                 product_goal.wait(opened["id"], "Waiting for original evidence", "Compare on return",
                                   str(source), watch_paths=watch_paths)
                 tick.goal_watch.side_effect = REAL_GOAL_WATCH
@@ -304,26 +305,37 @@ class FailedWakeStaysInTheServiceJournal(unittest.TestCase):
                 self.engine.side_effect = agent
                 before = goal_bytes()
                 with mock.patch.object(product_goal, "observe", return_value=[]), \
+                        mock.patch.object(tick.daily_standup, "maybe_send", return_value={"action": "skip"}), \
                         mock.patch.object(tick, "datetime", wraps=datetime) as clock:
                     for number in range(3):
+                        # Shared attachments are not the owner's named return files.
+                        (returns / "unrelated.bin").write_bytes(bytes([number]))
                         clock.now.return_value = AT + timedelta(minutes=20 * number)
                         self.assertEqual(self.run_tick(None)[0], 0)
                         self.assertEqual(goal_bytes(), before)
                         state = json.loads((self.state_dir / "companion.json").read_text())
                         self.assertNotIn("изменился источник ожидания", " ".join(state.get("last_events", [])))
-                    for number, body in enumerate(("original file", "changed bytes"), 3):
-                        calls = self.engine.call_count
-                        (returns / "returned.bin").write_text(body)
-                        clock.now.return_value = AT + timedelta(minutes=20 * number)
-                        self.assertEqual(self.run_tick(None)[0], 0)
-                        state = json.loads((self.state_dir / "companion.json").read_text())
-                        self.assertIn("изменился источник ожидания", " ".join(state["last_events"]))
-                        self.assertEqual(self.engine.call_count, calls + 1)
-                        current = product_goal.load(opened["id"])
-                        self.assertEqual(current["waiting"]["watch_paths"], watch_paths)
-                        self.assertEqual(current["state"], "active")
-                        self.assertEqual(current["waiting"]["src"], str(source))
-                        self.assertEqual(source.read_bytes(), report_bytes)
+                    number = 3
+                    for name in watch_paths:
+                        for body in (b"original file", b"changed bytes", None):
+                            calls = self.engine.call_count
+                            path = Path(name)
+                            path.parent.mkdir(parents=True, exist_ok=True)
+                            if body is None:
+                                path.unlink()
+                            else:
+                                path.write_bytes(body)
+                            clock.now.return_value = AT + timedelta(minutes=20 * number)
+                            number += 1
+                            self.assertEqual(self.run_tick(None)[0], 0)
+                            state = json.loads((self.state_dir / "companion.json").read_text())
+                            self.assertIn("изменился источник ожидания", " ".join(state["last_events"]))
+                            self.assertEqual(self.engine.call_count, calls + 1)
+                            current = product_goal.load(opened["id"])
+                            self.assertEqual(current["waiting"]["watch_paths"], watch_paths)
+                            self.assertEqual(current["state"], "active")
+                            self.assertEqual(current["waiting"]["src"], str(source))
+                            self.assertEqual(source.read_bytes(), report_bytes)
                 product_goal.pause(opened["id"], "Fixture finished", str(source))
         self.mail.assert_not_called()
 

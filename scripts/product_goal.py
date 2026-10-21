@@ -405,20 +405,11 @@ def set_fields(goal_id: str, gap: str | None = None,
 
 
 def wait_source_sha256(src: str, watch_paths: list[str] | None = None) -> str | None:
-    """Hash the evidence and explicitly named return paths; never parse prose."""
+    """Hash the evidence and explicitly named files; never traverse directories."""
     if watch_paths:
         observations = [(src, wait_source_sha256(src))]
         for name in sorted(set(watch_paths)):
-            path = Path(name)
-            if not path.is_absolute():
-                path = product_memory.HOME / path
-            if path.is_dir():
-                entries = [(str(item.relative_to(path)), wait_source_sha256(str(item)))
-                           for item in sorted(path.rglob("*")) if item.is_file()
-                           and not {".runner", ".git"}.intersection(item.relative_to(path).parts)]
-                observations.append((name, entries))
-            else:
-                observations.append((name, wait_source_sha256(str(path))))
+            observations.append((name, wait_source_sha256(name)))
         return hashlib.sha256(json.dumps(observations, ensure_ascii=False,
                                          separators=(",", ":")).encode()).hexdigest()
     path = Path(src)
