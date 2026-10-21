@@ -272,6 +272,37 @@ class FailedWakeStaysInTheServiceJournal(unittest.TestCase):
                                  __import__("hashlib").sha256(body.encode()).hexdigest())
         self.mail.assert_not_called()
 
+    def test_wait_bound_queue_keeps_window_checks_without_idle_letters_or_history(self):
+        from datetime import timedelta
+        source = self.goals.parent / "window.txt"
+        source.write_text("Owner agreed a future installation window")
+        opened = product_goal.open_goal("companion", "Installed result", ["Real path"], 100)
+        product_goal.wait(opened["id"], "Waiting for the installation window",
+                          "Install in that window", str(source))
+        self.report["can_pick_up"] = [{"id": 101}]
+        tick.goal_watch.side_effect = REAL_GOAL_WATCH
+        self.engine.return_value = subprocess.CompletedProcess([], 0, "SILENT", "")
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        (self.state_dir / "companion.json").write_text(json.dumps({
+            "snapshot": tick.snapshot(self.report), "goals": product_goal.panel("companion")}))
+        before = {str(p): p.read_bytes() for p in self.goals.rglob("*")
+                  if p.is_file() and p.name != product_goal.LOCK}
+        plan = {"outcome_links": [{"tasks": [100, 101], "goals": [opened["id"]]}]}
+        with mock.patch.object(product_goal, "observe", return_value=[]), \
+                mock.patch.object(tick.product_memory, "current_plan", return_value=plan), \
+                mock.patch.object(tick, "datetime", wraps=datetime) as clock:
+            for minutes in (0, 20, 40, 61):
+                clock.now.return_value = AT + timedelta(minutes=minutes)
+                code, _, journal = self.run_tick(subprocess.CompletedProcess([], 0, "SILENT", ""))
+                self.assertEqual((code, journal), (0, ""))
+                current = json.loads((self.state_dir / "companion.json").read_text())
+                self.assertEqual(current["check"]["reasons"][0]["code"], "goal_wait")
+                self.assertNotIn("стоит без живой работы", " ".join(current["last_events"]))
+                self.assertEqual({str(p): p.read_bytes() for p in self.goals.rglob("*")
+                                  if p.is_file() and p.name != product_goal.LOCK}, before)
+        self.assertEqual(self.engine.call_count, 2)
+        self.mail.assert_not_called()
+
     def test_observation_report_watches_explicit_return_paths_through_ordinary_ticks(self):
         from datetime import timedelta
         for shape, file_names in (("return_directories", ["review.md"]),

@@ -204,7 +204,8 @@ def test_paused_wait_preserves_pause_promises_and_postcheck_across_ticks(tmp_pat
         # Ordinary tick's real wait reader and post-check, no model/transport.
         watch = thread_tick.goal_watch("alpha", report, stored, observed_at)
         assert watch["panel"][0]["waiting"]["reason"] == current["waiting"]["reason"]
-        checked = goal_session.post_check("alpha", watch["objects"], [], "SILENT", observed_at)
+        assert watch["objects"] == [] and watch["standing"] == []
+        checked = goal_session.post_check("alpha", [projected], [], "SILENT", observed_at)
         assert checked["resolved"] and checked["waiting"][0]["id"] == goal["id"]
         goals.wait(goal["id"], current["waiting"]["reason"], current["next_transition"],
                    current["waiting"]["src"])
@@ -268,7 +269,10 @@ def test_event_carries_current_wait_and_changed_return_without_history_reads(tmp
                str(evidence), watch_paths=[str(returned)])
     unrelated = goals.open_goal("other", "Another product", ["Other acceptance"], 200)
     report = {"thread": "alpha", "title": "Alpha", "live_runs": [],
-              "owners_awake": [{"worktrees": ["occupied"], "src": "live observer"}]}
+              "worktrees": ["occupied"],
+              "owners_awake": [{"worktrees": ["occupied"], "src": "live observer"},
+                               {"worktrees": ["unrelated"], "src": "other tree"},
+                               {"pid": os.getpid(), "worktrees": ["occupied"]}]}
     monkeypatch.setattr(startup.claude_product_owner, "inspect_observation", lambda *_: mock.Mock(
         route=mock.Mock(engine="codex", model="test", reason="fixture")))
     monkeypatch.setattr(startup.codex_budget, "latest", lambda: None)
@@ -276,7 +280,9 @@ def test_event_carries_current_wait_and_changed_return_without_history_reads(tmp
     before = files(memory.root())
     for _ in range(3):
         packet = startup.packet(("alpha", report))
-        assert packet["thread_states"] == {"alpha": report}
+        assert packet["thread_states"] == {"alpha": {
+            **report, "owners_awake": report["owners_awake"][:1]}}
+        assert len(report["owners_awake"]) == 3  # the actual observation stays intact
         assert set(packet["product_snapshots"]) == {"alpha"}
         assert packet["product_snapshots"]["alpha"]["sections"] == startup.snapshot_view("alpha")["sections"]
         assert packet["portfolio_plan"]["current"] == memory.plan_text(memory.current_plan())
@@ -312,3 +318,73 @@ def test_event_without_explicit_wait_keeps_gap_and_unsettled_promises(tmp_path, 
     event = goals.standing("alpha", [])[0]
     assert goal["id"] in event and goal["outcome"] in event
     assert goal["gap"] not in event
+
+
+def test_wait_change_restores_standing_and_requires_a_fresh_owner_decision(tmp_path, monkeypatch):
+    monkeypatch.setenv("PRODUCT_OWNER_GOALS", str(tmp_path / "goals"))
+    source = tmp_path / "return.txt"
+    source.write_text("old")
+    goal = goals.open_goal("alpha", "Installed result", ["Real acceptance"], 100)
+    goals.wait(goal["id"], "External return is pending", "Verify new bytes", str(source))
+    report = {"live_runs": []}
+    moment = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    first = thread_tick.goal_watch("alpha", report, {}, moment)
+    assert first["standing"] == first["objects"] == []
+    stored = {"goals": first["panel"]}
+    source.write_text("new")
+    changed = thread_tick.goal_watch("alpha", report, stored, moment)
+    assert changed["standing"] and changed["objects"]
+    assert any("изменился источник" in event for event in changed["transitions"])
+    assert not goal_session.post_check("alpha", changed["objects"], [], "SILENT", moment)["resolved"]
+    current = goals.load(goal["id"])
+    goals.wait(goal["id"], current["waiting"]["reason"], current["next_transition"], str(source))
+    assert goal_session.post_check("alpha", changed["objects"], [], "SILENT", moment)["resolved"]
+
+
+def test_wait_reason_covers_only_explicit_plan_bindings_and_keeps_window_checks(tmp_path, monkeypatch):
+    monkeypatch.setenv("PRODUCT_OWNER_GOALS", str(tmp_path / "goals"))
+    goal = goals.open_goal("alpha", "Installed result", ["Real acceptance"], 100)
+    goals.wait(goal["id"], "Agreed future installation window", "Install in the window", "owner.md")
+    plan = {"outcome_links": [{"tasks": [100, 101], "goals": [goal["id"]]}]}
+    monkeypatch.setattr(memory, "current_plan", lambda: plan)
+    monkeypatch.setattr(thread_tick, "codex_window", lambda: None)
+    report = {"live_runs": [], "waiting_user": [], "can_pick_up": [{"id": 101}],
+              "queued_by_plan": [], "ready_to_start": [], "decided_not_done": [],
+              "needs_attention": [], "repos": [], "undelivered": []}
+    panel = goals.panel("alpha")
+    reasons = thread_tick.idle_reasons(report, {}, panel)
+    assert [reason["code"] for reason in reasons] == ["goal_wait"]
+    moment = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    events, reminder, _ = thread_tick.standing_events(report, thread_tick.snapshot(report), {}, moment, reasons)
+    assert len(events) == 1 and "проверка условий" in events[0]
+    # Reuse the existing reminder clock: no new timer, and a future window is
+    # still reviewed after the interval even when its source bytes do not change.
+    again = thread_tick.standing_events(report, thread_tick.snapshot(report),
+                                       {"idle_reminder": reminder}, moment, reasons)[0]
+    assert again == []
+    later = moment + timedelta(seconds=thread_tick.IDLE_REMIND_SECONDS + 1)
+    assert thread_tick.standing_events(report, thread_tick.snapshot(report),
+                                      {"idle_reminder": reminder}, later, reasons)[0]
+    report["can_pick_up"].append({"id": 102})
+    assert thread_tick.idle_reasons(report, {}, panel)[0]["code"] == "none_observed"
+    report["can_pick_up"].pop()
+    # A group with another unresolved goal cannot be excused by this wait.
+    plan["outcome_links"][0]["goals"].append("other")
+    assert thread_tick.idle_reasons(report, {}, panel)[0]["code"] == "none_observed"
+
+
+def test_busy_unrelated_run_does_not_resolve_goal_but_registered_repair_does(tmp_path, monkeypatch):
+    monkeypatch.setenv("PRODUCT_OWNER_GOALS", str(tmp_path / "goals"))
+    goal = goals.open_goal("alpha", "Installed result", ["Real acceptance"], 100)
+    goals.pause(goal["id"], "All conditions still required", "owner.md")
+    goals.add_corrective(goal["id"], 101, "Capacity", "Installed capacity")
+    report = {"live_runs": [{"id": 102}]}
+    moment = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    watch = thread_tick.goal_watch("alpha", report, {}, moment)
+    assert watch["objects"]
+    assert not goal_session.post_check("alpha", watch["objects"], [102], "SILENT", moment)["resolved"]
+    goals.add_corrective(goal["id"], 102, "Repair the same product", "Installed user path")
+    watch = thread_tick.goal_watch("alpha", report, {}, moment)
+    assert watch["objects"] == [] and watch["standing"] == []
+    assert goals.load(goal["id"])["state"] == goals.PAUSED
+    assert goals.pending(goals.load(goal["id"])) == [101, 102]

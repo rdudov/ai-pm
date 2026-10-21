@@ -418,7 +418,7 @@ def post_check(thread: str, standing_goals: list[dict], after_live: list[int],
             if (isinstance(current, dict) and current.get("id") == goal["id"]
                     and current.get("thread") == thread):
                 decision = product_goal.waiting_decision(current)
-                if decision:
+                if product_goal.waiting_unchanged(decision):
                     waiting.append({"id": goal["id"], **decision,
                                     "goal_src": str(product_goal.root() / f"{goal['id']}.json")})
         recorded = {goal["id"] for goal in waiting}

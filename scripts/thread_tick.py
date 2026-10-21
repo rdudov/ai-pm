@@ -423,7 +423,8 @@ def repeatable(previous: dict | None, signature: str, now: datetime,
 
 
 def standing_events(report: dict, current: dict, stored: dict,
-                    moment: datetime) -> tuple[list[str], dict | None, dict | None]:
+                    moment: datetime, reasons: list[dict] | None = None
+                    ) -> tuple[list[str], dict | None, dict | None]:
     """The two states that wake the owner without being transitions.
 
     Idleness with work available is the first, and it is the whole of the defect
@@ -448,7 +449,8 @@ def standing_events(report: dict, current: dict, stored: dict,
     idle_reminder = stored.get("idle_reminder")
     if not report["live_runs"] and startable(report) and repeatable(
             idle_reminder, idle_signature, moment):
-        events.append(
+        waiting = next((item for item in reasons or [] if item["code"] == "goal_wait"), None)
+        events.append(waiting["text"] if waiting else
             f"идёт простой: живых прогонов нет, а к запуску {startable(report)} "
             f"(в очереди плана {len(report.get('queued_by_plan') or [])}, "
             f"можно подхватить {len(report['can_pick_up'])}, "
@@ -534,6 +536,7 @@ def goal_watch(thread: str, report: dict, stored: dict, moment: datetime) -> dic
     # стояния, иначе замолчавший повтор снимал бы и проверку.
     objects = [goal for goal in panel
                if goal.get("waiting_on")
+               and not product_goal.waiting_unchanged(goal.get("waiting"))
                and not set(goal["waiting_on"]) & live_ids
                and set(goal["waiting_on"]) & continuation_ids]
     return {"transitions": transitions_seen, "standing": standing_now,
@@ -572,7 +575,7 @@ def codex_window() -> dict | None:
         return None
 
 
-def idle_reasons(report: dict, standing: dict) -> list[dict]:
+def idle_reasons(report: dict, standing: dict, goals: list[dict] | None = None) -> list[dict]:
     """Why this direction may be standing still, in the words the user named.
 
     «Занят другой продакт, исчерпан бюджет, занято рабочее дерево, ждём ответа
@@ -633,6 +636,28 @@ def idle_reasons(report: dict, standing: dict) -> list[dict]:
     # the direction really is standing still with work available: on a direction
     # that has nothing to start, «значит запускать надо» would be a false claim,
     # and an empty list there is the honest answer.
+    if not reasons and not report["live_runs"] and startable(report) and goals:
+        # Typed goal/plan bindings, never task status or a phrase about waiting.
+        # An independent ready task must still be surfaced as available work.
+        waits = {goal["id"] for goal in goals
+                 if product_goal.waiting_unchanged(goal.get("waiting"))}
+        covered = {task for goal in goals if goal["id"] in waits
+                   for task in [goal.get("main_task"), *(goal.get("waiting_on") or [])]
+                   if task is not None}
+        for link in (product_memory.current_plan() or {}).get("outcome_links", []):
+            if link.get("goals") and set(link["goals"]) <= waits:
+                covered.update(link.get("tasks") or [])
+        available = {task["id"] for key in ("can_pick_up", "ready_to_start",
+                                             "decided_not_done", "queued_by_plan")
+                     for task in report.get(key) or []}
+        if available <= covered:
+            reasons.append({
+                "code": "goal_wait",
+                "text": "проверка условий явного ожидания целей " + ", ".join(sorted(waits))
+                        + ": причины и следующие переходы сохранены в active_goals; "
+                          "доступные задачи связаны с ними текущим планом",
+                "src": "явные wait долговечных целей и outcome_links текущего плана",
+            })
     if not reasons and not report["live_runs"] and startable(report):
         reasons.append({
             "code": "none_observed",
@@ -1303,11 +1328,6 @@ def main() -> int:
     goals = goal_watch(args.thread, report, stored, moment)
     events += goals["transitions"]
 
-    standing_now, idle_reminder, held_reminder = standing_events(
-        report, current, stored, moment)
-    events += standing_now + goals["standing"]
-    idle = bool(not report["live_runs"] and startable(report))
-
     # Written whether or not an agent is woken, and before it is: the list of
     # work standing ready has to survive a tick that decides to say nothing, and
     # it must not depend on what the woken agent chose to write down.
@@ -1316,7 +1336,12 @@ def main() -> int:
         "decided_not_done": report["decided_not_done"],
         "yielded_to_awake_owner": yielded(report),
     }
-    reasons = idle_reasons(report, standing)
+    reasons = idle_reasons(report, standing, goals["panel"])
+    standing_now, idle_reminder, held_reminder = standing_events(
+        report, current, stored, moment, reasons)
+    events += standing_now + goals["standing"]
+    idle = bool(not report["live_runs"] and startable(report)
+                and not any(item["code"] == "goal_wait" for item in reasons))
 
     # Кем ведётся направление прямо сейчас. Пока цель под усиленным контролем не
     # разрешена, обычный режим — одна продолжающаяся сессия, а тик при ней

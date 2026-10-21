@@ -15,6 +15,7 @@ from __future__ import annotations
 from datetime import datetime
 import hashlib
 import json
+import os
 from pathlib import Path
 import sys
 
@@ -329,7 +330,10 @@ def packet(current_thread: tuple[str, dict] | None = None) -> dict:
                                if plan else plan_text),
             "product_snapshots": {slug: snapshot_view(slug)
                                   for slug in sorted(relevant_products)},
-            "thread_states": {name: report},
+            "thread_states": {name: {**report, "owners_awake": [
+                owner for owner in report.get("owners_awake", [])
+                if owner.get("pid") != os.getpid()
+                and set(owner.get("worktrees") or []) & set(report.get("worktrees") or [])]}},
             "model_budgets": {"codex": codex_budget.latest(),
                               "route": {"engine": observation.route.engine,
                                         "model": observation.route.model,

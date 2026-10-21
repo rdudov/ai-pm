@@ -486,6 +486,12 @@ def waiting_decision(goal: dict) -> dict | None:
             "current_source_sha256": wait_source_sha256(record["src"], record.get("watch_paths"))}
 
 
+def waiting_unchanged(decision: dict | None) -> bool:
+    """An explicit owner wait still observes the bytes it was decided on."""
+    return bool(decision and decision.get("source_sha256")
+                == decision.get("current_source_sha256"))
+
+
 def add_signal(goal_id: str, code: str, text: str, src: str,
                goal: dict | None = None) -> dict:
     """Record one observed deviation and turn on control, visibly.
@@ -922,6 +928,8 @@ def standing(thread: str, live_run_ids: list[int],
     actionable = (set(actionable_task_ids)
                   if actionable_task_ids is not None else None)
     for goal in active(thread):
+        if waiting_unchanged(waiting_decision(goal)):
+            continue
         waiting = live_tasks(goal)
         if set(waiting) & live:
             continue
