@@ -247,3 +247,68 @@ def test_event_prompt_separates_shared_base_from_event_sources(tmp_path, monkeyp
     monkeypatch.setattr(startup, "MAX_PROMPT_CHARS", len(prompt) - 1)
     with pytest.raises(startup.InputLimitError, match="complete prompt"):
         thread_tick.prompt({"thread": "alpha", "title": "Alpha"}, [], [], [], payload)
+
+
+def test_event_carries_current_wait_and_changed_return_without_history_reads(tmp_path, monkeypatch):
+    monkeypatch.setattr(memory, "ROOT", tmp_path / "content")
+    monkeypatch.setenv("PRODUCT_OWNER_GOALS", str(memory.root() / "goals"))
+    monkeypatch.setattr(memory, "installation", lambda: {
+        "threads": {"alpha": {"products": ["alpha"]}, "other": {"products": ["other"]}}})
+    for slug in ("alpha", "other"):
+        memory.start_product(slug)
+    memory.publish_plan({"now": ["priority"], "next": ["afterwards"],
+                         "parallel": ["separate tree"], "paused": ["owner pause"],
+                         "contradictions": ["unresolved owner question"]})
+    goal = goals.open_goal("alpha", "A promised result", ["Real acceptance"], 100)
+    goals.pause(goal["id"], "Owner pause stays in force", "owner.md")
+    goals.add_corrective(goal["id"], 101, "Still owed", "Installed result")
+    evidence, returned = tmp_path / "evidence.md", tmp_path / "return.md"
+    evidence.write_text("Observed external wait")
+    goals.wait(goal["id"], "The external answer has not arrived", "Read the answer on arrival",
+               str(evidence), watch_paths=[str(returned)])
+    unrelated = goals.open_goal("other", "Another product", ["Other acceptance"], 200)
+    report = {"thread": "alpha", "title": "Alpha", "live_runs": [],
+              "owners_awake": [{"worktrees": ["occupied"], "src": "live observer"}]}
+    monkeypatch.setattr(startup.claude_product_owner, "inspect_observation", lambda *_: mock.Mock(
+        route=mock.Mock(engine="codex", model="test", reason="fixture")))
+    monkeypatch.setattr(startup.codex_budget, "latest", lambda: None)
+    monkeypatch.setattr(startup, "post_cursor", lambda *_a, **_k: pytest.fail("Unrequested history scan"))
+    before = files(memory.root())
+    for _ in range(3):
+        packet = startup.packet(("alpha", report))
+        assert packet["thread_states"] == {"alpha": report}
+        assert set(packet["product_snapshots"]) == {"alpha"}
+        assert packet["product_snapshots"]["alpha"]["sections"] == startup.snapshot_view("alpha")["sections"]
+        assert packet["portfolio_plan"]["current"] == memory.plan_text(memory.current_plan())
+        assert [item["id"] for item in packet["active_goals"]] == [goal["id"]]
+        current = packet["active_goals"][0]
+        original = goals.load(goal["id"])
+        assert current["state"] == goals.PAUSED and current["pause"] == original["pause"]
+        assert current["pending"] == [101] and current["main_task"] == 100
+        assert current["next_transition"] == original["next_transition"]
+        assert current["waiting"]["reason"] == original["waiting"]["reason"]
+        assert current["waiting"]["watch_paths"] == [str(returned)]
+        assert current["waiting"]["source_sha256"] == current["waiting"]["current_source_sha256"]
+        source = packet["contract"]["other_sources"]["goals"].replace("<id>", current["id"])
+        assert json.loads(Path(source).read_text()) == original
+        assert unrelated["id"] not in [row["id"] for row in packet["active_goals"]]
+    assert files(memory.root()) == before
+    returned.write_text("A new actual return")
+    changed = startup.packet(("alpha", report))["active_goals"][0]["waiting"]
+    assert changed["current_source_sha256"] != changed["source_sha256"]
+    assert files(memory.root()) == before
+
+
+def test_event_without_explicit_wait_keeps_gap_and_unsettled_promises(tmp_path, monkeypatch):
+    monkeypatch.setenv("PRODUCT_OWNER_GOALS", str(tmp_path / "goals"))
+    goal = goals.open_goal("alpha", "Promised result", ["Real acceptance"], 100)
+    goals.pause(goal["id"], "Explicit owner pause", "owner.md")
+    goals.add_corrective(goal["id"], 101, "Unsettled repair", "Real return")
+    goal = goals.set_fields(goal["id"], gap="No result yet", next_transition="Choose a safe step")
+    current = startup.event_goal_view(goal)
+    assert current["waiting"] is None
+    assert current["gap"] == goal["gap"] and current["next_transition"] == goal["next_transition"]
+    assert current["pending"] == [101]
+    event = goals.standing("alpha", [])[0]
+    assert goal["id"] in event and goal["outcome"] in event
+    assert goal["gap"] not in event

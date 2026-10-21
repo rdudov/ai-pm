@@ -938,8 +938,7 @@ def standing(thread: str, live_run_ids: list[int],
                  else "корректирующие задачи")
         said.append(
             f"цель {goal['id']} стоит без живой работы: {goal['outcome'][:120]}; "
-            f"{where} " + ", ".join(str(number) for number in waiting) +
-            f"; ближайший разрыв: {goal.get('gap') or 'не назван'}")
+            f"{where} " + ", ".join(str(number) for number in waiting))
     return said
 
 

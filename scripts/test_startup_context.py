@@ -184,6 +184,7 @@ class HardInputBounds(unittest.TestCase):
             path.parent.mkdir(parents=True)
             path.write_text("## Концепция\n" + slug + " exact user words  \n")
         for patch in (
+            mock.patch.object(startup.product_memory, "ROOT", self.root),
             mock.patch.object(startup.product_memory, "root", return_value=self.root),
             mock.patch.object(startup.product_memory, "revisions_dir", return_value=revisions),
             mock.patch.object(startup.product_memory, "installation", return_value={

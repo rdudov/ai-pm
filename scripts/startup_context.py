@@ -196,7 +196,7 @@ def snapshot_view(slug: str) -> dict:
         else:
             sections[title] = body
     return {
-        "source": f"content/products/{slug}/snapshot.md",
+        "source": str(product_memory.snapshot_path(slug)),
         "source_sha256": digest_text(text),
         "sections": sections,
     }
@@ -219,6 +219,23 @@ def goal_view(goal: dict) -> dict:
         "source": projected["src"],
     }
     return projected
+
+
+def event_goal_view(goal: dict) -> dict:
+    """Current continuation decision; acceptance detail stays at the goal address."""
+    current = {key: goal.get(key) for key in (
+        "id", "state", "main_task", "next_transition", "pause")}
+    current["waiting"] = product_goal.waiting_decision(goal)
+    current["pending"] = product_goal.pending(goal)
+    if current["waiting"]:
+        # The same owner's next_transition is already present once above.
+        current["waiting"].pop("next_transition", None)
+        current["waiting"].pop("at", None)
+    else:
+        current["gap"] = goal.get("gap")
+    if goal.get("unreadable"):
+        current["unreadable"] = goal["outcome"]
+    return current
 
 
 def post_cursor(plan: dict, frozen_at: datetime | None = None,
@@ -292,12 +309,14 @@ def packet(current_thread: tuple[str, dict] | None = None) -> dict:
         name, report = current_thread
         plan_path = (product_memory.revisions_dir() / f"{int(plan['revision']):06d}.json"
                      if plan else None)
-        # The initial instruction carries shared priorities/pauses and addresses.
-        # Current event detail is actually short on disk, and read only as needed.
+        # Reuse the current owners' decisions, not an index that forces the
+        # model to rediscover an unchanged wait in old task reports.
         value = {
             "contract": {
                 "kind": "event-current-state-v3", "plan_available": plan is not None,
-                "reading": "Event sources; expand by dependency. "
+                "reading": "Inline current decisions are verbatim. Unchanged waits "
+                           "use their observed source hashes; expand by address for "
+                           "new facts, unresolved dependencies or an actual action. "
                            "Manifests do not acknowledge reading.",
                 "other_sources": {
                     "snapshots": str(product_memory.root() / "products/*/snapshot.md"),
@@ -305,26 +324,24 @@ def packet(current_thread: tuple[str, dict] | None = None) -> dict:
                     "threads": "python3 scripts/thread_state.py <thread>",
                 },
             },
-            "portfolio_plan": ({"revision": plan["revision"],
-                                "headline": plan.get("headline", ""),
-                                "paused": plan.get("paused", []),
+            "portfolio_plan": ({"current": plan_text,
                                 **file_reference(None, plan_path)}
                                if plan else plan_text),
-            "product_snapshots": {slug: file_reference(None, product_memory.snapshot_path(slug))
+            "product_snapshots": {slug: snapshot_view(slug)
                                   for slug in sorted(relevant_products)},
-            "thread_states": {name: reference(report, f"python3 scripts/thread_state.py {name}")},
+            "thread_states": {name: report},
             "model_budgets": {"codex": codex_budget.latest(),
                               "route": {"engine": observation.route.engine,
                                         "model": observation.route.model,
                                         "reason": observation.route.reason}},
-            "active_goals": [{"id": goal["id"], "state": goal["state"],
-                              "main_task": goal.get("main_task")}
-                             for goal in product_goal.active(name)],
+            "active_goals": [event_goal_view(goal) for goal in product_goal.active(name)],
             "post_cursor_records": {
                 "source": f"python3 scripts/startup_context.py --thread {name} --records",
                 "read_through": plan.get("read_through", plan["accepted_at"]) if plan else None,
-                "reading": "Enumerate event-related unread sources; neither this address "
-                           "nor publication advances their boundary.",
+                "reading": "Unread originals remain available by this address. "
+                           "Current decisions cover unchanged waits; open records "
+                           "needed by new event facts. Neither publication nor "
+                           "this address advances their boundary.",
             },
         }
         require_size(render(value), MAX_PACKET_CHARS, "startup packet")
