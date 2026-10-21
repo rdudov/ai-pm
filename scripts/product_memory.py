@@ -55,6 +55,9 @@ CONFIG = HOME / "threads.json"
 
 SNAPSHOT = "snapshot.md"
 LOCK = ".lock"
+MAX_PLAN_CHARS = 6_000
+MAX_SNAPSHOT_CHARS = 4_000
+MAX_GOAL_CHARS = 3_000
 
 # The sections a snapshot is allowed to carry. Everything dated, technical or
 # historical belongs to `history/`, which is why the list is short and closed:
@@ -239,6 +242,26 @@ def _atomic_write(path: Path, data: bytes) -> None:
     os.replace(tmp, path)
 
 
+def require_current_size(text: str, limit: int, name: str) -> None:
+    if len(text) > limit:
+        raise ContentError(f"{name}: {len(text)} символов > {limit}; "
+                           "сократите текущее состояние, сохранив обязательства; запись отказана")
+
+
+def archive_current(path: Path, directory: Path) -> Path | None:
+    """Preserve exact previous bytes before replacement; content addresses never change."""
+    if not path.exists():
+        return None
+    raw = path.read_bytes()
+    target = directory / f"{path.stem}-{hashlib.sha256(raw).hexdigest()}{path.suffix}"
+    if target.exists():
+        if target.read_bytes() != raw:
+            raise ContentError(f"исторический адрес изменён: {target}")
+    else:
+        _atomic_write(target, raw)
+    return target
+
+
 class _Lock:
     """Whole-root lock, held only around read-modify-write of a shared file."""
 
@@ -317,7 +340,9 @@ def start_product(slug: str, base: Path | None = None) -> Path:
     if path.is_file():
         raise ContentError(f"продукт {slug} уже заведён: {path}")
     path.parent.mkdir(parents=True, exist_ok=True)
-    _atomic_write(path, snapshot_template(slug).encode("utf-8"))
+    text = snapshot_template(slug)
+    require_current_size(text, MAX_SNAPSHOT_CHARS, "snapshot")
+    _atomic_write(path, text.encode("utf-8"))
     return path
 
 
@@ -335,18 +360,31 @@ def snapshots(base: Path | None = None) -> Iterator[tuple[str, Path]]:
         yield slug, snapshot_path(slug, base)
 
 
-def section(text: str, title: str) -> list[str]:
+def section_heading(line: str, title: str, casefold: bool = False) -> str | None:
+    """Only a schema heading ends a snapshot section; incidental headings are body."""
+    if not line.startswith("## "):
+        return None
+    heading = line[3:].strip()
+    normalize = str.casefold if casefold else str
+    known = {normalize(value) for value in SNAPSHOT_SECTIONS}
+    if normalize(title) not in known or normalize(heading) in known:
+        return heading
+    return None
+
+
+def section(text: str, title: str, casefold: bool = False) -> list[str]:
     """List items of one `## title` section, in the board's own reading.
 
-    Kept byte-compatible with `process_map_state.markdown_section` on purpose:
-    the migration must not change what the board sees, only where it reads it
-    from.
+    The board delegates here. Snapshot boundaries come from the schema; an
+    incidental heading cannot hide a later promise. Generic headings retain
+    their ordinary Markdown boundary behavior.
     """
     items: list[str] = []
     inside = False
     for line in text.splitlines():
-        if line.startswith("## "):
-            inside = line[3:].strip() == title
+        heading = section_heading(line, title, casefold)
+        if heading is not None:
+            inside = heading.casefold() == title.casefold() if casefold else heading == title
             continue
         if not inside:
             continue
@@ -362,8 +400,9 @@ def section_text(text: str, title: str) -> str:
     body: list[str] = []
     inside = False
     for line in text.splitlines():
-        if line.startswith("## "):
-            inside = line.strip() == f"## {title}"
+        heading = section_heading(line, title)
+        if heading is not None:
+            inside = heading == title
             continue
         if inside:
             body.append(line.strip())
@@ -387,6 +426,8 @@ def append_work_line(slug: str, line: str, base: Path | None = None) -> Path:
         except OSError as error:
             raise ContentError(f"снимок продукта {slug} не читается: {error}") from error
         lines = text.splitlines()
+        if entry in lines:
+            return path
         head = None
         for index, value in enumerate(lines):
             if value.strip() == f"## {WORK_SECTION}":
@@ -396,13 +437,35 @@ def append_work_line(slug: str, line: str, base: Path | None = None) -> Path:
             raise ContentError(
                 f"в снимке {slug} нет раздела «{WORK_SECTION}»; строка не записана")
         tail = head + 1
-        while tail < len(lines) and not lines[tail].startswith("## "):
+        while tail < len(lines) and section_heading(lines[tail], WORK_SECTION) is None:
             tail += 1
         stop = tail
         while stop > head + 1 and not lines[stop - 1].strip():
             stop -= 1
         lines.insert(stop, entry)
-        _atomic_write(path, ("\n".join(lines) + "\n").encode("utf-8"))
+        result = "\n".join(lines) + "\n"
+        require_current_size(result, MAX_SNAPSHOT_CHARS, "snapshot")
+        archive_current(path, path.parent / "history" / "current-state")
+        _atomic_write(path, result.encode("utf-8"))
+    return path
+
+
+def replace_snapshot(slug: str, text: str, expected_sha256: str,
+                     base: Path | None = None) -> Path:
+    """Replace a current slice under the same lock, with exact archive and race check."""
+    base = base or ROOT
+    path = snapshot_path(slug, base)
+    require_current_size(text, MAX_SNAPSHOT_CHARS, "snapshot")
+    missing = [title for title in SNAPSHOT_SECTIONS if f"## {title}" not in text]
+    if missing:
+        raise ContentError("в снимке нет разделов: " + ", ".join(missing))
+    with _Lock(base):
+        raw = path.read_bytes()
+        if hashlib.sha256(raw).hexdigest() != expected_sha256:
+            raise ContentError("снимок изменился; перечитайте и сведите заново")
+        if raw != text.encode("utf-8"):
+            archive_current(path, path.parent / "history" / "current-state")
+            _atomic_write(path, text.encode("utf-8"))
     return path
 
 
@@ -586,14 +649,40 @@ def publish_plan(plan: dict, base: Path | None = None,
             f"план сдвинулся: вы сводили от редакции {expect_revision}, "
             f"текущая — {latest}; перечитайте и сведите заново")
     document = dict(plan)
+    previous = current_plan(base)
+    # Old grounds remain in immutable revisions. Repeating them does not make
+    # them grounds for a new decision. Current pauses/rights belong in paused/now.
+    old_grounds = (previous or {}).get("grounds", [])
+    document["grounds"] = [value for value in document.get("grounds", [])
+                          if value not in old_grounds]
     document["revision"] = latest + 1
     document["replaces"] = latest or None
     document["accepted_at"] = now()
+    document.setdefault("read_through", (previous or {}).get(
+        "read_through", (previous or {}).get("accepted_at", document["accepted_at"])))
+    # Removing a finished result from the plan must not erase its unread task
+    # artifacts. Keep their bounded address set until the complete prefix is read.
+    old_boundary = (previous or {}).get("read_through", (previous or {}).get("accepted_at"))
+    # A caller may advance this only after reading the complete prefix. Merely
+    # publishing a plan, seeing a manifest or reading one event never does so.
+    try:
+        read_through = datetime.fromisoformat(document["read_through"])
+        if read_through.tzinfo is None or read_through > datetime.now(timezone.utc):
+            raise ValueError("invalid read boundary")
+    except (TypeError, ValueError) as error:
+        raise ContentError("план: неверная граница read_through") from error
+    retained = (set((previous or {}).get("unread_tasks", [])) |
+                {task for link in (previous or {}).get("outcome_links", [])
+                 for task in link.get("tasks", [])}) if (
+                     old_boundary and read_through <= datetime.fromisoformat(old_boundary)) else set()
+    document["unread_tasks"] = sorted(retained | {
+        task for link in document.get("outcome_links", []) for task in link.get("tasks", [])})
     for field in PLAN_FIELDS:
         document.setdefault(field, [] if field != "headline" else "")
     validate_outcome_links(document)
     path = directory / f"{latest + 1:06d}.json"
-    payload = json.dumps(document, ensure_ascii=False, indent=2) + "\n"
+    payload = json.dumps(document, ensure_ascii=False, separators=(",", ":")) + "\n"
+    require_current_size(payload, MAX_PLAN_CHARS, "plan")
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     try:
         handle = os.open(path, flags, 0o644)
@@ -661,6 +750,8 @@ def check(base: Path | None = None) -> list[str]:
         return [f"долговечный корень {base} недоступен: продуктовое содержание не наблюдается"]
     for slug, path in snapshots(base):
         text = path.read_text(encoding="utf-8")
+        if len(text) > MAX_SNAPSHOT_CHARS:
+            problems.append(f"{slug}: снимок {len(text)} символов > {MAX_SNAPSHOT_CHARS}")
         missing = [title for title in SNAPSHOT_SECTIONS
                    if f"## {title}" not in text]
         if missing:
@@ -678,6 +769,13 @@ def check(base: Path | None = None) -> list[str]:
             if stored != actual:
                 problems.append(f"вложение {path}: SHA-256 не совпал")
     numbers = [int(p.stem) for p in plan_revisions(base)]
+    if numbers:
+        text = (revisions_dir(base) / f"{numbers[-1]:06d}.json").read_text()
+        if len(text) > MAX_PLAN_CHARS:
+            problems.append(f"текущий план: {len(text)} символов > {MAX_PLAN_CHARS}")
+    for path in (base / "goals").glob("*.json"):
+        if len(path.read_text()) > MAX_GOAL_CHARS:
+            problems.append(f"цель {path.stem}: больше {MAX_GOAL_CHARS} символов")
     if numbers and numbers != list(range(1, len(numbers) + 1)):
         problems.append(f"редакции плана идут с пропуском: {numbers}")
     problems.extend(legacy_divergence(base))

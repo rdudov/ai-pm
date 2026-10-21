@@ -68,6 +68,9 @@ def guard(path: Path = RULES) -> list[str]:
         text = path.read_text(encoding="utf-8")
     except OSError as error:
         return [f"{path} не читается: {error}"]
+    if len(text) > 8_000:
+        problems.append(f"{path.name}: {len(text)} символов > 8000; "
+                        "перенесите случаи и команды к их владельцам")
     inside_code = False
     evidence_indent: int | None = None
     for number, line in enumerate(text.splitlines(), start=1):

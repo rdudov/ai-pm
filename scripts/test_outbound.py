@@ -28,6 +28,7 @@ import thread_state
 import thread_tick as tick
 
 AT = datetime(2026, 8, 24, 12, 0, tzinfo=timezone.utc)
+REAL_GOAL_WATCH = tick.goal_watch
 
 
 def composed(**changes) -> str:
@@ -228,6 +229,47 @@ class FailedWakeStaysInTheServiceJournal(unittest.TestCase):
             subprocess.CompletedProcess([], 0, "SILENT", ""), "--force")
         self.assertEqual(code, 1)
         self.assertIn("ни живого прогона", journal)
+        self.mail.assert_not_called()
+
+    def test_three_ordinary_wait_ticks_write_nothing_and_file_changes_wake(self):
+        """Real tick/goal paths; only the external model and transports are fixtures."""
+        from datetime import timedelta
+        source = self.goals.parent / "return.json"
+        opened = product_goal.open_goal("companion", "Compare the old values",
+                                       ["Original values compared"], 100)
+        product_goal.wait(opened["id"], "Waiting for the named file", "Compare on return", str(source))
+        tick.goal_watch.side_effect = REAL_GOAL_WATCH
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        initial_panel = product_goal.panel("companion")
+        (self.state_dir / "companion.json").write_text(json.dumps({
+            "snapshot": tick.snapshot(self.report), "goals": initial_panel}))
+
+        def agent(*args, **kwargs):
+            product_goal.wait(opened["id"], "Waiting for the named file", "Compare on return", str(source))
+            return subprocess.CompletedProcess([], 0, "SILENT", "")
+
+        def goal_bytes():
+            return {str(p.relative_to(self.goals)): p.read_bytes()
+                    for p in self.goals.rglob("*") if p.is_file() and p.name != product_goal.LOCK}
+
+        self.engine.side_effect = agent
+        before = goal_bytes()
+        with mock.patch.object(product_goal, "observe", return_value=[]), \
+                mock.patch.object(tick, "datetime", wraps=datetime) as clock:
+            for number in range(3):
+                clock.now.return_value = AT + timedelta(minutes=20 * number)
+                code, _, journal = self.run_tick(None)
+                self.assertEqual((code, journal), (0, ""))
+                self.assertEqual(goal_bytes(), before)
+            for number, body in enumerate(("original file", "changed bytes"), 3):
+                source.write_text(body)
+                clock.now.return_value = AT + timedelta(minutes=20 * number)
+                code, _, journal = self.run_tick(None)
+                self.assertEqual((code, journal), (0, ""))
+                state = json.loads((self.state_dir / "companion.json").read_text())
+                self.assertIn("изменился источник ожидания", " ".join(state["last_events"]))
+                self.assertEqual(product_goal.load(opened["id"])["waiting"]["source_sha256"],
+                                 __import__("hashlib").sha256(body.encode()).hexdigest())
         self.mail.assert_not_called()
 
     def test_unexplained_silence_fails_and_a_useful_linked_run_succeeds(self):

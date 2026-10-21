@@ -76,8 +76,8 @@ class ProductOwnerModelRouterTests(unittest.TestCase):
         packet = {"plan": "", "snapshots": {}, "threads": {}, "recent_letters": []}
         for name, text in (
             ("консольный ответ", STARTUP_PROMPT),
-            ("письмо", thread_tick.verdict_block()),
-            ("утренняя оперативка", daily_standup.prompt(packet, "2026-08-24")),
+            ("письмо", plain_russian.as_paragraph() + "\n\n" + thread_tick.verdict_block()),
+            ("утренняя оперативка", plain_russian.as_paragraph() + "\n\n" + daily_standup.prompt(packet, "2026-08-24")),
         ):
             with self.subTest(path=name):
                 self.assertIn(rules, " ".join(text.split()))

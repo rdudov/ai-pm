@@ -60,6 +60,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 from datetime import datetime, timezone
 import fcntl
 import json
@@ -229,12 +230,123 @@ def _next_id() -> str:
 
 
 def _save(goal: dict, event: str, detail: dict | None = None) -> dict:
+    previous = load(goal["id"]) if _path(goal["id"]).exists() else None
+    comparable = lambda value: {key: item for key, item in value.items()
+                                if key != "updated_at"}
+    if previous is not None and comparable(previous) == comparable(goal):
+        return goal
     goal["updated_at"] = now()
-    _atomic_write(_path(goal["id"]), goal)
+    # The current goal holds pending repairs and a bounded index of settlements.
+    # Detailed completed repairs have exact immutable addresses. This index also
+    # preserves duplicate registration checks and the session's settlement events.
+    document = dict(goal)
+    settled = {kind: list(tasks) for kind, tasks in
+               document.get("settled_correctives", {}).items()}
+    versions = dict(document.get("corrective_versions", {}))
+    archives = []
+    signals = {}
+    for item in goal.get("signals", []):
+        prefix = f"history/{goal['id']}/signals/"
+        if str(item["src"]).startswith(prefix) and (root() / item["src"]).is_file():
+            signals[item["code"]] = item
+            continue
+        path = signal_history(goal["id"], item["code"], item["src"])
+        archives.append((path, item))
+        signals[item["code"]] = {"code": item["code"],
+                                 "src": str(path.relative_to(root()))}
+        if item["code"] not in SIGNALS and "text" in item:
+            signals[item["code"]]["text"] = item["text"]
+    document["signals"] = list(signals.values())
+    document["correctives"] = []
+    for item in goal.get("correctives", []):
+        result = settlement(item)
+        if not result:
+            document["correctives"].append(item)
+            continue
+        key = str(item["task"])
+        already_settled = any(item["task"] in tasks for tasks in settled.values())
+        version = versions.get(key, 1) + 1 if already_settled else 1
+        path = corrective_history(goal["id"], item["task"], version)
+        archives.append((path, item))
+        for tasks in settled.values():
+            if item["task"] in tasks:
+                tasks.remove(item["task"])
+        settled.setdefault(result["kind"], []).append(item["task"])
+        if version > 1:
+            versions[key] = version
+    if settled:
+        document["settled_correctives"] = settled
+    if versions:
+        document["corrective_versions"] = versions
+    payload = json.dumps(document, ensure_ascii=False, separators=(",", ":")) + "\n"
+    try:
+        product_memory.require_current_size(payload, product_memory.MAX_GOAL_CHARS, "goal")
+    except product_memory.ContentError as error:
+        raise GoalError(str(error)) from error
+    # All validation precedes the first history/current/journal mutation.
+    for path, item in archives:
+        if path.exists():
+            if json.loads(path.read_text()) != item:
+                raise GoalError(f"исторический адрес уже занят: {path}")
+    for path, item in archives:
+        if not path.exists():
+            _atomic_write(path, item)
+    product_memory.archive_current(_path(goal["id"]), root() / "history" / goal["id"])
+    product_memory._atomic_write(_path(goal["id"]), payload.encode("utf-8"))
     _journal({"at": goal["updated_at"], "goal": goal["id"], "event": event,
               "state": goal["state"], "control": goal["control"],
               **(detail or {})})
     return goal
+
+
+def corrective_history(goal_id: str, task: int, version: int) -> Path:
+    return root() / "history" / goal_id / f"corrective-{task}-{version}.json"
+
+
+def signal_history(goal_id: str, code: str, src: str) -> Path:
+    key = hashlib.sha256((code + "\0" + src).encode()).hexdigest()[:16]
+    return root() / "history" / goal_id / "signals" / f"{code}-{key}.json"
+
+
+def replace_current(goal: dict, expected_sha256: str) -> dict:
+    """Install an explicitly prepared compact slice; never infer a settlement."""
+    with _Lock():
+        path = _path(goal["id"])
+        if hashlib.sha256(path.read_bytes()).hexdigest() != expected_sha256:
+            raise GoalError("цель изменилась; перечитайте и сведите заново")
+        previous = load(goal["id"])
+        for key in ("id", "state", "thread", "main_task", "control"):
+            if previous.get(key) != goal.get(key):
+                raise GoalError(f"сжатие не меняет {key}")
+        if set(pending(previous)) != set(pending(goal)):
+            raise GoalError("сжатие не снимает незакрытые исправления")
+        def settled_states(value):
+            result = {task: kind for kind, tasks in value.get("settled_correctives", {}).items()
+                      for task in tasks}
+            result.update({item["task"]: settlement(item)["kind"]
+                           for item in value.get("correctives", []) if settlement(item)})
+            return result
+        if settled_states(previous) != settled_states(goal):
+            raise GoalError("сжатие сохраняет приёмку и снятие исправлений")
+        if not str(goal.get("outcome") or "").strip() or not goal.get("observable"):
+            raise GoalError("сжатие сохраняет результат и наблюдаемые условия")
+        if any(previous.get(key) and not goal.get(key) for key in ("pause", "waiting")):
+            raise GoalError("сжатие не снимает паузу или ожидание")
+        if previous.get("state") != CLOSED and not (
+                {item["code"] for item in previous.get("signals", [])}
+                <= {item["code"] for item in goal.get("signals", [])}):
+            raise GoalError("сжатие сохраняет активные признаки отклонения")
+        return _save(goal, "compact")
+
+
+def history_caption(goal: dict) -> str:
+    values = goal.get("settled_correctives", {})
+    if not values:
+        return ""
+    labels = {ACCEPTED: "приняты", RETIRED: "сняты"}
+    return "; ".join(f"{labels[kind]}: {', '.join(map(str, tasks))}"
+                     for kind, tasks in values.items() if tasks) + \
+        f"; полные записи: {root() / 'history' / goal['id']}"
 
 
 # ---------------------------------------------------------------------------
@@ -292,6 +404,20 @@ def set_fields(goal_id: str, gap: str | None = None,
         return _save(goal, "set", {"gap": goal["gap"], "next": goal["next_transition"]})
 
 
+def wait_source_sha256(src: str) -> str | None:
+    """Observe only the exact file the owner named, never infer return paths."""
+    path = Path(src)
+    if not path.is_absolute():
+        path = product_memory.HOME / path
+    if not path.is_file():
+        return None
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(65_536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def wait(goal_id: str, reason: str, next_transition: str, src: str) -> dict:
     """Record the owner's decision that an obstacle prevents useful action.
 
@@ -306,8 +432,16 @@ def wait(goal_id: str, reason: str, next_transition: str, src: str) -> dict:
         goal = load(goal_id)
         if goal["state"] != ACTIVE:
             raise GoalError("ожидание записывается только для активной цели")
+        source_hash = wait_source_sha256(src.strip())
+        if (goal.get("next_transition") == next_transition.strip()
+                and (goal.get("waiting") or {}).get("reason") == reason.strip()
+                and (goal.get("waiting") or {}).get("src") == src.strip()
+                and (goal.get("waiting") or {}).get("source_sha256") == source_hash):
+            return goal
         goal["next_transition"] = next_transition.strip()
         goal["waiting"] = {"reason": reason.strip(), "src": src.strip(), "at": now()}
+        if source_hash is not None:
+            goal["waiting"]["source_sha256"] = source_hash
         return _save(goal, "wait", {**goal["waiting"], "next": goal["next_transition"]})
 
 
@@ -321,7 +455,9 @@ def waiting_decision(goal: dict) -> dict | None:
             or not goal["next_transition"].strip()):
         return None
     return {"reason": record["reason"], "src": record["src"],
-            "at": record.get("at"), "next_transition": goal["next_transition"]}
+            "at": record.get("at"), "next_transition": goal["next_transition"],
+            "source_sha256": record.get("source_sha256"),
+            "current_source_sha256": wait_source_sha256(record["src"])}
 
 
 def add_signal(goal_id: str, code: str, text: str, src: str,
@@ -342,7 +478,12 @@ def add_signal(goal_id: str, code: str, text: str, src: str,
 
     def apply(goal: dict) -> dict:
         known = {(item["code"], item["src"]) for item in goal["signals"]}
-        if (entry["code"], entry["src"]) in known:
+        archived = signal_history(goal["id"], code, entry["src"])
+        if (entry["code"], entry["src"]) in known or archived.is_file():
+            if archived.is_file():
+                original = json.loads(archived.read_text())
+                if (original["code"], original["src"]) != (code, entry["src"]):
+                    raise GoalError(f"исторический адрес признака занят: {archived}")
             return goal
         goal["signals"].append(entry)
         goal["control"] = REINFORCED
@@ -387,7 +528,9 @@ def add_corrective(goal_id: str, task: int, effect: str,
             raise GoalError(
                 "корректирующая задача заводится только из явной паузы основной "
                 f"работы: сначала `product_goal.py pause {goal_id} --reason ... --src ...`")
-        if any(item["task"] == int(task) for item in goal["correctives"]):
+        if (any(item["task"] == int(task) for item in goal["correctives"])
+                or any(int(task) in tasks for tasks in
+                       goal.get("settled_correctives", {}).values())):
             raise GoalError(f"задача {task} уже записана корректирующей у цели {goal_id}")
         goal["correctives"].append({
             "task": int(task), "effect": effect.strip(),
@@ -424,6 +567,15 @@ def _corrective(goal: dict, task: int) -> dict:
     for item in goal["correctives"]:
         if item["task"] == int(task):
             return item
+    if any(int(task) in tasks for tasks in goal.get("settled_correctives", {}).values()):
+        version = goal.get("corrective_versions", {}).get(str(int(task)), 1)
+        path = corrective_history(goal["id"], task, version)
+        try:
+            item = json.loads(path.read_text())
+        except (OSError, ValueError) as error:
+            raise GoalError(f"история исправления не читается: {path}") from error
+        goal["correctives"].append(item)
+        return item
     raise GoalError(f"у цели {goal['id']} нет корректирующей задачи {task}")
 
 
@@ -679,6 +831,17 @@ def projection(goal: dict) -> dict:
                     "return_criterion": item["return_criterion"],
                     "settled": settlement(item)}
                    for item in goal.get("correctives", [])]
+    current_ids = {item["task"] for item in correctives}
+    for kind, tasks in goal.get("settled_correctives", {}).items():
+        for task in tasks:
+            if task in current_ids:
+                continue
+            version = goal.get("corrective_versions", {}).get(str(task), 1)
+            path = str(corrective_history(goal["id"], task, version))
+            correctives.append({"task": task, "effect": f"История: {path}",
+                                "return_criterion": f"Полная запись: {path}",
+                                "settled": {"kind": kind, "at": None, "src": path,
+                                            "reason": f"Причина в полной записи: {path}"}})
     return {
         "id": goal.get("id"),
         "thread": goal.get("thread"),
@@ -692,7 +855,7 @@ def projection(goal: dict) -> dict:
         "next_transition": goal.get("next_transition"),
         "waiting": waiting_decision(goal),
         "pause": goal.get("pause"),
-        "signals": [{"code": item["code"], "text": item["text"], "src": item["src"]}
+        "signals": [{"code": item["code"], "text": item.get("text", SIGNALS.get(item["code"], item["code"])), "src": item["src"]}
                     for item in goal.get("signals", [])],
         "waiting_on": live_tasks(goal) if goal.get("state") != CLOSED else [],
         "updated_at": goal.get("updated_at"),
@@ -779,7 +942,9 @@ def block(thread: str) -> str:
             + (f"  необходимое ожидание: {waiting['reason']} "
                f"[{waiting['src']}]\n" if waiting else "")
             + f"  ближайший разрыв: {goal.get('gap') or 'не назван'}\n"
-            f"  следующий переход: {goal.get('next_transition') or 'не назван'}\n")
+            f"  следующий переход: {goal.get('next_transition') or 'не назван'}\n"
+            + (f"  история исправлений: {history_caption(goal)}\n"
+               if goal.get("settled_correctives") else ""))
     return f"""
 Долговечные цели этого направления (хранятся в продуктовом контуре на диске и
 переживают смену процесса, сеанса и модели — читай их до решения о запуске):
@@ -821,6 +986,8 @@ def _print(goal: dict, as_json: bool) -> None:
         print(f"  условие: {line}")
     print(f"  основная задача: {goal['main_task']} (статус "
           f"{task_status(goal['main_task']) or 'неизвестен'})")
+    if goal.get("settled_correctives"):
+        print(f"  история исправлений: {history_caption(goal)}")
     for item in goal.get("correctives", []):
         print(f"  корректирующая {item['task']} [{mark(item)}]: {item['effect']}")
         print(f"      возврат к основной: {item['return_criterion']}")
@@ -835,7 +1002,7 @@ def _print(goal: dict, as_json: bool) -> None:
     if waiting:
         print(f"  необходимое ожидание: {waiting['reason']} ({waiting['src']})")
     for item in goal.get("signals", []):
-        print(f"  признак {item['code']}: {item['text']} ({item['src']})")
+        print(f"  признак {item['code']}: {item.get('text', SIGNALS.get(item['code'], item['code']))} ({item['src']})")
     if goal.get("closed"):
         print(f"  закрыта {goal['closed']['at']}: {goal['closed']['live_check']} "
               f"({goal['closed']['src']})")

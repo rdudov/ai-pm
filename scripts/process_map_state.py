@@ -2195,19 +2195,7 @@ def thread_channels(tasks: list[dict], is_owner: bool) -> list[dict]:
 
 def markdown_section(text: str, heading: str) -> list[str]:
     """Bullet lines of one `## heading` section, one entry per bullet."""
-    items: list[str] = []
-    inside = False
-    for line in text.splitlines():
-        if line.startswith("## "):
-            inside = line[3:].strip().lower() == heading.lower()
-            continue
-        if not inside:
-            continue
-        if line.startswith("- "):
-            items.append(line[2:].strip())
-        elif items and line.startswith("  ") and line.strip():
-            items[-1] += " " + line.strip()
-    return items
+    return product_memory.section(text, heading, casefold=True)
 
 
 def products(catalogue: list[dict] | None = None, mail: dict | None = None) -> list[dict]:

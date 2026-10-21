@@ -264,7 +264,10 @@ class GoalStore(unittest.TestCase):
         self.assertEqual(settled["kind"], goals.RETIRED)
         self.assertEqual(projected["waiting_on"], [])
         block = goals.block("process")
-        self.assertIn("снята: эффект доставлен принятой 102", block)
+        self.assertIn("сняты: 101", block)
+        archive = goals.corrective_history(goal["id"], 101, 1)
+        self.assertEqual(json.loads(archive.read_text())["retired"]["reason"],
+                         "эффект доставлен принятой 102")
         self.assertNotIn("101 (принята)", block)
         # And the board refuses a retirement shown without its reason or source.
         broken = {**projected, "correctives": [
