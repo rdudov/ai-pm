@@ -566,7 +566,7 @@ def codex_command(entry: str, extra: list[str]) -> list[str]:
         "-C", str(HOME), *workspace_access(),
     ]
     if entry == "print":
-        return [*common, "exec", "--skip-git-repo-check", "-"]
+        return [*common, "exec", "--ephemeral", "--skip-git-repo-check", "-"]
     return [*common, *extra]
 
 

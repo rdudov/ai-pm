@@ -341,6 +341,7 @@ class ProductOwnerModelRouterTests(unittest.TestCase):
             router.main(["--entry", "print", "--show-command"])
         argv = json.loads(out.getvalue())
         self.assertEqual(argv[0], router.CODEX_BIN)
+        self.assertIn("--ephemeral", argv)
         fetch.assert_not_called()
 
     def test_mail_entry_ignores_legacy_claude_flag_without_claude_query(self):
@@ -348,6 +349,7 @@ class ProductOwnerModelRouterTests(unittest.TestCase):
             router.main(["--entry", "mail", "--force-claude", "--show-command"])
         argv = json.loads(out.getvalue())
         self.assertEqual(argv[argv.index("--model") + 1], CODEX_MODEL)
+        self.assertIn("--ephemeral", argv)
         fetch.assert_not_called()
 
     def test_observed_shared_exhaustion_selects_codex(self):
@@ -473,6 +475,7 @@ class ProductOwnerModelRouterTests(unittest.TestCase):
         argv = execute.call_args.args[1]
         self.assertEqual(argv[argv.index("-C") + 1], str(router.HOME))
         self.assertEqual(execute.call_args.args[0], router.CODEX_BIN)
+        self.assertNotIn("--ephemeral", argv)
 
     def test_the_codex_route_notice_is_a_diagnostic_and_not_part_of_the_letter(self):
         """«Ровно `SILENT` остаётся молчанием» — 2026-08-23.
