@@ -245,11 +245,21 @@ def maybe_send(moment: datetime | None = None, force: bool = False,
                previous: dict | None = None) -> dict:
     moment = moment or datetime.now(timezone.utc)
     local = moment.astimezone(LOCAL_ZONE)
+    # The CLI and process timer share the same current outcome. A standalone
+    # forced attempt has no direction snapshot, but must still wake process.
+    with outbound.Ledger() as ledger:
+        latest = ledger.thread("portfolio").get("daily_standup")
+    previous = latest if latest is not None else previous
+    pending = previous if previous and previous.get("action") == "fail" else None
     if not force and local.hour < SEND_HOUR:
+        if pending:
+            return {**pending, "deferred": True}
         return {"action": "skip", "reason": "before the 08:00 local timer firing"}
     event_id = f"daily:{local.date().isoformat()}"
     if sent_today(moment):
         if not force:
+            if pending:
+                return {**pending, "deferred": True}
             return {"action": "skip", "reason": "daily standup already sent today",
                     "daily_delivered": True}
         # Explicit correction of a legacy refusal receipt (or an intentionally
@@ -276,6 +286,8 @@ def maybe_send(moment: datetime | None = None, force: bool = False,
     try:
         packet = source_packet(moment)
         if mechanically_empty(packet):
+            if pending:
+                return {**pending, "deferred": True}
             return {"action": "skip", "reason": "all mechanical sources are empty"}
         stage = "composition"
         data = compose(packet, local.date().isoformat())
@@ -309,6 +321,8 @@ def maybe_send(moment: datetime | None = None, force: bool = False,
         return {**failure, "notice": delivery}
     if delivery.get("action") == "fail":
         return record_failure(moment, "delivery", delivery["reason"])
+    with outbound.Ledger() as ledger:
+        ledger.thread("portfolio")["daily_standup"] = delivery
     return delivery
 
 
@@ -318,6 +332,7 @@ def record_failure(moment: datetime, stage: str, reason: str, *, code: str | Non
                "reason": reason, "code": code or stage,
                "thread": "portfolio", "kind": "daily"}
     with outbound.Ledger() as ledger:
+        ledger.thread("portfolio")["daily_standup"] = failure
         ledger.record(failure)
     return failure
 

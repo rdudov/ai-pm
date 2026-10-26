@@ -1314,10 +1314,6 @@ def main() -> int:
             print(f"[daily] {type(error).__name__}: {error}", file=sys.stderr)
             daily_result = daily_standup.record_failure(
                 moment, "unexpected", "Оперативка не собрана; подробности — в журнале службы.")
-        if (daily_result.get("action") == "skip"
-                and not daily_result.get("daily_delivered")
-                and (stored.get("daily_standup") or {}).get("action") == "fail"):
-            daily_result = {**stored["daily_standup"], "deferred": True}
         if daily_result.get("action") == "fail":
             daily_failure = daily_result["reason"]
             print(f"утренняя оперативка не доставлена: {daily_failure}", file=sys.stderr)
@@ -1378,6 +1374,10 @@ def main() -> int:
     session_holds, handover = session_leads(session, goals["objects"])
     events += handover
     woke = (bool(events) or args.force) and not session_holds and not owner_holds
+    if not woke and current.get("daily_failure"):
+        # Observation while another owner holds the tree is not handling the
+        # failure. Retain the prior transition boundary until an actual wake.
+        current["daily_failure"] = previous.get("daily_failure")
 
     def record(final: dict | None, done: bool) -> dict:
         """The direction's state file, in the one shape the board reads."""

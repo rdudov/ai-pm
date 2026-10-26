@@ -159,6 +159,47 @@ class DailyRecovery(unittest.TestCase):
             self.process(AT + timedelta(minutes=20))
         self.assertEqual(self.engine.call_count, 2)
 
+    def test_standalone_forced_failure_survives_legacy_receipt_and_wakes_process(self):
+        tick.deliver("portfolio", "daily", "Old refusal", "Plans unavailable", AT,
+                     event_id=f"daily:{AT.date().isoformat()}")
+        with mock.patch.object(daily, "source_packet", side_effect=startup.InputLimitError("too large")), \
+                mock.patch.object(daily, "datetime", wraps=datetime) as clock, \
+                mock.patch.object(sys, "argv", ["daily_standup.py", "--force"]), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            clock.now.return_value = AT
+            self.assertEqual(daily.main(), 1)
+        self.assertEqual(self.engine.call_count, 0)
+        code, state = self.process(AT + timedelta(minutes=20))
+        self.assertEqual(code, 1)
+        self.assertTrue(state["check"]["woke_owner"])
+        self.assertEqual(state["daily_standup"]["stage"], "sources")
+        self.process(AT + timedelta(minutes=40))
+        self.assertEqual(self.engine.call_count, 1)
+        self.assertEqual(daily.maybe_send(AT + timedelta(hours=1), force=True)["action"], "send")
+        code, state = self.process(AT + timedelta(hours=2))
+        self.assertEqual(code, 0)
+        self.assertIsNone(state["snapshot"]["daily_failure"])
+        self.assertEqual(self.mail.call_count, 3)  # legacy, refusal, correction
+
+    def test_busy_owner_or_goal_session_cannot_consume_pending_failure(self):
+        for gate in (mock.patch.object(tick, "yielded", return_value={"to": [
+                         {"kind": "codex", "thread": "process"}]}),
+                     mock.patch.object(tick, "session_leads", return_value=(True, []))):
+            with self.subTest(gate=gate.attribute):
+                (self.state / "process.json").write_text(json.dumps({"snapshot": tick.snapshot(self.report)}))
+                self.engine.reset_mock()
+                with mock.patch.object(daily, "source_packet", side_effect=startup.InputLimitError("too large")):
+                    with gate:
+                        self.process(AT)
+                        code, state = self.process(AT + timedelta(minutes=20))
+                        self.assertFalse(state["check"]["woke_owner"])
+                        self.assertEqual(self.engine.call_count, 0)
+                    code, state = self.process(AT + timedelta(minutes=40))
+                    self.assertTrue(state["check"]["woke_owner"])
+                    self.assertEqual(self.engine.call_count, 1)
+                    self.process(AT + timedelta(hours=1))
+                    self.assertEqual(self.engine.call_count, 1)
+
     def test_force_corrects_legacy_receipt_once_and_preserves_ordinary_dedup(self):
         # Old versions receipted their refusal notice as the day's normal daily.
         tick.deliver("portfolio", "daily", "Old refusal", "Plans unavailable", AT,
