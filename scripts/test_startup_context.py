@@ -247,14 +247,18 @@ class HardInputBounds(unittest.TestCase):
         self.assertEqual(json.loads(raw)["outcome"], huge)
         self.assertNotIn(huge[:200], startup.render(result))
 
-    def test_many_metadata_records_fit_or_refuse_whole_never_silently_drop(self):
+    def test_many_metadata_records_group_or_address_bounded_pages_without_loss(self):
         records = [{"source": f"record-{index}.md", "sha256": "a" * 64,
                     "bytes": 1_000_000, "manifested": True} for index in range(408)]
         self.value["post_cursor_records"] = records
-        self.assertEqual(self.bounded()["post_cursor_records"], records)
+        compact = self.bounded()["post_cursor_records"]
+        self.assertEqual(len(compact["directories"][0]["files"]), len(records))
+        self.assertEqual(compact["directories"][0]["files"][0]["sha256"], "a" * 64)
         self.value["post_cursor_records"] = records * 100
-        with self.assertRaisesRegex(startup.InputLimitError, "post_cursor_records"):
-            self.bounded()
+        reference = self.bounded()["post_cursor_records"]
+        self.assertEqual(reference["count"], 40800)
+        self.assertIn("--records --frozen-at", reference["source"])
+        self.assertIn(startup.digest_text(startup.render(records * 100)), reference["source"])
         self.value["post_cursor_records"] = []
         self.value["active_goals"] *= 10_000
         with self.assertRaisesRegex(startup.InputLimitError, "active_goals"):

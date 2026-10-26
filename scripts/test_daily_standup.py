@@ -28,6 +28,11 @@ SAMPLE = {
 
 
 class DailyStandupRendering(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.enterContext(mock.patch.object(outbound, "LEDGER", Path(temporary.name) / "outbound.json"))
+
     def test_background_composition_selects_print_entry_explicitly(self):
         completed = mock.Mock(returncode=0, stdout=__import__("json").dumps(SAMPLE), stderr="")
         with mock.patch.object(daily.subprocess, "run", return_value=completed) as run:
@@ -206,7 +211,7 @@ class DailyStandupRendering(unittest.TestCase):
                         mock.patch.object(thread_tick, "MAIL_SCRIPT", Path(__file__)), \
                         mock.patch.object(thread_tick, "MAIL_PYTHON", Path(__file__)), \
                         mock.patch.object(thread_tick, "deliver", return_value={"action": "send"}) as deliver:
-                    self.assertEqual(daily.maybe_send(force=True)["action"], "send")
+                    self.assertEqual(daily.maybe_send(force=True)["action"], "fail")
                 engine.assert_called_once()
                 self.assertIn("stderr:\n" + err, journal.getvalue())
                 self.assertIn("stdout:\n" + out, journal.getvalue())
@@ -231,10 +236,10 @@ class DailyStandupRendering(unittest.TestCase):
                 mock.patch.object(thread_tick, "MAIL_SCRIPT", Path(__file__)), \
                 mock.patch.object(thread_tick, "MAIL_PYTHON", Path(__file__)), \
                 mock.patch.object(thread_tick, "deliver", return_value={"action": "send"}) as deliver:
-            self.assertEqual(daily.maybe_send(at)["action"], "send")
+            self.assertEqual(daily.maybe_send(at)["action"], "fail")
         run.assert_not_called()
         deliver.assert_called_once()
-        self.assertIn("Оперативка не смогла прочитать источники", deliver.call_args.args[3])
+        self.assertIn("Оперативка не собрана", deliver.call_args.args[3])
         self.assertIn("модель не вызвана", deliver.call_args.args[3])
 
 

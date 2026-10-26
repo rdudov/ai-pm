@@ -94,8 +94,8 @@ def fit_items(values: dict, originals: dict, limit: int, section: str) -> dict:
 
 
 def bounded_packet(value: dict, current_thread: str | None = None,
-                   plan: dict | None = None) -> dict:
-    """Reuse whole-source manifests; excessive manifest cardinality refuses."""
+                   plan: dict | None = None, frozen_at: datetime | None = None) -> dict:
+    """Reuse source manifests and page oversized unread inventories."""
     value = dict(value)
     plan_path = (product_memory.revisions_dir() / f"{int(plan['revision']):06d}.json"
                  if plan else None)
@@ -139,9 +139,21 @@ def bounded_packet(value: dict, current_thread: str | None = None,
     sources["active_goals"] = [ref["source"] for ref in refs.values()]
     value["active_goals"] = list(fit_items(
         goals, refs, SECTION_CHARS["active_goals"], "active_goals").values())
-    # These records are already whole-source manifests. Never drop their tail.
-    require_size(render(value["post_cursor_records"]),
-                 SECTION_CHARS["post_cursor_records"], "post_cursor_records")
+    # Factor repeated paths, never source identities. Larger inventories stay
+    # readable through the same collector's bounded, digest-bound CLI pages.
+    records = value["post_cursor_records"]
+    compact = compact_records(records)
+    if len(render(compact)) > SECTION_CHARS["post_cursor_records"]:
+        frozen_at = frozen_at or datetime.now().astimezone()
+        digest = digest_text(render(records))
+        compact = {"source": "python3 scripts/startup_context.py --records "
+                             f"--frozen-at {frozen_at.isoformat()} --manifest-sha256 {digest}",
+                   "count": len(records), "manifested": True,
+                   "reading": "Open bounded pages; a manifest is not reading. "
+                              "Continue with every returned continuation argument. "
+                              "Changed sources invalidate continuation; restart reading."}
+    require_size(render(compact), SECTION_CHARS["post_cursor_records"], "post_cursor_records")
+    value["post_cursor_records"] = compact
     # Inline projections still name their originals; records already carry
     # their own addresses. The final cap also counts this source catalog.
     value["contract"] = {**value["contract"], "sources": sources}
@@ -162,6 +174,58 @@ def checked_prompt(text: str, event_base: str | None = None) -> str:
 
 def digest_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def compact_records(records: list[dict]) -> dict:
+    """Lossless original identities; each parent address appears only once."""
+    directories = {}
+    for record in records:
+        path = Path(record["source"])
+        file = {key: value for key, value in record.items()
+                if key not in {"source", "manifested", "reason"}}
+        file["name"] = path.name
+        directories.setdefault(str(path.parent), []).append(file)
+    return {"reading": "Unread originals: open directory/name. Sort full paths "
+                       "for prefix order. Grouping never advances read_through.",
+            "directories": [{"directory": directory, "files": files}
+                            for directory, files in directories.items()]}
+
+
+def record_page(records: list[dict], frozen_at: datetime, *,
+                after: str | None = None, manifest_sha256: str | None = None) -> dict:
+    """A continuation cannot silently skip a changed or disappearing source."""
+    digest = digest_text(render(records))
+    if after is not None and manifest_sha256 is None:
+        raise InputLimitError("continuation requires --manifest-sha256 and --frozen-at")
+    if manifest_sha256 is not None and manifest_sha256 != digest:
+        raise InputLimitError("unread sources changed; restart the complete prefix reading")
+    paths = [record["source"] for record in records]
+    if after is not None and after not in paths:
+        raise InputLimitError("continuation source is absent; restart prefix reading")
+    start = paths.index(after) + 1 if after is not None else 0
+
+    def page(end):
+        return {"total": len(records), "count": end - start,
+                "manifest_sha256": digest, "frozen_at": frozen_at.isoformat(),
+                "continuation": ({"after": paths[end - 1], "manifest_sha256": digest,
+                                  "frozen_at": frozen_at.isoformat()}
+                                 if start < end < len(records) else None),
+                **compact_records(records[start:end])}
+
+    # Find the largest whole-record page that fits, including its continuation.
+    low, high = start, len(records)
+    limit = SECTION_CHARS["post_cursor_records"]
+    while low < high:
+        end = (low + high + 1) // 2
+        if len(render(page(end))) <= limit:
+            low = end
+        else:
+            high = end - 1
+    if low == start and start < len(records):
+        raise InputLimitError("one unread source identity cannot fit the record page")
+    result = page(low)
+    require_size(render(result), limit, "post-cursor record page")
+    return result
 
 
 def exact_section(text: str, title: str) -> str:
@@ -291,6 +355,7 @@ def post_cursor(plan: dict, frozen_at: datetime | None = None,
 
 
 def packet(current_thread: tuple[str, dict] | None = None) -> dict:
+    frozen_at = datetime.now().astimezone()
     try:
         plan = product_memory.current_plan()
     except product_memory.ContentError as error:
@@ -385,10 +450,11 @@ def packet(current_thread: tuple[str, dict] | None = None) -> dict:
         },
         "active_goals": [goal_view(goal) for goal in product_goal.active(
             current_thread[0] if current_thread else None)],
-        "post_cursor_records": post_cursor(plan, products=relevant_products if current_thread else None)
+        "post_cursor_records": post_cursor(plan, frozen_at=frozen_at,
+                                           products=relevant_products if current_thread else None)
                                if plan else [],
     }
-    return bounded_packet(value, current_thread[0] if current_thread else None, plan)
+    return bounded_packet(value, current_thread[0] if current_thread else None, plan, frozen_at)
 
 
 def render(value: dict) -> str:
@@ -400,15 +466,23 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--thread")
     parser.add_argument("--records", action="store_true")
+    parser.add_argument("--after")
+    parser.add_argument("--manifest-sha256")
+    parser.add_argument("--frozen-at", type=datetime.fromisoformat)
     args = parser.parse_args()
     if args.records:
+        if args.after and not args.frozen_at:
+            parser.error("continuation requires --frozen-at")
+        frozen_at = args.frozen_at or datetime.now().astimezone()
+        if frozen_at.tzinfo is None:
+            parser.error("--frozen-at requires an explicit timezone")
         config = product_memory.installation().get("threads", {})
         if args.thread and args.thread not in config:
             parser.error("unknown thread")
         products = set(config[args.thread].get("products", [])) if args.thread else None
-        value = post_cursor(product_memory.current_plan(), products=products)
-        require_size(render(value), SECTION_CHARS["post_cursor_records"], "post-cursor records")
-        print(render(value))
+        value = post_cursor(product_memory.current_plan(), frozen_at=frozen_at, products=products)
+        print(render(record_page(value, frozen_at, after=args.after,
+                                 manifest_sha256=args.manifest_sha256)))
     else:
         print(render(packet((args.thread, thread_state.build(args.thread)) if args.thread else None)))
     return 0

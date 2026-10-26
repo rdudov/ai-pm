@@ -247,8 +247,18 @@ def maybe_send(moment: datetime | None = None, force: bool = False,
     local = moment.astimezone(LOCAL_ZONE)
     if not force and local.hour < SEND_HOUR:
         return {"action": "skip", "reason": "before the 08:00 local timer firing"}
+    event_id = f"daily:{local.date().isoformat()}"
     if sent_today(moment):
-        return {"action": "skip", "reason": "daily standup already sent today"}
+        if not force:
+            return {"action": "skip", "reason": "daily standup already sent today",
+                    "daily_delivered": True}
+        # Explicit correction of a legacy refusal receipt (or an intentionally
+        # corrected edition). One fixed identity per date, never a random retry.
+        event_id += ":correction"
+        with outbound.Ledger() as ledger:
+            if outbound.event_delivered_anywhere(ledger.data, event_id):
+                return {"action": "skip", "reason": "daily correction already sent today",
+                        "daily_delivered": True}
     if not force and previous and previous.get("action") == "fail":
         try:
             failed_at = datetime.fromisoformat(str(previous["at"]))
@@ -259,32 +269,57 @@ def maybe_send(moment: datetime | None = None, force: bool = False,
     import thread_tick
     if not (thread_tick.MAIL_TO and thread_tick.MAIL_SCRIPT.is_file()
             and thread_tick.MAIL_PYTHON.is_file()):
-        return {"action": "fail", "at": moment.isoformat(),
-                "reason": "почтовая дверь недоступна — оперативка не собиралась"}
+        return record_failure(moment, "delivery",
+                              "почтовая дверь недоступна — оперативка не собиралась")
+    failure = None
+    stage = "sources"
     try:
         packet = source_packet(moment)
         if mechanically_empty(packet):
             return {"action": "skip", "reason": "all mechanical sources are empty"}
+        stage = "composition"
         data = compose(packet, local.date().isoformat())
-    except (startup_context.InputLimitError, RuntimeError) as error:
+    except (startup_context.InputLimitError, product_memory.ContentError,
+            RuntimeError, ValueError, OSError, subprocess.TimeoutExpired) as error:
+        print(f"[daily {stage}] {type(error).__name__}: {error}", file=sys.stderr)
+        reason = str(error) if isinstance(error, (startup_context.InputLimitError, RuntimeError)) else (
+            "Не удалось прочитать источники; подробности — в журнале службы."
+            if stage == "sources" else
+            "Модель не вернула готовую оперативку; подробности — в журнале службы.")
+        failure = record_failure(moment, stage, reason, code=type(error).__name__)
         # A failed composer cannot explain its own absence. Use the same daily
-        # letter and receipt, never per-tick failure mail or another transport.
-        data = {"intro": "Оперативка не смогла прочитать источники: " + str(error),
+        # channel, but never receipt a refusal as a delivered daily edition.
+        data = {"intro": "Оперативка не собрана: " + reason,
                 "plans": [{"product": "Портфель", "today": "Восстановить сборку оперативки",
-                           "state": "Планы не проверены", "blocker": str(error)}],
+                           "state": "Планы не проверены", "blocker": reason}],
                 "questions": [], "initiatives": []}
         try:
             packet = {"wake_health": wake_health()}
-        except startup_context.InputLimitError:
+        except (startup_context.InputLimitError, OSError, ValueError):
             packet = {}
     data["plans"].extend({key: row[key] for key in ("product", "today", "state", "blocker")}
                          for row in packet.get("wake_health", []))
     plain, html = render_plain(data), render_html(data)
     subject = f"Продуктовая оперативка — {local:%d.%m}"
-    return thread_tick.deliver(
-        "portfolio", "daily", subject, plain, moment,
+    delivery = thread_tick.deliver(
+        "portfolio", "daily_refusal" if failure else "daily", subject, plain, moment,
         raw_message=raw_message(thread_tick.MAIL_TO, subject, plain, html),
-        event_id=f"daily:{local.date().isoformat()}")
+        event_id=f"daily:{local.date().isoformat()}:refusal" if failure else event_id)
+    if failure:
+        return {**failure, "notice": delivery}
+    if delivery.get("action") == "fail":
+        return record_failure(moment, "delivery", delivery["reason"])
+    return delivery
+
+
+def record_failure(moment: datetime, stage: str, reason: str, *, code: str | None = None) -> dict:
+    """Reuse the delivery journal for history and process state for current health."""
+    failure = {"action": "fail", "at": moment.isoformat(), "stage": stage,
+               "reason": reason, "code": code or stage,
+               "thread": "portfolio", "kind": "daily"}
+    with outbound.Ledger() as ledger:
+        ledger.record(failure)
+    return failure
 
 
 def main() -> int:

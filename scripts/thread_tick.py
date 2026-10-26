@@ -1311,8 +1311,13 @@ def main() -> int:
             daily_result = daily_standup.maybe_send(
                 moment, previous=stored.get("daily_standup"))
         except Exception as error:
-            daily_result = {"action": "fail", "at": moment.isoformat(),
-                            "reason": str(error)[:500]}
+            print(f"[daily] {type(error).__name__}: {error}", file=sys.stderr)
+            daily_result = daily_standup.record_failure(
+                moment, "unexpected", "Оперативка не собрана; подробности — в журнале службы.")
+        if (daily_result.get("action") == "skip"
+                and not daily_result.get("daily_delivered")
+                and (stored.get("daily_standup") or {}).get("action") == "fail"):
+            daily_result = {**stored["daily_standup"], "deferred": True}
         if daily_result.get("action") == "fail":
             daily_failure = daily_result["reason"]
             print(f"утренняя оперативка не доставлена: {daily_failure}", file=sys.stderr)
@@ -1326,9 +1331,17 @@ def main() -> int:
     report = build(args.thread)
     previous = stored.get("snapshot", {})
     current = snapshot(report, previous)
+    if args.thread == "process":
+        current["daily_failure"] = (hashlib.sha256(json.dumps(
+            [daily_result.get("stage"), daily_result.get("code") or daily_failure],
+            ensure_ascii=False).encode()).hexdigest()
+            if daily_failure else None)
     long_lived_processes = persisted_process_inventory(report, stored)
 
     events = transitions(previous, current) if previous else ["первый запуск треда"]
+    if (current.get("daily_failure")
+            and current["daily_failure"] != previous.get("daily_failure")):
+        events.append("Оперативка не собрана или не доставлена: " + daily_failure)
 
     # Before the idle test and before the wake-up decision: a goal is the memory
     # this process does not have, and «что стоит по цели» is a reason to wake up
