@@ -502,7 +502,7 @@ def goal_watch(thread: str, report: dict, stored: dict, moment: datetime) -> dic
         continuation_ids = {number for goal in panel
                             for number in goal.get("waiting_on") or []} - held_ids
         waiting = product_goal.standing(
-            thread, list(live_ids), list(continuation_ids))
+            thread, list(live_ids), list(continuation_ids), moment)
     except (product_goal.GoalError, OSError, ValueError) as error:
         return {"transitions": [f"долговечные цели направления не читаются: {error}"],
                 "standing": [], "reminder": stored.get("goal_reminder"), "panel": [],
@@ -523,7 +523,7 @@ def goal_watch(thread: str, report: dict, stored: dict, moment: datetime) -> dic
             old_hash = (was.get("waiting") or {}).get("current_source_sha256")
             new_hash = goal["waiting"].get("current_source_sha256")
             if old_hash != new_hash:
-                if product_goal.waiting_unchanged(goal["waiting"]):
+                if product_goal.waiting_unchanged(goal["waiting"], moment):
                     transitions_seen.append(f"обновлено явное ожидание цели {goal['id']}; "
                                             "источник подтверждён решением владельца")
                 else:
@@ -539,10 +539,10 @@ def goal_watch(thread: str, report: dict, stored: dict, moment: datetime) -> dic
     # сказать пользователю; обязательный исход пробуждения решается по факту
     # стояния, иначе замолчавший повтор снимал бы и проверку.
     objects = [goal for goal in panel
-               if goal.get("waiting_on")
-               and not product_goal.waiting_unchanged(goal.get("waiting"))
-               and not set(goal["waiting_on"]) & live_ids
-               and set(goal["waiting_on"]) & continuation_ids]
+               if not product_goal.waiting_unchanged(goal.get("waiting"), moment)
+               and not set(goal.get("waiting_on") or []) & live_ids
+               and (product_goal.waiting_due(goal.get("waiting"), moment)
+                    or set(goal.get("waiting_on") or []) & continuation_ids)]
     return {"transitions": transitions_seen, "standing": standing_now,
             "reminder": reminder, "panel": panel, "objects": objects}
 
@@ -644,7 +644,9 @@ def idle_reasons(report: dict, standing: dict, goals: list[dict] | None = None) 
         # Typed goal/plan bindings, never task status or a phrase about waiting.
         # An independent ready task must still be surfaced as available work.
         waits = {goal["id"] for goal in goals
-                 if product_goal.waiting_unchanged(goal.get("waiting"))}
+                 if product_goal.waiting_source_unchanged(goal.get("waiting"))}
+        # Deadline expiry asks for a decision through goal_watch. By itself it
+        # does not turn a still-observed obstacle into an automatic idle letter.
         covered = {task for goal in goals if goal["id"] in waits
                    for task in [goal.get("main_task"), *(goal.get("waiting_on") or [])]
                    if task is not None}
@@ -1374,12 +1376,14 @@ def main() -> int:
     session_holds, handover = session_leads(session, goals["objects"])
     events += handover
     woke = (bool(events) or args.force) and not session_holds and not owner_holds
+    pending_deadline = any(product_goal.waiting_due(goal.get("waiting"), moment)
+                           for goal in goals["panel"])
     if not woke and current.get("daily_failure"):
         # Observation while another owner holds the tree is not handling the
         # failure. Retain the prior transition boundary until an actual wake.
         current["daily_failure"] = previous.get("daily_failure")
 
-    def record(final: dict | None, done: bool) -> dict:
+    def record(final: dict | None, done: bool, *, retry: bool = False) -> dict:
         """The direction's state file, in the one shape the board reads."""
         return {
             "thread": args.thread, "updated_at": now, "snapshot": current,
@@ -1394,7 +1398,11 @@ def main() -> int:
             # the board can show «что обещано пользователю и где это стоит»
             # without asking a running agent anything.
             "goals": goals["panel"],
-            "goal_reminder": goals["reminder"],
+            # A held or failed wake has observed the deadline, not handled it.
+            # Reuse the existing reminder, preserving its pending signature.
+            "goal_reminder": (stored.get("goal_reminder")
+                              if pending_deadline and (retry or not woke)
+                              else goals["reminder"]),
             # Кто ведёт направление и что тик с этим сделал. Написано и когда
             # сессии нет: «усиленных целей нет» — тоже ответ на вопрос «почему
             # тик разбудил продакта сам».
@@ -1507,14 +1515,14 @@ def main() -> int:
     except (startup_context.InputLimitError, product_memory.ContentError,
             OSError, subprocess.TimeoutExpired) as error:
         reason = str(error)
-        persist_wake_failure(state_path, record(None, True), reason, previous)
+        persist_wake_failure(state_path, record(None, True, retry=True), reason, previous)
         print(f"[{args.thread}] {reason}", file=sys.stderr)
         return 1
     if result.returncode != 0:
         # The existing service journal owns engine failures, including output
         # before a final answer. A changing runtime banner is not a mail event.
         persist_wake_failure(
-            state_path, record(None, True),
+            state_path, record(None, True, retry=True),
             engine_failure(result, args.thread), previous)
         return 1
     stored.pop("wake_failure", None)
@@ -1527,7 +1535,7 @@ def main() -> int:
     except ValueError as error:
         failure = f"[{args.thread}] составитель не выбрал канал до текста: {error}"
         persist_composer_failure(
-            state_path, record(None, True), message, error,
+            state_path, record(None, True, retry=True), message, error,
             retry_snapshot=previous)
         print(failure, file=sys.stderr)
         return 1

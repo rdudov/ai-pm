@@ -46,7 +46,7 @@ Usage:
     product_goal.py open --thread <тред> --outcome <...> --observable <...>
                          --main-task <N> [--product <slug>] [--gap <...>]
     product_goal.py set <id> [--gap <...>] [--next <...>]
-    product_goal.py wait <id> --reason <...> --next <...> --src <...>
+    product_goal.py wait <id> --reason <...> --next <...> --src <...> [--review-at <ISO8601>]
     product_goal.py signal <id> --code <код> --text <...> --src <чем наблюдено>
     product_goal.py observe [<id>] [--json]
     product_goal.py pause <id> --reason <...> --src <чем наблюдено>
@@ -445,8 +445,20 @@ def _allows_wait(goal: dict) -> bool:
                     for key in ("reason", "src")))
 
 
+def wait_deadline(value: str) -> datetime:
+    """An explicit calendar instant, never a date inferred from the reason."""
+    try:
+        result = datetime.fromisoformat(value)
+        if result.tzinfo is None or result.utcoffset() is None:
+            raise ValueError("timezone missing")
+        return result.astimezone(timezone.utc)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise GoalError("ожидание: review_at требует дату и время ISO8601 с часовым "
+                        "поясом, например 2030-01-02T09:00:00+00:00") from error
+
+
 def wait(goal_id: str, reason: str, next_transition: str, src: str,
-         watch_paths: list[str] | None = None) -> dict:
+         watch_paths: list[str] | None = None, review_at: str | None = None) -> dict:
     """Record the owner's decision that an obstacle prevents useful action.
 
     A plan is not this decision. The owner names the necessary obstacle and
@@ -460,6 +472,10 @@ def wait(goal_id: str, reason: str, next_transition: str, src: str,
         goal = load(goal_id)
         if not _allows_wait(goal):
             raise GoalError("ожидание требует активную цель либо цель с явной паузой")
+        if review_at is None:
+            review_at = (goal.get("waiting") or {}).get("review_at")
+        if review_at is not None:
+            review_at = wait_deadline(review_at).isoformat()
         if watch_paths is None:
             watch_paths = (goal.get("waiting") or {}).get("watch_paths", [])
         if not isinstance(watch_paths, list) or any(
@@ -471,10 +487,13 @@ def wait(goal_id: str, reason: str, next_transition: str, src: str,
                 and (goal.get("waiting") or {}).get("reason") == reason.strip()
                 and (goal.get("waiting") or {}).get("src") == src.strip()
                 and (goal.get("waiting") or {}).get("watch_paths", []) == watch_paths
+                and (goal.get("waiting") or {}).get("review_at") == review_at
                 and (goal.get("waiting") or {}).get("source_sha256") == source_hash):
             return goal
         goal["next_transition"] = next_transition.strip()
         goal["waiting"] = {"reason": reason.strip(), "src": src.strip(), "at": now()}
+        if review_at is not None:
+            goal["waiting"]["review_at"] = review_at
         if watch_paths:
             goal["waiting"]["watch_paths"] = watch_paths
         if source_hash is not None:
@@ -494,15 +513,28 @@ def waiting_decision(goal: dict) -> dict | None:
     return {"reason": record["reason"], "src": record["src"],
             "at": record.get("at"), "next_transition": goal["next_transition"],
             "watch_paths": record.get("watch_paths", []),
+            "review_at": record.get("review_at"),
             "source_sha256": record.get("source_sha256"),
             "current_source_sha256": wait_source_sha256(record["src"], record.get("watch_paths"))}
 
 
-def waiting_unchanged(decision: dict | None) -> bool:
-    """An explicit owner wait still observes the bytes it was decided on."""
+def waiting_due(decision: dict | None, moment: datetime | None = None) -> bool:
+    """Compare the explicit deadline with the caller's aware wall clock (UTC)."""
+    return bool(decision and decision.get("review_at") is not None
+                and (moment if moment is not None else datetime.now(timezone.utc))
+                >= wait_deadline(decision["review_at"]))
+
+
+def waiting_source_unchanged(decision: dict | None) -> bool:
+    """The observed source is known and still matches the owner's decision."""
     return bool(decision and decision.get("source_sha256")
                 and decision.get("source_sha256")
                 == decision.get("current_source_sha256"))
+
+
+def waiting_unchanged(decision: dict | None, moment: datetime | None = None) -> bool:
+    """Known unchanged bytes excuse waiting only before its explicit deadline."""
+    return waiting_source_unchanged(decision) and not waiting_due(decision, moment)
 
 
 def add_signal(goal_id: str, code: str, text: str, src: str,
@@ -928,7 +960,8 @@ def panel(thread: str | None = None) -> list[dict]:
 
 
 def standing(thread: str, live_run_ids: list[int],
-             actionable_task_ids: list[int] | None = None) -> list[str]:
+             actionable_task_ids: list[int] | None = None,
+             moment: datetime | None = None) -> list[str]:
     """Goals that are owed something and have no live run doing it.
 
     The tick wakes on transitions and on two standing states; a goal with nothing
@@ -941,10 +974,15 @@ def standing(thread: str, live_run_ids: list[int],
     actionable = (set(actionable_task_ids)
                   if actionable_task_ids is not None else None)
     for goal in active(thread):
-        if waiting_unchanged(waiting_decision(goal)):
+        decision = waiting_decision(goal)
+        if waiting_unchanged(decision, moment):
             continue
         waiting = live_tasks(goal)
         if set(waiting) & live:
+            continue
+        if waiting_due(decision, moment):
+            said.append(f"цель {goal['id']}: наступил срок перепроверки ожидания "
+                        f"{decision['review_at']}; требуется решение продакта")
             continue
         # The caller supplies eligible task ids after explicit holds. A task
         # status alone cannot say whether its product goal still owes work.
@@ -987,6 +1025,8 @@ def block(thread: str) -> str:
                if goal.get("pause") else "")
             + (f"  необходимое ожидание: {waiting['reason']} "
                f"[{waiting['src']}]\n" if waiting else "")
+            + (f"  перепроверить ожидание: {waiting['review_at']}\n"
+               if waiting and waiting.get("review_at") else "")
             + f"  ближайший разрыв: {goal.get('gap') or 'не назван'}\n"
             f"  следующий переход: {goal.get('next_transition') or 'не назван'}\n"
             + (f"  история исправлений: {history_caption(goal)}\n"
@@ -999,7 +1039,10 @@ def block(thread: str) -> str:
 запущен следующий безопасный шаг по названной задаче — или назван конкретный
 внешний блокер обычными словами. Необходимое ожидание независимо от письма
 записывается через `product_goal.py wait <id> --reason "что мешает полезному
-действию" --next "после чего и что сделать" --src "чем препятствие наблюдено"`.
+действию" --next "после чего и что сделать" --src "чем препятствие наблюдено"
+--review-at "дата и время ISO8601 с часовым поясом"`.
+Наступивший срок требует нового решения; продление задаётся новым review-at.
+Срок не снимает паузу и не разрешает запуск продукта или отправку письма.
 Поля gap и next_transition сами по себе ожидания не разрешают. Когда полезный
 шаг доступен, `resume` или `set` снимает прежнее ожидание у того же владельца.
 Записанное ожидание допускает SILENT без повторного письма.
@@ -1047,6 +1090,8 @@ def _print(goal: dict, as_json: bool) -> None:
     waiting = waiting_decision(goal)
     if waiting:
         print(f"  необходимое ожидание: {waiting['reason']} ({waiting['src']})")
+        if waiting.get("review_at"):
+            print(f"  перепроверить ожидание: {waiting['review_at']}")
     for item in goal.get("signals", []):
         print(f"  признак {item['code']}: {item.get('text', SIGNALS.get(item['code'], item['code']))} ({item['src']})")
     if goal.get("closed"):
@@ -1090,6 +1135,7 @@ def main() -> int:
     waiter.add_argument("--src", required=True)
     waiter.add_argument("--watch", action="append", default=None,
                         help="точный файл или каталог возврата; можно повторить")
+    waiter.add_argument("--review-at", help="перепроверить в ISO8601 с часовым поясом")
 
     signal = sub.add_parser("signal", help="записать признак отклонения")
     signal.add_argument("id")
@@ -1164,7 +1210,7 @@ def main() -> int:
             return 0
         if args.command == "wait":
             _print(wait(args.id, args.reason, args.next_transition, args.src,
-                        args.watch), False)
+                        args.watch, args.review_at), False)
             return 0
         if args.command == "signal":
             _print(add_signal(args.id, args.code, args.text, args.src), False)
