@@ -191,6 +191,8 @@ git config user.email "ai-pm@users.noreply.github.com"
 если проверка недоступна или устарела, список маркеров пуст либо в checkout
 настроено больше одного remote, публикация останавливается.
 
+Разделение разработки и боевых служб: [remote-development](docs/remote-development.md).
+
 ## Лицензия
 
 [MIT](LICENSE)
