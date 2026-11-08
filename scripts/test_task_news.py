@@ -4,6 +4,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
 import subprocess
 import sys
 from unittest import mock
@@ -75,10 +76,12 @@ def running(tmp_path, monkeypatch):
     return run, engine, report, root, state_path
 
 
-def launch(root, number=115, name="short", *, finish=True):
+def launch(root, number=115, name="short", *, finish=True, owner_turn=None, role="author", grants_write=True):
     path = root / "tasks" / f"{number}-work"
     task_runner.write_json(path / ".runner/runner.json", {
         "task_dir": str(path), "run_id": name, "runner": "codex", "workflow": "standard",
+        "owner_turn": owner_turn, "review_kind": "technical" if role == "reviewer" else None,
+        "review_admission": {"access_profile": {"role": role, "grants_write": grants_write}},
         "started_at": "2030-01-01T00:00:01Z", "child_started_at": "2030-01-01T00:00:02Z"})
     if finish:
         task_runner.finish_runner_meta(path, {"finished_at": "2030-01-01T00:00:05Z",
@@ -178,11 +181,14 @@ def test_held_and_failed_wakes_preserve_news(running, monkeypatch, failure):
 
 
 def test_new_short_action_is_observed_even_if_it_also_finishes_between_snapshots(running):
-    run, engine, _, root, _ = running
+    run, engine, _, root, state_path = running
     run()
     launch(root)
-    engine.side_effect = lambda *a, **kw: (launch(root, name="rework") and
-                                          subprocess.CompletedProcess([], 0, "SILENT", ""))
+    def answer(*a, **kw):
+        launch(root, name="rework", owner_turn=kw["env"]["TASK_AGENT_OWNER_TURN"])
+        record_action(state_path, kw["env"])
+        return subprocess.CompletedProcess([], 0, "SILENT", "")
+    engine.side_effect = answer
     code, state = run()
     assert code == 0 and state["task_news"]["handled"][0]["outcome"]["kind"] == "run_started"
     # Only the original event was acknowledged. The action's end is fresh news.
@@ -251,3 +257,88 @@ def test_replaced_finished_run_still_reaches_product_without_live_edge(running):
     assert run()[0] == 1
     value = engine.call_args.kwargs["input"]
     assert "task:115:runs:first" in value and "task:115:runs:second" in value
+
+
+def record_action(state_path, environment, *, run_id="rework", action="author"):
+    state = json.loads(state_path.read_text())
+    for row in state["task_news"]["tasks"]["115"]["events"]:
+        with mock.patch.dict(os.environ, environment), mock.patch.object(sys, "argv", [
+            "task_news.py", "alpha", "--event", task_news.event_key("115", row),
+            "--kind", "run_started", "--run-id", run_id, "--action", action,
+            "--reason", "Required event follow-up launched"]):
+            assert task_news.main() == 0
+
+
+@pytest.mark.parametrize("proxy", ["no_receipt", "foreign_actor", "read_only_diagnostic", "wrong_run", "review_instead_of_rework"])
+def test_unrelated_same_task_run_plus_silent_cannot_consume_rework(running, proxy):
+    run, engine, _, root, state_path = running
+    run()
+    review_admission.record_review_round(root / "tasks/115-work", event_id="review-r1",
+                                        decision={"decision": "rework", "findings": ["fix"]})
+    def answer(*args, **kw):
+        launch(root, name="rework", owner_turn=("f" * 32 if proxy in {"foreign_actor", "no_receipt"} else kw["env"]["TASK_AGENT_OWNER_TURN"]),
+               role="reviewer" if proxy == "review_instead_of_rework" else "author",
+               grants_write=proxy != "read_only_diagnostic")
+        if proxy != "no_receipt":
+            record_action(state_path, kw["env"], run_id="invented" if proxy == "wrong_run" else "rework",
+                          action="reviewer" if proxy == "review_instead_of_rework" else "author")
+        return subprocess.CompletedProcess([], 0, "SILENT", "")
+    engine.side_effect = answer
+    code, state = run()
+    assert code == 1
+    assert state["task_news"]["post_check"]["unresolved"] == ["task:115:reviews:review-r1"]
+    assert not state["task_news"]["tasks"]["115"]["cursor"].get("reviews", {}).get("offset")
+    assert not state["task_news"]["handled"]
+
+
+def test_receipted_short_followup_rework_is_checked_against_retained_launch(running):
+    run, engine, _, root, state_path = running
+    run()
+    review_admission.record_review_round(root / "tasks/115-work", event_id="review-r1",
+                                        decision={"decision": "rework", "findings": ["fix"]})
+    def answer(*args, **kw):
+        launch(root, name="rework", owner_turn=kw["env"]["TASK_AGENT_OWNER_TURN"])
+        record_action(state_path, kw["env"])
+        launch(root, name="external-successor", owner_turn="f" * 32)  # short action already replaced
+        return subprocess.CompletedProcess([], 0, "SILENT", "")
+    engine.side_effect = answer
+    code, state = run()
+    assert code == 0
+    assert state["task_news"]["handled"][0]["outcome"]["run_id"] == "rework"
+    assert state["task_news"]["tasks"]["115"]["cursor"]["reviews"]["offset"] > 0
+    engine.side_effect = None
+    assert run()[0] == 1  # follow-up ends, not the old review, are new news
+    assert "task:115:reviews:review-r1" not in engine.call_args.kwargs["input"]
+
+
+def test_old_watcher_terminal_reaches_real_owner_input_then_quiet_repeat(running):
+    run, engine, _, root, state_path = running
+    run()
+    path = launch(root, finish=False)
+    meta_path = path / '.runner/runner.json'
+    meta = json.loads(meta_path.read_text())
+    meta.update(finished_at='2030-01-01T00:00:05Z', outcome='completed')
+    meta_path.write_text(json.dumps(meta))  # running pre-installation writer
+    assert not (path / '.runner/terminal-runs.jsonl').exists()
+    assert run()[0] == 1  # bare SILENT retains event
+    assert str(meta_path) in engine.call_args.kwargs['input']
+    engine.side_effect = lambda *a, **kw: (record_outcome(state_path) or
+                                          subprocess.CompletedProcess([], 0, 'SILENT', ''))
+    assert run()[0] == 0
+    before = engine.call_count
+    assert run()[0] == 0 and engine.call_count == before
+
+
+def test_normal_review_followup_receipt_matches_admitted_reviewer(running):
+    run, engine, _, root, state_path = running
+    run()
+    launch(root)
+    def answer(*args, **kw):
+        launch(root, name='review-next', owner_turn=kw['env']['TASK_AGENT_OWNER_TURN'],
+               role='reviewer', grants_write=False)
+        record_action(state_path, kw['env'], run_id='review-next', action='reviewer')
+        return subprocess.CompletedProcess([], 0, 'SILENT', '')
+    engine.side_effect = answer
+    code, state = run()
+    assert code == 0
+    assert state['task_news']['handled'][0]['outcome']['action'] == 'reviewer'

@@ -1278,7 +1278,13 @@ PID само по себе ожидание не отменяет. Новый и
 владельцу. Правила чтения и записи — в загруженном AGENTS.
 Новый сохранённый исход задачи требует действия по этой задаче: запусти разрешённую
 доработку/проверку, проведи живую приёмку либо проверь и запиши препятствие.
-Прогон с новой личностью проверяется наблюдателем. Для приёмки или препятствия:
+После штатного запуска запиши его связь с каждым обработанным событием:
+python3 scripts/task_news.py {report.get('thread', '')} --event '<event_id из события>'
+  --kind run_started --run-id '<run_id запущенного прогона>' --action author|reviewer
+  --reason '<какое требуемое продолжение запущено>'.
+Запуск наследует TASK_AGENT_OWNER_TURN этого хода; не убирай эту переменную.
+Наблюдатель сверяет личность, роль и начало прогона. Чужой/диагностический прогон
+или один новый PID исходом не считаются. Для приёмки или препятствия:
 python3 scripts/task_news.py {report.get('thread', '')} --event '<event_id из события>'
   --kind acceptance|impediment --reason '<что проверено>' --source '<файл доказательства>'
   --next '<проверяемое условие возврата для препятствия>'.
@@ -1520,7 +1526,7 @@ def main() -> int:
     with outbound.Ledger() as ledger:
         said = outbound.already_said(ledger.thread(args.thread))
 
-    environment = {**os.environ, "IS_SANDBOX": "1"}
+    environment = {**os.environ, "IS_SANDBOX": "1", "TASK_AGENT_OWNER_TURN": news["turn_id"]}
     try:
         model_input = prompt(report, events, reasons, said,
                              startup_context.render(startup_context.packet((args.thread, report))))
