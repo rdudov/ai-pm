@@ -224,6 +224,8 @@ def build(name: str) -> dict:
         "needs_attention": attention[:ATTENTION],
         "repos": [repo_projection(repo) for repo in thread["repos"]],
         "task_count": thread["task_count"],
+        "task_catalog": [{"id": task["id"], "path": f"tasks/{task['dir']}"}
+                         for task in thread["tasks"]],
         # Work with nothing holding it, so a wake-up can answer «что подхватить»
         # from the same observation the board answers it from, rather than by
         # reading the whole list again.

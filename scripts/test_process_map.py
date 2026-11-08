@@ -3401,6 +3401,20 @@ class OneObserver(unittest.TestCase):
         self.assertIn("import process_map_state as observer", source)
         self.assertIn("observer.build(False, only=name)", source)
 
+    def test_task_fact_membership_is_not_the_capped_attention_list(self):
+        tasks = [a_task(id=n, dir=f"{n}-task", status="blocked", board={"area": "stuck"})
+                 for n in range(101, 116)]
+        observed = {"threads": [{"title": "Alpha", "products": [], "tasks": tasks,
+                                "repos": [], "task_count": len(tasks)}], "owners_awake": []}
+        with (mock.patch.object(thread, "load_thread", return_value={"repos": []}),
+              mock.patch.object(thread.observer, "build", return_value=observed),
+              mock.patch.object(thread, "process_inventory", return_value=[]),
+              mock.patch.object(thread.observer, "write_owner_observations")):
+            report = thread.build("alpha")
+        self.assertEqual(len(report["needs_attention"]), 12)
+        self.assertEqual([row["id"] for row in report["task_catalog"]], list(range(101, 116)))
+        self.assertEqual(report["task_catalog"][-1]["path"], "tasks/115-task")
+
     def test_there_is_no_second_answer_to_whether_a_process_is_alive(self):
         # `os.kill(pid, 0)` answers «some process holds this number», and PIDs
         # are reused: after a wrap an unrelated process counted as a live run.

@@ -78,6 +78,7 @@ import plain_russian  # noqa: E402
 import product_memory  # noqa: E402
 import process_map_recorder  # noqa: E402
 import startup_context  # noqa: E402
+import task_news  # noqa: E402
 import runner_contract  # noqa: E402
 from process_map_schema import run_entrypoint  # noqa: E402
 from process_map_state import RUNNER_SCRIPTS, TERMINAL, _file_sha256, tunable  # noqa: E402
@@ -839,7 +840,7 @@ def persist_composer_failure(state_path: Path, state: dict,
     if isinstance(state.get("check"), dict):
         state["check"]["outcome"] = "составитель вернул ответ без допустимого конверта"
         state["check"]["outcome_src"] = f"composer_failure; {state_path}"
-    state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2))
+    task_news.save(state_path, state)
     with outbound.Ledger() as ledger:
         ledger.record({"at": state.get("updated_at"),
                        "thread": state.get("thread"),
@@ -870,7 +871,7 @@ def persist_wake_failure(state_path: Path, state: dict, reason: str,
                              "src": str(state_path)}
     state["check"]["outcome"] = "пробуждение не состоялось: " + reason
     state["check"]["outcome_src"] = f"wake_failure; {state_path}"
-    state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2))
+    task_news.save(state_path, state)
 
 
 def deliver(thread: str, kind: str, subject: str, body: str, moment: datetime,
@@ -1275,6 +1276,18 @@ PID само по себе ожидание не отменяет. Новый и
 адресной проверки. Независимая доступная работа требует запуска или конкретного
 препятствия. При работе в общем дереве уступай только наблюдаемо работающему
 владельцу. Правила чтения и записи — в загруженном AGENTS.
+Новый сохранённый исход задачи требует действия по этой задаче: запусти разрешённую
+доработку/проверку, проведи живую приёмку либо проверь и запиши препятствие.
+Прогон с новой личностью проверяется наблюдателем. Для приёмки или препятствия:
+python3 scripts/task_news.py {report.get('thread', '')} --event '<event_id из события>'
+  --kind acceptance|impediment --reason '<что проверено>' --source '<файл доказательства>'
+  --next '<проверяемое условие возврата для препятствия>'.
+Источник сначала прочитай адресно. Команда сохраняет его SHA256 в прежнем состоянии
+направления. Запиши исход каждого события; один проверенный исход может относиться
+к нескольким событиям. Письмо и голый SILENT обработку не подтверждают.
+Соблюдай паузы, план, бюджет, последний круг и одного пишущего владельца;
+новость не разрешает запуск продукта на паузе. SILENT выбирает отсутствие письма
+после действия или записанного исхода.
 Верни SILENT или одно сообщение по контракту:
 {verdict_block(mail_detail=not bounded)}
 """
@@ -1298,8 +1311,9 @@ def main() -> int:
     if state_path.is_file():
         try:
             stored = json.loads(state_path.read_text())
-        except (json.JSONDecodeError, OSError):
-            stored = {}
+        except (json.JSONDecodeError, OSError) as error:
+            print(f"[{args.thread}] состояние направления не читается: {error}", file=sys.stderr)
+            return 1
     moment = datetime.now(timezone.utc)
     now = moment.isoformat()
 
@@ -1337,6 +1351,8 @@ def main() -> int:
     long_lived_processes = persisted_process_inventory(report, stored)
 
     events = transitions(previous, current) if previous else ["первый запуск треда"]
+    news = task_news.observe(report, stored.get("task_news", {}))
+    events += task_news.events(news)
     if (current.get("daily_failure")
             and current["daily_failure"] != previous.get("daily_failure")):
         events.append("Оперативка не собрана или не доставлена: " + daily_failure)
@@ -1387,6 +1403,7 @@ def main() -> int:
         """The direction's state file, in the one shape the board reads."""
         return {
             "thread": args.thread, "updated_at": now, "snapshot": current,
+            "task_news": news,
             **({"wake_failure": stored["wake_failure"]} if stored.get("wake_failure") else {}),
             "long_lived_processes": long_lived_processes,
             "long_lived_processes_observation": process_observation(report),
@@ -1461,7 +1478,7 @@ def main() -> int:
                          ensure_ascii=False, indent=2))
         return verdict
 
-    state_path.write_text(json.dumps(record(None, not woke), ensure_ascii=False, indent=2))
+    task_news.save(state_path, record(None, not woke))
 
     # Письмо об актуальной зарегистрированной инструкции внешнему исполнителю.
     # Здесь, а не внутри разбуженного продакта: дверь наблюдает файл, последний
@@ -1490,7 +1507,7 @@ def main() -> int:
         if mail:
             final = record(None, True)
             final["mail"] = mail
-            state_path.write_text(json.dumps(final, ensure_ascii=False, indent=2))
+            task_news.save(state_path, final)
         return verdict
 
     # Same trust level as the user's own full session: the directories this
@@ -1543,11 +1560,14 @@ def main() -> int:
 
     # What the wake-up came to, observed rather than believed: the same
     # projection taken again, and the difference in live runs is the answer.
+    recorded = json.loads(state_path.read_text()).get("task_news", {}).get("outcomes", {})
     try:
-        after = snapshot(build(args.thread), current)
+        after_report = build(args.thread)
+        after = snapshot(after_report, current)
     except Exception:
+        after_report = {}
         after = None
-    state_path.write_text(json.dumps(record(after, True), ensure_ascii=False, indent=2))
+    task_news.save(state_path, record(after, True))
 
     # Обязательный исход пробуждения по стоячей цели, проверенный наблюдением, а
     # не обещанный промптом: живой прогон по её задаче или названный блокер
@@ -1555,6 +1575,21 @@ def main() -> int:
     # а post_check перечитывает записанную причину ожидания после хода.
     goal_check = goal_session.post_check(
         args.thread, goals["objects"], (after or {}).get("live", []), message_body, moment)
+
+    # Reread explicit checked outcomes written during this actual owner turn.
+    # Cursor commitment is per task, so one idle task cannot eat another's news.
+    news_check = task_news.check(
+        news, task_news.observe(after_report, {"initialized": True,
+                                              "tasks": news["tasks"]}), recorded)
+    if not news_check["resolved"]:
+        final = record(after, True)
+        final["check"]["outcome"] = "сохранённый исход задачи не обработан: нет действия или проверенного препятствия"
+        final["goal_post_check"] = goal_check
+        task_news.save(state_path, final)
+        print(f"[{args.thread}] {final['check']['outcome']}", file=sys.stderr)
+        return 1
+
+    task_news.save(state_path, record(after, True))
 
     if composed:
         mail.append(deliver(
@@ -1581,7 +1616,7 @@ def main() -> int:
         final = record(after, True)
         final["mail"] = mail
         final["goal_post_check"] = goal_check
-        state_path.write_text(json.dumps(final, ensure_ascii=False, indent=2))
+        task_news.save(state_path, final)
     print(message)
     # A wake-up that left a standing goal without either outcome is a failure of
     # this mechanism, not a quiet result: the exit code is the one signal that
