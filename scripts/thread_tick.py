@@ -881,8 +881,11 @@ def deliver(thread: str, kind: str, subject: str, body: str, moment: datetime,
             names_instructions: list[dict] | None = None,
             event_id: str | None = None,
             event_aliases: list[str] | None = None,
-            selected_by: str = "delivery_door") -> dict:
+            selected_by: str = "delivery_door",
+            daily_edition: dict | None = None) -> dict:
     """Send one already-routed Gmail message and receipt its exact event."""
+    if daily_edition is not None and kind != "daily":
+        raise ValueError("Only daily delivery can persist a daily edition")
     if (kind == "reply") != bool(reply_to_message_id):
         raise ValueError("kind='reply' and reply_to_message_id must be supplied together")
     if event_id is None:
@@ -917,6 +920,12 @@ def deliver(thread: str, kind: str, subject: str, body: str, moment: datetime,
             digest = _file_sha256(Path(path))
             if digest is not None:
                 attachment_aliases.append(outbound.attachment_event_id(digest))
+        if action == "send" and daily_edition is not None:
+            prior = [x for x in entry.get("letters", []) if x.get("kind") == "daily"]
+            prior_id = prior[-1]["event_id"] if prior else None
+            if daily_edition.get("previous_event_id") != prior_id:
+                action = "fail"
+                reason = "Предыдущая оперативка изменилась во время составления; повторить сборку"
         if action == "send":
             mail_options = {"reply_to_message_id": reply_to_message_id,
                             "attachments": attachments}
@@ -931,7 +940,7 @@ def deliver(thread: str, kind: str, subject: str, body: str, moment: datetime,
             else:
                 outbound.remember_delivery(
                     entry, event_id=event_id, subject=subject, body=body,
-                    kind=kind, now=moment, message_id=message_id)
+                    kind=kind, now=moment, message_id=message_id, daily_edition=daily_edition)
                 outbound.remember_event_aliases(
                     entry, [alias for alias in (event_aliases or []) + attachment_aliases
                             if alias != event_id],
@@ -946,6 +955,8 @@ def deliver(thread: str, kind: str, subject: str, body: str, moment: datetime,
                   "reply_to_message_id": reply_to_message_id,
                   "decision_owner": selected_by,
                   "composer_selected": selected_by == "composer"}
+        if daily_edition is not None and action == "send":
+            record["daily_edition"] = entry["daily_editions"][-1]
         if event_aliases:
             record["event_aliases"] = event_aliases
         if attachment_aliases:

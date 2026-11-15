@@ -17,13 +17,13 @@ import thread_tick
 
 
 SAMPLE = {
-    "intro": "Доброе утро. Сегодня есть четыре ясных фокуса.",
-    "plans": [{"product": "Companion", "today": "Закончить выравнивание",
-               "state": "идёт", "blocker": "нет"}],
-    "questions": [{"question": "Удалять архив?", "recommendation": "Пока нет",
-                   "tradeoff": "место против обратимости"}],
-    "initiatives": [{"idea": "Показать первый результат", "effect": "быстрее понять пользу",
-                     "first_step": "одна живая проба"}],
+    "intro": "Доброе утро. Продолжаю прежний план.", "outcomes": [],
+    "plans": [{"product": "Companion", "action": "Закончить выравнивание.",
+               "result": "Один понятный отчёт.", "deadline": "Сегодня к 12:00 МСК"}],
+    "extras": ["Получено дополнительное заключение."], "removed": [],
+    "waiting": "Ждём внешнее событие.",
+    "questions": [{"question": "Удалять архив?", "recommendation": "Сохранить копию.",
+                   "tradeoff": "Место против обратимости."}],
 }
 
 
@@ -50,8 +50,8 @@ class DailyStandupRendering(unittest.TestCase):
         plain = daily.render_plain(SAMPLE)
         html = daily.render_html(SAMPLE)
         self.assertIn("Companion", plain)
-        self.assertIn("<table>", html)
-        self.assertIn('data-label="Продукт">Companion</td>', html)
+        self.assertEqual(html.count("<h2>"), 6)
+        self.assertIn("Companion", html)
         self.assertNotIn("ПОВОД:", plain + html)
         self.assertNotIn("ВОПРОС:", plain + html)
         self.assertNotIn("мешает: нет", plain)
@@ -65,36 +65,16 @@ class DailyStandupRendering(unittest.TestCase):
         «Первый шаг: … ..». Наблюдение — `live-evidence/round8-standup`
         задачи 1260.
         """
-        composed = {
-            "intro": "Сегодня форсируем готовность торгового приложения.",
-            "plans": [{"product": "Продукт А",
-                       "today": "Повторим проверку приложения с настоящим брокер API.",
-                       "state": "Первая торговля ждёт проверки API.",
-                       "blocker": "брокер дважды вернул ошибку 503"},
-                      {"product": "Companion",
-                       "today": "Не меняем продукт",
-                       "state": "Направление стоит на пользовательской паузе.",
-                       "blocker": "нет"}],
-            "questions": [],
-            "initiatives": [{"idea": "Собрать карточку допуска первой сделки.",
-                             "effect": "Пользователь увидит риск одним экраном.",
-                             "first_step": "Свести результаты проверки API."}],
-        }
-        plain = daily.render_plain(composed)
+        plain = daily.render_plain(SAMPLE)
         for doubled in ("..", ".;", ",;", ".,", "?.", "!."):
-            with self.subTest(doubled=doubled):
-                self.assertNotIn(doubled, plain)
-        # Знак не пропал там, где модель его не поставила.
-        self.assertIn("Не меняем продукт — Направление стоит на пользовательской паузе.",
-                      plain)
-        self.assertIn("мешает: брокер дважды вернул ошибку 503.", plain)
+            self.assertNotIn(doubled, plain)
 
     def test_mobile_scale_is_explicit_and_headings_are_bounded(self):
         html = daily.render_html(SAMPLE)
         self.assertIn('name=viewport content="width=device-width, initial-scale=1"', html)
         self.assertIn("h1{font-size:24px", html)
         self.assertIn("@media(max-width:520px)", html)
-        self.assertIn("content:attr(data-label)", html)
+        self.assertIn("overflow-wrap:anywhere", html)
 
     def test_raw_message_contains_both_alternatives(self):
         raw = daily.raw_message("user@example.test", "Оперативка", "plain", "<b>html</b>")
@@ -186,7 +166,7 @@ class DailyStandupRendering(unittest.TestCase):
                 self.assertEqual(daily.maybe_send(at)["action"], "send")
             plain = deliver.call_args.args[3]
             self.assertIn(reason, plain)
-            self.assertIn("Пробуждение не состоялось", plain)
+            self.assertIn("восстановить фоновую проверку", plain)
             message = BytesParser(policy=policy.default).parsebytes(deliver.call_args.kwargs["raw_message"])
             html = message.get_body(preferencelist=("html",)).get_content()
             self.assertIn(reason, html)
@@ -241,6 +221,137 @@ class DailyStandupRendering(unittest.TestCase):
         deliver.assert_called_once()
         self.assertIn("Оперативка не собрана", deliver.call_args.args[3])
         self.assertIn("модель не вызвана", deliver.call_args.args[3])
+
+
+class PlanContinuity(unittest.TestCase):
+    def setUp(self):
+        import copy
+        self.copy = copy.deepcopy
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.home = Path(temporary.name)
+        self.at = datetime(2026, 11, 15, 10, tzinfo=timezone.utc)
+        for patch in [mock.patch.object(outbound, 'LEDGER', self.home / 'outbound.json'),
+                      mock.patch.object(thread_tick, 'MAIL_TO', 'user@example.test'),
+                      mock.patch.object(thread_tick, 'MAIL_SCRIPT', Path(__file__)),
+                      mock.patch.object(thread_tick, 'MAIL_PYTHON', Path(__file__)),
+                      mock.patch.object(daily, 'source_packet', side_effect=lambda *args:
+                          {'plan': 'work', 'snapshots': {}, 'threads': {}})]:
+            self.enterContext(patch)
+        self.mail = self.enterContext(mock.patch.object(thread_tick, 'send_mail', return_value='gmail-test'))
+
+    def edition(self):
+        with outbound.Ledger() as ledger:
+            return self.copy(ledger.thread('portfolio').get('daily_editions', []))
+
+    def compose(self, packet, date):
+        value = self.copy(SAMPLE)
+        old = packet.get('previous_editions', [])
+        value['plans'][0]['action'] = 'Подготовить итог ' + date + str(len(old))
+        value['outcomes'] = [{'id': x['id'], 'status': 'частично', 'detail': 'Получена опись файлов.'}
+                             for x in (old[-1]['plans'] if old else [])]
+        return value
+
+    def send(self, at=None, **kwargs):
+        with mock.patch.object(daily, 'compose', side_effect=self.compose):
+            return daily.maybe_send(at or self.at, **kwargs)
+
+    def test_day_correction_next_day_keep_full_chain_and_drop_changes_nothing(self):
+        from datetime import timedelta
+        self.assertEqual(self.send()['action'], 'send')
+        first = self.edition()[-1]
+        self.assertIn('Цена вариантов', first['body'])
+        self.assertIn('<html', first['html'])
+        self.assertEqual(self.send(force=True)['action'], 'send')
+        second = self.edition()[-1]
+        self.assertEqual(second['previous_event_id'], first['event_id'])
+        self.assertEqual(second['composition']['outcomes'][0]['id'], first['plans'][0]['id'])
+        before = self.edition()
+        self.assertEqual(self.send(force=True)['action'], 'skip')
+        self.assertEqual(self.edition(), before)
+        self.assertEqual(self.send(self.at + timedelta(days=1))['action'], 'send')
+        third = self.edition()[-1]
+        self.assertEqual(third['previous_event_id'], second['event_id'])
+        self.assertEqual(len(self.edition()), 2)
+        self.assertIn('daily_edition', (self.home / 'outbound-journal.jsonl').read_text())
+
+    def test_missing_duplicate_unknown_and_repeated_plan_refuse(self):
+        self.send()
+        old = self.edition()
+        valid = self.compose({'previous_editions': old}, 'tomorrow')
+        for outcomes in ([], valid['outcomes'] * 2, [{**valid['outcomes'][0], 'id': 'unknown'}]):
+            value = {**valid, 'outcomes': outcomes}
+            with self.subTest(outcomes=outcomes), self.assertRaises(ValueError):
+                daily.parse_composition(__import__('json').dumps(value), old)
+        repeated = {**valid, 'plans': self.copy(old[-1]['plans'])}
+        repeated['plans'][0]['deadline'] = 'Следующая неделя'
+        with self.assertRaisesRegex(ValueError, 'Повтор плана'):
+            daily.validate_composition(repeated, old)
+
+    def test_all_statuses_transfer_fields_and_removed_reason(self):
+        self.send()
+        old = self.edition()
+        value = self.compose({'previous_editions': old}, 'tomorrow')
+        for status in ('получилось', 'частично', 'перенесено', 'снято'):
+            row = value['outcomes'][0]
+            row.update(status=status, deadline='16 ноября 12:00 МСК', approach='Получить данные с другого сервера')
+            value['removed'] = ['Снята старая проверка: источник закрыт.'] if status == 'снято' else []
+            self.assertEqual(daily.parse_composition(__import__('json').dumps(value), old), value)
+        value['outcomes'][0].update(status='перенесено', approach='')
+        with self.assertRaises(ValueError):
+            daily.validate_composition(value, old)
+
+    def test_compose_parse_and_mail_failures_preserve_previous_success(self):
+        self.send()
+        before = self.edition()
+        for failure in (ValueError('invalid parse'), RuntimeError('engine failed')):
+            with mock.patch.object(daily, 'compose', side_effect=failure):
+                self.assertEqual(daily.maybe_send(self.at, force=True)['action'], 'fail')
+            self.assertEqual(before, self.edition())
+        with mock.patch.object(thread_tick, 'send_mail', return_value=False):
+            self.assertEqual(self.send(force=True)['action'], 'fail')
+        self.assertEqual(before, self.edition())
+        self.assertEqual(self.send(force=True)['action'], 'send')
+        self.assertEqual(len(self.edition()), 2)
+
+    def test_old_format_requires_bound_extraction_and_survives_retry(self):
+        import json
+        thread_tick.deliver('portfolio', 'daily', 'Old', 'Full original plan', self.at, event_id='legacy')
+        self.assertEqual(self.send(force=True)['action'], 'fail')
+        self.assertEqual(self.edition(), [])
+        body = self.home / 'body.txt'; body.write_text('Full original plan')
+        extraction = {'source_message_id': 'gmail-test', 'source_path': str(body),
+                      'items': [{'id': 'legacy-1', 'product': 'Demo', 'action': 'Read sources',
+                                 'source_text': 'Full original plan'}]}
+        path = self.home / 'legacy.json'; path.write_text(json.dumps(extraction))
+        with mock.patch.object(thread_tick, 'send_mail', return_value=False):
+            self.assertEqual(self.send(force=True, legacy_path=path)['action'], 'fail')
+        self.assertEqual(self.edition(), [])
+        self.assertEqual(self.send(force=True, legacy_path=path)['action'], 'send')
+        self.assertEqual(self.edition()[-1]['composition']['outcomes'][0]['id'], 'legacy-1')
+        self.assertEqual(self.send(force=True)['action'], 'skip')
+
+    def test_stale_composition_is_refused_under_delivery_lock(self):
+        self.send()
+        count = self.mail.call_count
+        result = thread_tick.deliver('portfolio', 'daily', 'Stale', 'Stale', self.at,
+                 event_id='other', daily_edition={'previous_event_id': None})
+        self.assertEqual(result['action'], 'fail')
+        self.assertEqual(self.mail.call_count, count)
+
+    def test_empty_sections_waiting_questions_and_escaping(self):
+        value = {**self.copy(SAMPLE), 'plans': [], 'outcomes': [], 'extras': [], 'removed': [], 'waiting': ''}
+        self.assertEqual(daily.render_html(value).count('<h2>'), 6)
+        self.assertEqual(daily.render_plain(value).count('\nНет.'), 5)
+        for key in ('recommendation', 'tradeoff'):
+            broken = self.copy(value); broken['questions'][0][key] = ''
+            with self.assertRaises(ValueError):
+                daily.parse_composition(__import__('json').dumps(broken))
+        value['waiting'] = '<Все внешние события>'
+        self.assertIn('&lt;Все внешние события&gt;', daily.render_html(value))
+        value['intro'] = 'Пока не проверено'
+        with self.assertRaises(ValueError):
+            daily.validate_composition(value, [])
 
 
 if __name__ == "__main__":

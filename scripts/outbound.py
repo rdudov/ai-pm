@@ -48,8 +48,13 @@ def event_delivered_anywhere(data: dict, event_id: str) -> bool:
 
 
 def remember_delivery(entry: dict, *, event_id: str, subject: str, body: str,
-                      kind: str, now: datetime, message_id: str | None) -> None:
+                      kind: str, now: datetime, message_id: str | None,
+                      daily_edition: dict | None = None) -> None:
     """Record a successful send; failed attempts never make an event delivered."""
+    if daily_edition is not None:
+        edition = {**daily_edition, "at": now.isoformat(), "event_id": event_id,
+                   "message_id": message_id}
+        entry["daily_editions"] = (entry.get("daily_editions", []) + [edition])[-2:]
     entry.setdefault("letters", []).append({
         "at": now.isoformat(), "event_id": event_id, "subject": subject,
         "kind": kind, "excerpt": body.strip()[:400], "message_id": message_id,

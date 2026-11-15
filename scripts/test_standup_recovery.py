@@ -18,8 +18,18 @@ import startup_context as startup
 import thread_tick as tick
 
 AT = datetime(2026, 8, 24, 8, tzinfo=timezone.utc)
-DATA = {"intro": "Планы дня", "plans": [{"product": "Demo", "today": "Continue",
-        "state": "Ready", "blocker": ""}], "questions": [], "initiatives": []}
+DATA = {"intro": "Планы дня", "plans": [{"product": "Demo", "action": "Continue",
+        "result": "Ready", "deadline": "Today"}], "questions": [], "outcomes": [],
+        "extras": [], "removed": [], "waiting": ""}
+
+
+def composition(packet, local_date):
+    value = copy.deepcopy(DATA)
+    value["plans"][0]["action"] += local_date + str(len(packet.get("previous_editions", [])))
+    previous = packet.get("previous_editions", [])
+    value["outcomes"] = [{"id": x["id"], "status": "получилось", "detail": "Получено заключение"}
+                         for x in (previous[-1]["plans"] if previous else [])]
+    return value
 
 
 def expanded(value):
@@ -95,13 +105,20 @@ class DailyRecovery(unittest.TestCase):
                    mock.patch.object(startup, "packet", return_value={}),
                    mock.patch.object(daily, "source_packet", return_value={"plan": "Continue"}),
                    mock.patch.object(daily, "wake_health", return_value=[]),
-                   mock.patch.object(daily, "compose", side_effect=lambda *args: copy.deepcopy(DATA))]
+                   mock.patch.object(daily, "compose", side_effect=composition)]
         for patch in patches:
             self.enterContext(patch)
         self.mail = self.enterContext(mock.patch.object(tick, "send_mail", return_value="mail-test"))
         self.engine = self.enterContext(mock.patch.object(tick.subprocess, "run", return_value=
             subprocess.CompletedProcess([], 0, "SILENT", "")))
         (self.state / "process.json").write_text(json.dumps({"snapshot": tick.snapshot(self.report)}))
+
+    def legacy(self):
+        body = self.home / "old.txt"
+        body.write_text("Plans unavailable")
+        path = self.home / "legacy.json"
+        path.write_text(json.dumps({"source_message_id": "mail-test", "source_path": str(body), "items": []}))
+        return path
 
     def process(self, at):
         with mock.patch.object(tick, "datetime", wraps=datetime) as clock, \
@@ -164,7 +181,7 @@ class DailyRecovery(unittest.TestCase):
                      event_id=f"daily:{AT.date().isoformat()}")
         with mock.patch.object(daily, "source_packet", side_effect=startup.InputLimitError("too large")), \
                 mock.patch.object(daily, "datetime", wraps=datetime) as clock, \
-                mock.patch.object(sys, "argv", ["daily_standup.py", "--force"]), \
+                mock.patch.object(sys, "argv", ["daily_standup.py", "--force", "--previous-plan", str(self.legacy())]), \
                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             clock.now.return_value = AT
             self.assertEqual(daily.main(), 1)
@@ -175,7 +192,7 @@ class DailyRecovery(unittest.TestCase):
         self.assertEqual(state["daily_standup"]["stage"], "sources")
         self.process(AT + timedelta(minutes=40))
         self.assertEqual(self.engine.call_count, 1)
-        self.assertEqual(daily.maybe_send(AT + timedelta(hours=1), force=True)["action"], "send")
+        self.assertEqual(daily.maybe_send(AT + timedelta(hours=1), force=True, legacy_path=self.legacy())["action"], "send")
         code, state = self.process(AT + timedelta(hours=2))
         self.assertEqual(code, 0)
         self.assertIsNone(state["snapshot"]["daily_failure"])
@@ -205,10 +222,10 @@ class DailyRecovery(unittest.TestCase):
         tick.deliver("portfolio", "daily", "Old refusal", "Plans unavailable", AT,
                      event_id=f"daily:{AT.date().isoformat()}")
         self.assertEqual(daily.maybe_send(AT)["action"], "skip")
-        repaired = daily.maybe_send(AT, force=True)
+        repaired = daily.maybe_send(AT, force=True, legacy_path=self.legacy())
         self.assertEqual(repaired["action"], "send")
         self.assertTrue(repaired["event_id"].endswith(":correction"))
-        self.assertEqual(daily.maybe_send(AT, force=True)["action"], "skip")
+        self.assertEqual(daily.maybe_send(AT, force=True, legacy_path=self.legacy())["action"], "skip")
         self.assertEqual(daily.maybe_send(AT)["action"], "skip")
         self.assertEqual(self.mail.call_count, 2)
 
@@ -216,9 +233,9 @@ class DailyRecovery(unittest.TestCase):
         tick.deliver("portfolio", "daily", "Old refusal", "Plans unavailable", AT,
                      event_id=f"daily:{AT.date().isoformat()}")
         with mock.patch.object(daily, "compose", side_effect=ValueError("bad JSON")):
-            self.assertEqual(daily.maybe_send(AT, force=True)["action"], "fail")
-        self.assertEqual(daily.maybe_send(AT, force=True)["action"], "send")
-        self.assertEqual(daily.maybe_send(AT, force=True)["action"], "skip")
+            self.assertEqual(daily.maybe_send(AT, force=True, legacy_path=self.legacy())["action"], "fail")
+        self.assertEqual(daily.maybe_send(AT, force=True, legacy_path=self.legacy())["action"], "send")
+        self.assertEqual(daily.maybe_send(AT, force=True, legacy_path=self.legacy())["action"], "skip")
 
 
 if __name__ == "__main__":

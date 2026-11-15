@@ -78,33 +78,103 @@ def mechanically_empty(packet: dict) -> bool:
         for report in packet["threads"].values()))
 
 
+def previous_editions(legacy_path: Path | None = None) -> list[dict]:
+    """Read bounded successful editions; migration is explicit, never prose parsing."""
+    with outbound.Ledger() as ledger:
+        entry = ledger.thread("portfolio")
+        editions = entry.get("daily_editions", [])
+        letters = [x for x in entry.get("letters", []) if x.get("kind") == "daily"]
+    if not letters:
+        if entry.get("delivered_events") and any(x.get("kind") == "daily" for x in entry["delivered_events"].values()):
+            raise ValueError("Последнее письмо отсутствует в ограниченном журнале квитанций")
+        return []
+    latest = letters[-1]
+    if editions and editions[-1]["event_id"] == latest["event_id"]:
+        return editions
+    if legacy_path is None:
+        raise ValueError("Последний выпуск старого формата требует --previous-plan с полным письмом и разбором плана")
+    extraction = json.loads(legacy_path.read_text(encoding="utf-8"))
+    if extraction.get("source_message_id") != latest.get("message_id"):
+        raise ValueError("Разбор старого плана относится к другому выпуску")
+    body = Path(extraction["source_path"]).read_text(encoding="utf-8")
+    plans = extraction.get("items")
+    if not body.strip() or not isinstance(plans, list) or not all(
+            isinstance(row, dict) and all(isinstance(row.get(k), str) and row[k].strip()
+                                         for k in ("id", "product", "action", "source_text"))
+            and row["source_text"] in body for row in plans):
+        raise ValueError("Нужен сохранённый разбор с точными строками полного письма")
+    if len({row["id"] for row in plans}) != len(plans):
+        raise ValueError("Повторный id прежнего плана")
+    if not body.strip().startswith(latest.get("excerpt", "")):
+        raise ValueError("Исходное письмо отличается от квитанции")
+    return [{**latest, "body": body, "plans": plans}]
+
+
+
+def validate_plans(plans) -> None:
+    keys = {"product", "action", "result", "deadline"}
+    if not isinstance(plans, list) or not all(
+            isinstance(row, dict) and all(isinstance(row.get(k), str) and row[k].strip()
+                                         for k in keys) for row in plans):
+        raise ValueError("Каждый шаг требует действие, результат и срок")
+
+
+def validate_composition(data: dict, editions: list[dict]) -> None:
+    validate_plans(data["plans"])
+    if len(data["waiting"].splitlines()) > 1:
+        raise ValueError("Ожидания должны занимать одну строку")
+    previous = editions[-1].get("plans", []) if editions else []
+    ids = [row["id"] for row in previous]
+    outcomes = data["outcomes"]
+    if sorted(row["id"] for row in outcomes) != sorted(ids):
+        raise ValueError("Итоги должны покрывать каждый прежний пункт ровно один раз")
+    for row in outcomes:
+        if row["status"] not in {"получилось", "частично", "перенесено", "снято"} or not row["detail"].strip():
+            raise ValueError("Нужен конкретный итог прежнего пункта")
+        if row["status"] == "перенесено" and not all(
+                isinstance(row.get(k), str) and row[k].strip() for k in ("deadline", "approach")):
+            raise ValueError("Перенос требует срок и другой путь")
+    for row in data["plans"]:
+        if any((row["action"].strip().casefold(), row["result"].strip().casefold()) ==
+               (old["action"].strip().casefold(), old.get("result", row["result"]).strip().casefold()) for old in previous):
+            raise ValueError("Повтор плана требует другого подхода или вопроса владельцу")
+    text = json.dumps(data, ensure_ascii=False).casefold()
+    if any(phrase in text for phrase in ("не сделано", "не проверено", "ещё не", "еще не", "пока не")):
+        raise ValueError("Препятствие нужно превратить в действие или вопрос")
+
+
 def prompt(packet: dict, local_date: str) -> str:
     return f"""Составь утреннюю продуктовую оперативку на {local_date} по источнику ниже.
 Верни только JSON без markdown и комментариев в форме:
-{{"intro":"одно человеческое предложение", "plans":[{{"product":"...","today":"...","state":"...","blocker":"..."}}], "questions":[{{"question":"...","recommendation":"...","tradeoff":"цена вариантов"}}], "initiatives":[{{"idea":"...","effect":"пользовательский эффект","first_step":"самый короткий следующий шаг"}}]}}
+{{"intro":"одно человеческое предложение с датой предыдущего выпуска", "outcomes":[{{"id":"id прежнего пункта","status":"получилось|частично|перенесено|снято","detail":"конкретный полученный результат или причина снятия","deadline":"при переносе — когда","approach":"при переносе — другой путь"}}], "extras":["что сделано сверх плана"], "plans":[{{"product":"...","action":"действие","result":"ожидаемый результат","deadline":"срок с часовым поясом"}}], "removed":["что снято и почему"], "waiting":"одна короткая строка всех внешних ожиданий", "questions":[{{"question":"...","recommendation":"...","tradeoff":"цена вариантов"}}]}}
 
 Правила:
-- планы — по каждому направлению, где сегодня есть работа или наблюдаемое ожидание;
-- вопросы — только выбор, который действительно должен сделать пользователь; к каждому дай рекомендацию и цену вариантов;
-- инициативы — от 0 до 3; только при новой потребности или наблюдаемой проблеме;
-  без полезного повода верни пустой список, сохранив планы, ожидания и вопросы;
-- правила языка передаёт общий маршрутизатор;
-- не рассказывай внутреннюю машинерию, номера гейтов и раннеров;
-- не используй строки «ПОВОД» и «ВОПРОС»;
-- не выдумывай факты и не повторяй отложенный вопрос из другого предмета.
-- планы дня показывай всегда; статусы, вопросы и инициативы из recent_letters
-  не пересказывай дословно, если с тех пор ничего не изменилось.
-- Манифесты заменяют текст, а не чтение: открой текущий план с порядком работ
-  и все относящиеся к решению полные оригиналы до составления оперативки.
-- wake_health — наблюдаемые отказы, а не обещание работающих проверок.
-  Эти строки дверь добавит сама; не дублируй их и не обещай выполненную проверку.
+- previous_editions содержит полные успешные выпуски, последний — предшественник.
+  Дай ровно один итог каждому id его plans. Ничего не пропускай и не закрывай дважды.
+  При частичном результате назови полученную часть. При переносе назови новый срок и другой путь.
+  При correction предшественник может быть сегодняшним: явно назови его дату в intro.
+- Пиши шесть разделов через указанные поля; пустой список допустим в каждом разделе.
+- План — работа ради результата, а не ежедневное чтение журналов.
+  Сверь прежнее действие и его итог. Второй день без продвижения требует смены подхода
+  или вопроса владельцу; изменение одного срока не считается сменой подхода.
+  Идентичные action/result будут отвергнуты. Снятие объясни в removed.
+- Все постоянные ожидания собери в одну короткую waiting. При событии верни действие в план.
+- Вопросы — только новый выбор владельца с рекомендацией и ценой вариантов.
+  Не повторяй прежние вопросы без события. Новую полезную инициативу включи в план.
+- Избегай «не сделано», «не проверено», «ещё не», «пока не».
+  Препятствие преврати в действие или вопрос. Простое инженерное русское предложение:
+  одно утверждение, примерно до 20 слов, до 4 предложений на абзац.
+  Расшифровывай внутренние слова; отделяй слова от чисел, сохраняя точные идентификаторы.
+- Не выдумывай факты. Манифест не равен чтению: открой полный текущий план
+  и относящиеся оригиналы до решения. Не пересказывай неизменные recent_letters.
+- wake_health дверь добавит в extras как наблюдаемый отказ и шаг восстановления; не дублируй.
 
 Источник:
 {json.dumps(packet, ensure_ascii=False)}
 """
 
 
-def parse_composition(text: str) -> dict:
+def parse_composition(text: str, editions: list[dict] | None = None) -> dict:
     decoder = json.JSONDecoder()
     for index, character in enumerate(text):
         if character != "{":
@@ -115,19 +185,20 @@ def parse_composition(text: str) -> dict:
             continue
         if not isinstance(value, dict):
             continue
-        required = {"intro", "plans", "questions", "initiatives"}
-        if required <= value.keys() and isinstance(value["intro"], str) and all(
-                isinstance(value[key], list) for key in required - {"intro"}):
-            shapes = (("plans", {"product", "today", "state", "blocker"}),
-                      ("questions", {"question", "recommendation", "tradeoff"}),
-                      ("initiatives", {"idea", "effect", "first_step"}))
-            valid_rows = all(
-                all(isinstance(row, dict) and keys <= row.keys()
-                    and all(isinstance(row[key], str) for key in keys)
-                    for row in value[name])
-                for name, keys in shapes)
-            if valid_rows and 0 <= len(value["initiatives"]) <= 3:
-                return value
+        if not all(isinstance(value.get(k), str) for k in ("intro", "waiting")):
+            continue
+        if not all(isinstance(value.get(k), list) for k in
+                   ("plans", "outcomes", "extras", "removed", "questions")):
+            continue
+        if not all(isinstance(x, str) and x.strip() for k in ("extras", "removed") for x in value[k]):
+            continue
+        if not all(isinstance(x, dict) and all(isinstance(x.get(k), str) and x[k].strip()
+                   for k in keys) for name, keys in
+                   (("outcomes", ("id", "status", "detail")),
+                    ("questions", ("question", "recommendation", "tradeoff"))) for x in value[name]):
+            continue
+        validate_composition(value, editions or [])
+        return value
     raise ValueError("product owner did not return the daily standup JSON contract")
 
 
@@ -141,13 +212,10 @@ def compose(packet: dict, local_date: str) -> dict:
     if result.returncode != 0:
         import thread_tick
         raise RuntimeError(thread_tick.engine_failure(result, "daily"))
-    return parse_composition(result.stdout or "")
+    return parse_composition(result.stdout or "", packet.get("previous_editions", []))
 
 
-# Модель пишет поля оперативки законченными предложениями и ставит знак сама.
-# Рендер добавлял свой знак поверх, и 24 августа 2026 пользователь получил
-# «нужны.; мешает» и «Первый шаг: … ..». Оба helper'а ниже читают то, что уже
-# написано, а не переписывают текст.
+# Preserve sentence punctuation supplied by the composer.
 SENTENCE_END = (".", "!", "?", "…", ":")
 
 
@@ -157,73 +225,45 @@ def ends_sentence(text: str) -> str:
     return text if not text or text.endswith(SENTENCE_END) else text + "."
 
 
-def opens_clause(text: str) -> str:
-    """Та же фраза перед нашей точкой с запятой, без её собственной точки."""
-    return text.strip().rstrip(".;,")
+SECTIONS = ("Итоги вчерашнего плана", "Сделано сверх плана", "План на сегодня",
+            "Больше не актуально", "Ждём событий", "Нужно от вас")
+
+
+def section_rows(data: dict) -> list[list[str]]:
+    return [
+        [f"{row.get('label', row['id'])}: {row['status']}. {ends_sentence(row['detail'])}" +
+         (f" Срок: {row['deadline']}. Другой путь: {ends_sentence(row['approach'])}"
+          if row['status'] == 'перенесено' else '') for row in data['outcomes']],
+        data['extras'],
+        [f"{row['product']}: {ends_sentence(row['action'])} Результат: {ends_sentence(row['result'])} "
+         f"Срок: {ends_sentence(row['deadline'])}" for row in data['plans']],
+        data['removed'], [data['waiting']] if data['waiting'].strip() else [],
+        [f"{ends_sentence(row['question'])} Рекомендация: {ends_sentence(row['recommendation'])} "
+         f"Цена вариантов: {ends_sentence(row['tradeoff'])}" for row in data['questions']]]
 
 
 def render_plain(data: dict) -> str:
-    parts = [data["intro"], "", "Планы на сегодня"]
-    for row in data["plans"]:
-        blocker = row.get("blocker", "").strip()
-        tail = ("" if blocker.casefold() in {"", "нет", "-", "—"}
-                else f"; мешает: {ends_sentence(blocker)}")
-        state = opens_clause(row["state"]) if tail else ends_sentence(row["state"])
-        parts.append(
-            f"- {row['product']}: {opens_clause(row['today'])} — {state}{tail}")
-    if data["questions"]:
-        parts += ["", "Нужен ваш выбор"]
-        for item in data["questions"]:
-            parts += [f"- {item['question']}", f"  Рекомендация: {item['recommendation']}",
-                      f"  Цена вариантов: {item['tradeoff']}"]
-    if data["initiatives"]:
-        parts += ["", "Что ещё стоит попробовать"]
-    for item in data["initiatives"]:
-        parts.append(f"- {ends_sentence(item['idea'])} "
-                     f"Эффект: {ends_sentence(item['effect'])} "
-                     f"Первый шаг: {ends_sentence(item['first_step'])}")
-    return "\n".join(parts).strip()
+    parts = [data['intro']]
+    for title, rows in zip(SECTIONS, section_rows(data)):
+        parts += ['', title] + ([f"- {row}" for row in rows] or ['Нет.'])
+    return '\n'.join(parts)
 
 
 def render_html(data: dict) -> str:
-    rows = [{**row, "blocker": ("" if row.get("blocker", "").strip().casefold()
-                                      in {"", "нет", "-", "—"}
-                                      else row["blocker"])} for row in data["plans"]]
-    plans = "".join(
-        "<tr>" + "".join(f"<td data-label=\"{label}\">{escape(str(row.get(key, '')))}</td>"
-                          for key, label in (("product", "Продукт"), ("today", "Сегодня"),
-                                             ("state", "Состояние"), ("blocker", "Что мешает"))) + "</tr>"
-        for row in rows)
-    questions = "".join(
-        f"<li><p><strong>{escape(item['question'])}</strong></p>"
-        f"<p>Рекомендация: {escape(item['recommendation'])}</p>"
-        f"<p class=muted>Цена вариантов: {escape(item['tradeoff'])}</p></li>"
-        for item in data["questions"])
-    initiatives = "".join(
-        f"<li><p><strong>{escape(item['idea'])}</strong></p>"
-        f"<p>{escape(item['effect'])}</p><p class=muted>Первый шаг: {escape(item['first_step'])}</p></li>"
-        for item in data["initiatives"])
-    question_section = (f"<h2>Нужен ваш выбор</h2><ol>{questions}</ol>"
-                        if questions else "")
-    initiative_section = (f"<h2>Что ещё стоит попробовать</h2><ol>{initiatives}</ol>"
-                          if initiatives else "")
+    sections = ''.join(f"<h2>{title}</h2>" +
+                       ('<ul>' + ''.join(f'<li>{escape(row)}</li>' for row in rows) + '</ul>'
+                        if rows else '<p class=muted>Нет.</p>')
+                       for title, rows in zip(SECTIONS, section_rows(data)))
     return f"""<!doctype html><html lang=ru><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width, initial-scale=1">
 <style>
 body{{margin:0;background:#f5f6f8;color:#202124;font:16px/1.45 Arial,sans-serif}}
-.card{{max-width:680px;margin:0 auto;background:#fff;padding:24px}}
+.card{{max-width:680px;margin:0 auto;background:#fff;padding:24px;overflow-wrap:anywhere}}
 h1{{font-size:24px;line-height:1.2;margin:0 0 12px}}h2{{font-size:18px;margin:28px 0 10px}}
-p{{margin:6px 0}}table{{border-collapse:collapse;width:100%;table-layout:fixed;font-size:14px}}
-th,td{{border:1px solid #dfe1e5;padding:9px;text-align:left;vertical-align:top;overflow-wrap:anywhere}}
-th{{background:#f1f3f4}}th:nth-child(1){{width:16%}}th:nth-child(3){{width:18%}}th:nth-child(4){{width:22%}}
-ol{{padding-left:22px}}li{{margin:0 0 14px}}.muted{{color:#5f6368;font-size:14px}}
-@media(max-width:520px){{.card{{padding:18px 14px}}h1{{font-size:22px}}h2{{font-size:18px}}
-table,thead,tbody,tr,th,td{{display:block}}thead{{position:absolute;left:-9999px}}tr{{border:1px solid #dfe1e5;margin:0 0 10px;padding:5px 0}}
-td{{border:0;padding:5px 8px 5px 38%;position:relative;min-height:20px}}td:before{{content:attr(data-label);position:absolute;left:8px;width:34%;font-weight:bold;color:#5f6368}}}}
+p{{margin:6px 0}}ul{{padding-left:22px}}li{{margin-bottom:14px}}.muted{{color:#5f6368}}
+@media(max-width:520px){{.card{{padding:18px 14px}}h1{{font-size:22px}}}}
 </style></head><body><main class=card><h1>Продуктовая оперативка</h1>
-<p>{escape(data['intro'])}</p><h2>Планы на сегодня</h2>
-<table><thead><tr><th>Продукт</th><th>Сегодня</th><th>Состояние</th><th>Что мешает</th></tr></thead><tbody>{plans}</tbody></table>
-{question_section}{initiative_section}</main></body></html>"""
+<p>{escape(data['intro'])}</p>{sections}</main></body></html>"""
 
 
 def raw_message(to: str, subject: str, plain: str, html: str) -> bytes:
@@ -242,7 +282,7 @@ def sent_today(moment: datetime) -> bool:
 
 
 def maybe_send(moment: datetime | None = None, force: bool = False,
-               previous: dict | None = None) -> dict:
+               previous: dict | None = None, legacy_path: Path | None = None) -> dict:
     moment = moment or datetime.now(timezone.utc)
     local = moment.astimezone(LOCAL_ZONE)
     # The CLI and process timer share the same current outcome. A standalone
@@ -285,14 +325,23 @@ def maybe_send(moment: datetime | None = None, force: bool = False,
     stage = "sources"
     try:
         packet = source_packet(moment)
-        if mechanically_empty(packet):
+        packet["previous_editions"] = previous_editions(legacy_path)
+        if mechanically_empty(packet) and not any(x.get("plans") for x in packet["previous_editions"][-1:]):
             if pending:
                 return {**pending, "deferred": True}
             return {"action": "skip", "reason": "all mechanical sources are empty"}
+        startup_context.require_size(startup_context.render(packet), startup_context.MAX_PACKET_CHARS, "daily packet")
         stage = "composition"
         data = compose(packet, local.date().isoformat())
+        validate_composition(data, packet["previous_editions"])
+        labels = {x["id"]: f"{x['product']}: {x['action']}" for x in
+                  (packet["previous_editions"][-1]["plans"] if packet["previous_editions"] else [])}
+        for row in data["outcomes"]:
+            row["label"] = labels[row["id"]]
+        for index, row in enumerate(data["plans"], 1):
+            row["id"] = f"{event_id}:{index}"
     except (startup_context.InputLimitError, product_memory.ContentError,
-            RuntimeError, ValueError, OSError, subprocess.TimeoutExpired) as error:
+            RuntimeError, ValueError, KeyError, TypeError, OSError, subprocess.TimeoutExpired) as error:
         print(f"[daily {stage}] {type(error).__name__}: {error}", file=sys.stderr)
         reason = str(error) if isinstance(error, (startup_context.InputLimitError, RuntimeError)) else (
             "Не удалось прочитать источники; подробности — в журнале службы."
@@ -302,21 +351,21 @@ def maybe_send(moment: datetime | None = None, force: bool = False,
         # A failed composer cannot explain its own absence. Use the same daily
         # channel, but never receipt a refusal as a delivered daily edition.
         data = {"intro": "Оперативка не собрана: " + reason,
-                "plans": [{"product": "Портфель", "today": "Восстановить сборку оперативки",
-                           "state": "Планы не проверены", "blocker": reason}],
-                "questions": [], "initiatives": []}
-        try:
-            packet = {"wake_health": wake_health()}
-        except (startup_context.InputLimitError, OSError, ValueError):
-            packet = {}
-    data["plans"].extend({key: row[key] for key in ("product", "today", "state", "blocker")}
-                         for row in packet.get("wake_health", []))
+                "plans": [], "outcomes": [], "extras": ["Восстановить сборку оперативки."],
+                "removed": [], "waiting": "", "questions": []}
+        packet = {}
+    data["extras"].extend(f"{row['product']}: зафиксирован отказ. Действие: восстановить фоновую проверку. {row['blocker']}"
+                          for row in packet.get("wake_health", []))
     plain, html = render_plain(data), render_html(data)
     subject = f"Продуктовая оперативка — {local:%d.%m}"
     delivery = thread_tick.deliver(
         "portfolio", "daily_refusal" if failure else "daily", subject, plain, moment,
         raw_message=raw_message(thread_tick.MAIL_TO, subject, plain, html),
-        event_id=f"daily:{local.date().isoformat()}:refusal" if failure else event_id)
+        event_id=f"daily:{local.date().isoformat()}:refusal" if failure else event_id,
+        daily_edition=None if failure else {"composition": data, "plans": data["plans"],
+                                           "body": plain, "html": html,
+                                           "previous_event_id": (packet["previous_editions"][-1]["event_id"]
+                                                                 if packet["previous_editions"] else None)})
     if failure:
         return {**failure, "notice": delivery}
     if delivery.get("action") == "fail":
@@ -340,8 +389,9 @@ def record_failure(moment: datetime, stage: str, reason: str, *, code: str | Non
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--force", action="store_true")
+    parser.add_argument("--previous-plan", type=Path, help="Saved product-owned extraction of latest legacy daily")
     args = parser.parse_args()
-    result = maybe_send(force=args.force)
+    result = maybe_send(force=args.force, legacy_path=args.previous_plan)
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0 if result.get("action") in {"send", "skip"} else 1
 

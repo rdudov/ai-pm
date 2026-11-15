@@ -160,7 +160,7 @@ def test_rogue_heading_cannot_hide_a_current_promise_and_zero_ideas_are_valid():
     assert "- two" in startup.exact_section(text, "В работе")
     assert memory.section(text, "В работе") == ["one", "two"]
     assert process_map_state.markdown_section(text, "в работе") == ["one", "two"]
-    value = {"intro": "Morning", "plans": [], "questions": [], "initiatives": []}
+    value = {"intro": "Morning", "plans": [], "questions": [], "outcomes": [], "extras": [], "removed": [], "waiting": ""}
     assert daily_standup.parse_composition(json.dumps(value)) == value
     assert "пустой список" in daily_standup.prompt({}, "2026-01-01")
 
