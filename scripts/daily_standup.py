@@ -333,7 +333,7 @@ def quiet_line(data: dict) -> str:
 
 def render_plain(data: dict) -> str:
     if data.get("quiet"):
-        return quiet_line(data)
+        return quiet_line(data) + ("\n\nЖдём событий: " + data['waiting'] if data['waiting'] else "")
     parts = [load_line(data)]
     if data.get("refusal"):
         parts += [data["intro"]]
@@ -356,6 +356,8 @@ def render_plain(data: dict) -> str:
 def render_html(data: dict) -> str:
     if data.get("quiet"):
         content = f"<p>{escape(quiet_line(data))}</p>"
+        if data['waiting']:
+            content += f"<p>Ждём событий: {escape(data['waiting'])}</p>"
     else:
         content = f"<p>{escape(load_line(data))}</p>"
         if data.get("refusal"):

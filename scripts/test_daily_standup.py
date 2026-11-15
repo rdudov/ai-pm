@@ -253,6 +253,47 @@ class DailyStandupRendering(unittest.TestCase):
                     self.assertNotIn("фонов", extras)
                     self.assertIn("фонов", plain.split("Ждём событий")[1])
 
+    def test_quiet_delivery_keeps_wake_health_in_both_mime_alternatives(self):
+        import copy
+        warning = "Ждём восстановления фоновых проверок."
+        for unhealthy in (False, True):
+            for waiting in ("", "Ответ <партнёра>."):
+                with self.subTest(unhealthy=unhealthy, waiting=waiting):
+                    value = copy.deepcopy(SAMPLE)
+                    value.update(quiet=True, questions=[], extras=[], waiting=waiting)
+                    value['plans'][0].pop('id', None)
+                    previous = [{'event_id': 'daily:2026-11-15',
+                                 'plans': [{'id': 'old', **value['plans'][0]}]}]
+                    value['outcomes'] = [{'id': 'old', 'status': 'перенесено',
+                                          'detail': 'Ждём ответа', 'deadline': '16.11',
+                                          'approach': 'Другой источник'}]
+                    value['rows'][0]['outcome_ids'] = ['old']
+                    packet = {"plan": "work", "snapshots": {}, "threads": {},
+                              "wake_health": [{"product": "Demo", "blocker": "offline"}] if unhealthy else []}
+                    with mock.patch.object(daily, "source_packet", return_value=packet), \
+                            mock.patch.object(daily, "previous_editions", return_value=previous), \
+                            mock.patch.object(daily, "compose", return_value=value), \
+                            mock.patch.object(thread_tick, "MAIL_TO", "user@example.test"), \
+                            mock.patch.object(thread_tick, "MAIL_SCRIPT", Path(__file__)), \
+                            mock.patch.object(thread_tick, "MAIL_PYTHON", Path(__file__)), \
+                            mock.patch.object(thread_tick, "deliver", return_value={"action": "send"}) as deliver:
+                        self.assertEqual(daily.maybe_send(datetime(2026, 11, 16, 10, tzinfo=timezone.utc))["action"], "send")
+                    deliver.assert_called_once()
+                    message = BytesParser(policy=policy.default).parsebytes(deliver.call_args.kwargs["raw_message"])
+                    plain = message.get_body(preferencelist=("plain",)).get_content().strip()
+                    html = message.get_body(preferencelist=("html",)).get_content()
+                    self.assertEqual(plain, deliver.call_args.args[3])
+                    for body in (plain, html):
+                        self.assertIn("Без изменений. В работе 1, вопросов нет.", body)
+                        self.assertEqual(body.count(warning), int(unhealthy))
+                    if waiting:
+                        self.assertIn(waiting, plain)
+                        self.assertIn("Ответ &lt;партнёра&gt;.", html)
+                    if not unhealthy and not waiting:
+                        self.assertEqual(plain, "Без изменений. В работе 1, вопросов нет.")
+                        self.assertNotIn("Ждём событий", html)
+                    self.assertNotIn("<table", html)
+
     def test_failed_daily_engine_keeps_streams_in_journal_only(self):
         banner = "runtime header /private/runtime/path\n" * 200
         for out, err, known_limit in [

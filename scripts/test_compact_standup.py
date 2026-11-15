@@ -79,7 +79,7 @@ class CompactContract(unittest.TestCase):
 
     def test_quiet_keeps_structured_plan_and_transfer_and_refuses_events(self):
         value = copy.deepcopy(SAMPLE)
-        value.update(quiet=True, questions=[], extras=[], outcomes=[dict(id='old', status='перенесено',
+        value.update(quiet=True, questions=[], extras=[], waiting='', outcomes=[dict(id='old', status='перенесено',
                      detail='Ждём ответа', deadline='16.11', approach='Другой источник')])
         value['rows'][0]['outcome_ids'] = ['old']
         daily.validate_composition(value, [dict(plans=[dict(id='old', **value['plans'][0])])])
