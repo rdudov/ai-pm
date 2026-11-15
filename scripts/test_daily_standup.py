@@ -17,6 +17,8 @@ import thread_tick
 
 
 SAMPLE = {
+    "headline": "Работа продолжается", "quiet": False, "waiting_count": 1,
+    "rows": [{"work": "Companion", "outcome_ids": [], "plan_indexes": [0]}],
     "intro": "Доброе утро. Продолжаю прежний план.", "outcomes": [],
     "plans": [{"product": "Companion", "action": "Закончить выравнивание.",
                "result": "Один понятный отчёт.", "deadline": "Сегодня к 12:00 МСК"}],
@@ -50,7 +52,7 @@ class DailyStandupRendering(unittest.TestCase):
         plain = daily.render_plain(SAMPLE)
         html = daily.render_html(SAMPLE)
         self.assertIn("Companion", plain)
-        self.assertEqual(html.count("<h2>"), 6)
+        self.assertEqual(html.count("<h2>"), 3)
         self.assertIn("Companion", html)
         self.assertNotIn("ПОВОД:", plain + html)
         self.assertNotIn("ВОПРОС:", plain + html)
@@ -247,7 +249,7 @@ class DailyStandupRendering(unittest.TestCase):
                     plain = deliver.call_args.args[3]
                     for phrase in daily.EMPTY_NEGATIVES:
                         self.assertNotIn(phrase, plain.casefold())
-                    extras = plain.split("Сделано сверх плана")[1].split("План на сегодня")[0]
+                    extras = plain.split("Главное")[1].split("В работе")[0] if "Главное" in plain else ""
                     self.assertNotIn("фонов", extras)
                     self.assertIn("фонов", plain.split("Ждём событий")[1])
 
@@ -329,6 +331,7 @@ class PlanContinuity(unittest.TestCase):
         value['plans'][0]['action'] = 'Подготовить итог ' + date + str(len(old))
         value['outcomes'] = [{'id': x['id'], 'status': 'частично', 'detail': 'Получена опись файлов.'}
                              for x in (old[-1]['plans'] if old else [])]
+        value['rows'][0]['outcome_ids'] = [x['id'] for x in value['outcomes']]
         return value
 
     def send(self, at=None, **kwargs):
@@ -339,7 +342,7 @@ class PlanContinuity(unittest.TestCase):
         from datetime import timedelta
         self.assertEqual(self.send()['action'], 'send')
         first = self.edition()[-1]
-        self.assertIn('Цена вариантов', first['body'])
+        self.assertIn('Цена:', first['body'])
         self.assertIn('<html', first['html'])
         self.assertEqual(self.send(force=True)['action'], 'send')
         second = self.edition()[-1]
@@ -373,7 +376,8 @@ class PlanContinuity(unittest.TestCase):
         value = self.compose({'previous_editions': old}, 'tomorrow')
         for status in ('получилось', 'частично', 'перенесено', 'снято'):
             row = value['outcomes'][0]
-            row.update(status=status, deadline='16 ноября 12:00 МСК', approach='Получить данные с другого сервера')
+            row.update(status=status, deadline='16 ноября 12:00 МСК', approach='Другой сервер')
+            value['rows'][0]['outcome_ids'] = [] if status == 'снято' else [row['id']]
             value['removed'] = ['Снята старая проверка: источник закрыт.'] if status == 'снято' else []
             self.assertEqual(daily.parse_composition(__import__('json').dumps(value), old), value)
         value['outcomes'][0].update(status='перенесено', approach='')
@@ -419,9 +423,9 @@ class PlanContinuity(unittest.TestCase):
         self.assertEqual(self.mail.call_count, count)
 
     def test_empty_sections_waiting_questions_and_escaping(self):
-        value = {**self.copy(SAMPLE), 'plans': [], 'outcomes': [], 'extras': [], 'removed': [], 'waiting': ''}
-        self.assertEqual(daily.render_html(value).count('<h2>'), 6)
-        self.assertEqual(daily.render_plain(value).count('\nНет.'), 5)
+        value = {**self.copy(SAMPLE), 'plans': [], 'outcomes': [], 'extras': [], 'removed': [], 'waiting': '', 'rows': []}
+        self.assertEqual(daily.render_html(value).count('<h2>'), 1)
+        self.assertNotIn('Нет.', daily.render_plain(value))
         for key in ('recommendation', 'tradeoff'):
             broken = self.copy(value); broken['questions'][0][key] = ''
             with self.assertRaises(ValueError):

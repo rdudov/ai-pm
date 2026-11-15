@@ -94,8 +94,9 @@ class ProductOwnerModelRouterTests(unittest.TestCase):
         снова оставить без них все остальные пути к человеку.
         """
         rules = " ".join(plain_russian.RULES.split())
-        self.assertIn("внутреннего термина без расшифровки при первом употреблении", rules)
-        self.assertIn("причинно-следственную связь разворачивай предложением", rules)
+        self.assertIn("Внутренние термины без расшифровки", rules)
+        self.assertIn("Сначала вывод", rules)
+        self.assertNotIn("Подлежащее", rules)
 
     def test_the_background_entry_carries_the_rules_for_prompts_built_elsewhere(self):
         """Ответ на письмо и ответ на просьбу из разговора промпта здесь не имеют.

@@ -18,7 +18,8 @@ import startup_context as startup
 import thread_tick as tick
 
 AT = datetime(2026, 8, 24, 8, tzinfo=timezone.utc)
-DATA = {"intro": "Планы дня", "plans": [{"product": "Demo", "action": "Continue",
+DATA = {"headline": "Work", "quiet": False, "waiting_count": 0,
+        "rows": [{"work": "Demo", "outcome_ids": [], "plan_indexes": [0]}], "intro": "Планы дня", "plans": [{"product": "Demo", "action": "Continue",
         "result": "Ready", "deadline": "Today"}], "questions": [], "outcomes": [],
         "extras": [], "removed": [], "waiting": ""}
 
@@ -29,6 +30,7 @@ def composition(packet, local_date):
     previous = packet.get("previous_editions", [])
     value["outcomes"] = [{"id": x["id"], "status": "получилось", "detail": "Получено заключение"}
                          for x in (previous[-1]["plans"] if previous else [])]
+    value["rows"][0]["outcome_ids"] = [x["id"] for x in value["outcomes"]]
     return value
 
 

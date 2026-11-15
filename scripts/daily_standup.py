@@ -19,6 +19,7 @@ import outbound  # noqa: E402
 import plain_russian  # noqa: E402
 import product_memory  # noqa: E402
 import startup_context  # noqa: E402
+import regular_jobs  # noqa: E402
 
 HOME = Path(__file__).resolve().parents[1]
 ROUTER = HOME / "scripts" / "claude_product_owner.py"
@@ -42,6 +43,7 @@ def source_packet(moment: datetime) -> dict:
               "snapshots": value.pop("product_snapshots"),
               "threads": value.pop("thread_states"), **value,
               "wake_health": wake_health(),
+              "regular_jobs": regular_jobs.collect(moment),
               "recent_letters": startup_context.fit(
                   recent, startup_context.reference(recent, str(outbound.LEDGER)),
                   20_000, "daily recent letters")}
@@ -74,7 +76,7 @@ def mechanically_empty(packet: dict) -> bool:
     return not ((plan.strip() if isinstance(plan, str) else plan)
                 or any(value.strip() if isinstance(value, str) else value
                        for value in packet["snapshots"].values())
-                or packet.get("wake_health") or packet.get("active_goals") or any(
+                or packet.get("regular_jobs") or packet.get("wake_health") or packet.get("active_goals") or any(
         any(report.get(key) for key in report if key not in {"thread", "title"})
         for report in packet["threads"].values()))
 
@@ -135,43 +137,53 @@ def validate_composition(data: dict, editions: list[dict]) -> None:
         if row["status"] == "перенесено" and not all(
                 isinstance(row.get(k), str) and row[k].strip() for k in ("deadline", "approach")):
             raise ValueError("Перенос требует срок и другой путь")
+    if data.get("quiet"):
+        keys = ("product", "action", "result", "deadline")
+        if [tuple(p.get(k) for k in keys) for p in data["plans"]] != [tuple(p.get(k) for k in keys) for p in previous]:
+            raise ValueError("Тихий день должен сохранять прежний план без новых шагов")
     for row in data["plans"]:
-        if any((row["action"].strip().casefold(), row["result"].strip().casefold()) ==
+        if not data.get("quiet") and any((row["action"].strip().casefold(), row["result"].strip().casefold()) ==
                (old["action"].strip().casefold(), old.get("result", row["result"]).strip().casefold()) for old in previous):
             raise ValueError("Повтор плана требует другого подхода или вопроса владельцу")
+    validate_compact(data)
     text = json.dumps(data, ensure_ascii=False).casefold()
     if any(phrase in text for phrase in EMPTY_NEGATIVES):
         raise ValueError("Препятствие нужно превратить в действие или вопрос")
 
 
 def prompt(packet: dict, local_date: str) -> str:
-    return f"""Составь утреннюю продуктовую оперативку на {local_date} по источнику ниже.
-Верни только JSON без markdown и комментариев в форме:
-{{"intro":"одно человеческое предложение с датой предыдущего выпуска", "outcomes":[{{"id":"id прежнего пункта","status":"получилось|частично|перенесено|снято","detail":"конкретный полученный результат или причина снятия","deadline":"при переносе — когда","approach":"при переносе — другой путь"}}], "extras":["что сделано сверх плана"], "plans":[{{"product":"...","action":"действие","result":"ожидаемый результат","deadline":"срок с часовым поясом"}}], "removed":["что снято и почему"], "waiting":"одна короткая строка всех внешних ожиданий", "questions":[{{"question":"...","recommendation":"...","tradeoff":"цена вариантов"}}]}}
-
-Правила:
-- previous_editions содержит полные успешные выпуски, последний — предшественник.
-  Дай ровно один итог каждому id его plans. Ничего не пропускай и не закрывай дважды.
-  При частичном результате назови полученную часть. При переносе назови новый срок и другой путь.
-  При correction предшественник может быть сегодняшним: явно назови его дату в intro.
-- Пиши шесть разделов через указанные поля; пустой список допустим в каждом разделе.
-- План — работа ради результата, а не ежедневное чтение журналов.
-  Сверь прежнее действие и его итог. Второй день без продвижения требует смены подхода
-  или вопроса владельцу; изменение одного срока не считается сменой подхода.
-  Идентичные action/result будут отвергнуты. Снятие объясни в removed.
-- Все постоянные ожидания собери в одну короткую waiting. При событии верни действие в план.
-- Вопросы — только новый выбор владельца с рекомендацией и ценой вариантов.
-  Не повторяй прежние вопросы без события. Новую полезную инициативу включи в план.
-- Избегай «не сделано», «не проверено», «ещё не», «пока не».
-  Препятствие преврати в действие или вопрос. Простое инженерное русское предложение:
-  одно утверждение, примерно до 20 слов, до 4 предложений на абзац.
-  Расшифровывай внутренние слова; отделяй слова от чисел, сохраняя точные идентификаторы.
-- Не выдумывай факты. Манифест не равен чтению: открой полный текущий план
-  и относящиеся оригиналы до решения. Не пересказывай неизменные recent_letters.
-- wake_health содержит причины отказов направлений. Используй их для смены подхода
-  или нового вопроса, когда это нужно. Дверь добавит общую строку ожидания восстановления;
-  не дублируй её и не называй постоянный отказ сделанной дополнительной работой.
-
+    return f"""Составь короткую оперативку на {local_date}. Верни только JSON:
+{{"intro":"коротко о предшественнике", "headline":"главное событие для темы",
+"outcomes":[{{"id":"прежний id","status":"получилось|частично|перенесено|снято",
+"detail":"краткий итог","deadline":"при переносе — когда","approach":"другой путь"}}],
+"plans":[{{"product":"работа (номер задачи)","action":"действие","result":"результат","deadline":"срок"}}],
+"rows":[{{"work":"работа (номер задачи)","outcome_ids":["прежний id"],"plan_indexes":[0]}}],
+"extras":["важная новость"],"removed":[],"waiting":"одна короткая строка",
+"waiting_count":0,"quiet":false,
+"questions":[{{"question":"выбор","recommendation":"совет","tradeoff":"цена"}}]}}
+Инициативы: пустой список допустим; инициатив и новостей может быть ноль.
+Порядок: загрузка; вопросы; главное (до трёх); таблица до восьми строк;
+ожидания одной строкой; снятое при наличии. Каждая ячейка до 90 знаков.
+Каждый прежний id получает ровно один outcomes. Каждый итог кроме снятого
+покажи ровно в одной rows.outcome_ids, каждый новый шаг — в rows.plan_indexes.
+Можно объединять связанные работы, сохранив все итоги видимыми.
+Вчера: ✓ получилось, ◐ частично, → перенесено; снятое с ✗ отдельно.
+План называет действие, результат и срок; второй день без продвижения требует
+другого подхода или вопроса. Один изменённый срок другим подходом не считается.
+Снятие объясни; ожидания не превращай в ежедневное действие. waiting_count —
+число внешних ожиданий; число в работе вычисляется по реальным plans.
+Вопросы — реальные решения владельца с рекомендацией и ценой; прежний ожидающий
+ответа вопрос допустим. Не придумывай вопросы. Числа образца не константы.
+Тихий день: quiet=true, короткое «Без изменений. В работе N, вопросов нет»;
+в этом случае план и итоги всё равно сохраняются, но никаких новых событий,
+вопросов или снятий. Не используй quiet для сокрытия обязательной новости.
+regular_jobs — первичный журнал регулярных работ. Обязательные факты дверь
+добавляет в Главное сама: учитывай их в пределе трёх, не дублируй.
+Не прячь простыню в intro, вопросы или ожидания; никаких хешей, попыток и
+проверяющих. Прежний полный выпуск и promises находятся в previous_editions.
+Не выдумывай факты; прочитай полный текущий план и относящиеся оригиналы.
+wake_health дверь добавит в ожидания; это не сделанная работа.
+{plain_russian.as_bullet()}
 Источник:
 {json.dumps(packet, ensure_ascii=False)}
 """
@@ -206,16 +218,37 @@ def parse_composition(text: str, editions: list[dict] | None = None) -> dict:
 
 
 def compose(packet: dict, local_date: str) -> dict:
-    model_input = startup_context.checked_prompt(prompt(packet, local_date))
-    result = subprocess.run(
-        [str(ROUTER), "--entry", "print"],
-        input=model_input, text=True, capture_output=True,
-        cwd=HOME, env={**os.environ, "IS_SANDBOX": "1"}, timeout=MODEL_TIMEOUT,
-        check=False)
-    if result.returncode != 0:
-        import thread_tick
-        raise RuntimeError(thread_tick.engine_failure(result, "daily"))
-    return parse_composition(result.stdout or "", packet.get("previous_editions", []))
+    request = prompt(packet, local_date)
+    for attempt in range(2):
+        model_input = startup_context.checked_prompt(request)
+        result = subprocess.run(
+            [str(ROUTER), "--entry", "print"], input=model_input, text=True,
+            capture_output=True, cwd=HOME, env={**os.environ, "IS_SANDBOX": "1"},
+            timeout=MODEL_TIMEOUT, check=False)
+        if result.returncode != 0:
+            import thread_tick
+            raise RuntimeError(thread_tick.engine_failure(result, "daily"))
+        try:
+            data = parse_composition(result.stdout or "", packet.get("previous_editions", []))
+            apply_job_news(data, packet)
+            validate_composition(data, packet.get("previous_editions", []))
+            return data
+        except (ValueError, KeyError, TypeError) as error:
+            if attempt:
+                raise
+            request = prompt(packet, local_date) + "\nПересобери один раз: " + str(error)
+    raise AssertionError("unreachable")
+
+
+def apply_job_news(data: dict, packet: dict) -> None:
+    editions = packet.get("previous_editions", [])
+    previous_at = editions[-1].get("at") if editions else None
+    facts = regular_jobs.required_news(packet.get("regular_jobs", []), previous_at)
+    if facts:
+        data["extras"] = facts + data["extras"]
+        data["quiet"] = False
+        data["headline"] = facts[0] if len(facts[0]) <= 150 else "Длительный сбой регулярных заданий"
+    validate_compact(data)
 
 
 # Preserve sentence punctuation supplied by the composer.
@@ -228,45 +261,130 @@ def ends_sentence(text: str) -> str:
     return text if not text or text.endswith(SENTENCE_END) else text + "."
 
 
-SECTIONS = ("Итоги вчерашнего плана", "Сделано сверх плана", "План на сегодня",
-            "Больше не актуально", "Ждём событий", "Нужно от вас")
+STATUS_MARKS = {"получилось": "✓", "частично": "◐", "перенесено": "→"}
 
 
-def section_rows(data: dict) -> list[list[str]]:
-    return [
-        [f"{row.get('label', row['id'])}: {row['status']}. {ends_sentence(row['detail'])}" +
-         (f" Срок: {row['deadline']}. Другой путь: {ends_sentence(row['approach'])}"
-          if row['status'] == 'перенесено' else '') for row in data['outcomes']],
-        data['extras'],
-        [f"{row['product']}: {ends_sentence(row['action'])} Результат: {ends_sentence(row['result'])} "
-         f"Срок: {ends_sentence(row['deadline'])}" for row in data['plans']],
-        data['removed'], [data['waiting']] if data['waiting'].strip() else [],
-        [f"{ends_sentence(row['question'])} Рекомендация: {ends_sentence(row['recommendation'])} "
-         f"Цена вариантов: {ends_sentence(row['tradeoff'])}" for row in data['questions']]]
+def table_rows(data: dict) -> list[list[str]]:
+    outcomes = {row["id"]: row for row in data["outcomes"]}
+    rows = []
+    for row in data["rows"]:
+        yesterday = "; ".join(
+            f"{STATUS_MARKS[outcomes[key]['status']]} {outcomes[key]['detail']}" +
+            (f"; {outcomes[key]['deadline']}; {outcomes[key]['approach']}"
+             if outcomes[key]['status'] == 'перенесено' else '')
+            for key in row["outcome_ids"]) or "новое"
+        plans = [data["plans"][index] for index in row["plan_indexes"]]
+        rows.append([row["work"], yesterday,
+                     "; ".join(f"{p['action']} → {p['result']}" for p in plans) or "—",
+                     "; ".join(p["deadline"] for p in plans) or "—"])
+    return rows
+
+
+def removed_rows(data: dict) -> list[str]:
+    return [f"✗ {row.get('label', row['id'])}: {row['detail']}"
+            for row in data["outcomes"] if row["status"] == "снято"] + data["removed"]
+
+
+def validate_compact(data: dict) -> None:
+    def bounded(text, limit):
+        if not isinstance(text, str) or len(text) > limit or len(text.splitlines()) > 1:
+            raise ValueError(f"Короткое поле превышает {limit} знаков или одну строку")
+    if not isinstance(data.get("rows"), list) or len(data["rows"]) > 8:
+        raise ValueError("Таблица: максимум восемь строк")
+    if len(data["extras"]) > 3:
+        raise ValueError("Главное: максимум три новости")
+    if type(data.get("waiting_count")) is not int or data["waiting_count"] < 0:
+        raise ValueError("Нужно число ожиданий")
+    if type(data.get("quiet")) is not bool:
+        raise ValueError("Нужен признак тихого дня")
+    for key, limit in (("intro", 150), ("headline", 150), ("waiting", 400)):
+        bounded(data.get(key), limit)
+    for text in data["extras"] + data["removed"]:
+        bounded(text, 300)
+    for question in data["questions"]:
+        for key in ("question", "recommendation", "tradeoff"):
+            bounded(question[key], 180)
+    expected = [row["id"] for row in data["outcomes"] if row["status"] != "снято"]
+    actual, indexes = [], []
+    for row in data["rows"]:
+        if not isinstance(row, dict) or not isinstance(row.get("outcome_ids"), list) or not isinstance(row.get("plan_indexes"), list):
+            raise ValueError("Строка требует связи с итогами и планом")
+        if not row["outcome_ids"] and not row["plan_indexes"]:
+            raise ValueError("Пустая строка работы")
+        actual += row["outcome_ids"]
+        indexes += row["plan_indexes"]
+    if sorted(actual) != sorted(expected) or any(type(x) is not int for x in indexes) or sorted(indexes) != list(range(len(data["plans"]))):
+        raise ValueError("Каждый итог и новый шаг должны быть видимы ровно один раз")
+    for row in table_rows(data):
+        for cell in row:
+            bounded(cell, 90)
+    if data["quiet"] and (data["extras"] or data["questions"] or removed_rows(data)
+                          or any(x["status"] != "перенесено" for x in data["outcomes"])):
+        raise ValueError("Тихий день содержит события")
+
+
+def load_line(data: dict) -> str:
+    return f"Загрузка: в работе {len(data['plans'])} · ждут событий {data['waiting_count']}"
+
+
+def quiet_line(data: dict) -> str:
+    return f"Без изменений. В работе {len(data['plans'])}, вопросов нет."
 
 
 def render_plain(data: dict) -> str:
-    parts = [data['intro']]
-    for title, rows in zip(SECTIONS, section_rows(data)):
-        parts += ['', title] + ([f"- {row}" for row in rows] or ['Нет.'])
+    if data.get("quiet"):
+        return quiet_line(data)
+    parts = [load_line(data)]
+    if data.get("refusal"):
+        parts += [data["intro"]]
+    if data['questions']:
+        parts += ["", "Нужно от вас"] + [
+            f"{i}. {q['question']} Рекомендую: {q['recommendation']} Цена: {q['tradeoff']}"
+            for i, q in enumerate(data['questions'], 1)]
+    if data['extras']:
+        parts += ["", "Главное"] + [f"- {x}" for x in data['extras']]
+    if data['rows']:
+        parts += ["", "В работе", "Работа | Вчера | Сегодня → результат | Срок"]
+        parts += [' | '.join(row) for row in table_rows(data)]
+    if data['waiting']:
+        parts += ["", "Ждём событий: " + data['waiting']]
+    if removed_rows(data):
+        parts += ["", "Снято: " + "; ".join(removed_rows(data))]
     return '\n'.join(parts)
 
 
 def render_html(data: dict) -> str:
-    sections = ''.join(f"<h2>{title}</h2>" +
-                       ('<ul>' + ''.join(f'<li>{escape(row)}</li>' for row in rows) + '</ul>'
-                        if rows else '<p class=muted>Нет.</p>')
-                       for title, rows in zip(SECTIONS, section_rows(data)))
+    if data.get("quiet"):
+        content = f"<p>{escape(quiet_line(data))}</p>"
+    else:
+        content = f"<p>{escape(load_line(data))}</p>"
+        if data.get("refusal"):
+            content += f"<p>{escape(data['intro'])}</p>"
+        if data['questions']:
+            content += '<h2>Нужно от вас</h2><ol>' + ''.join(
+                f"<li>{escape(q['question'])} Рекомендую: {escape(q['recommendation'])} Цена: {escape(q['tradeoff'])}</li>"
+                for q in data['questions']) + '</ol>'
+        if data['extras']:
+            content += '<h2>Главное</h2><ul>' + ''.join(f'<li>{escape(x)}</li>' for x in data['extras']) + '</ul>'
+        if data['rows']:
+            content += '<h2>В работе</h2><table><thead><tr>' + ''.join(
+                f'<th>{x}</th>' for x in ('Работа', 'Вчера', 'Сегодня → результат', 'Срок')) + '</tr></thead><tbody>'
+            content += ''.join('<tr>' + ''.join(f'<td>{escape(cell)}</td>' for cell in row) + '</tr>' for row in table_rows(data))
+            content += '</tbody></table>'
+        if data['waiting']:
+            content += f"<p>Ждём событий: {escape(data['waiting'])}</p>"
+        if removed_rows(data):
+            content += '<p>Снято: ' + escape('; '.join(removed_rows(data))) + '</p>'
     return f"""<!doctype html><html lang=ru><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width, initial-scale=1">
-<style>
-body{{margin:0;background:#f5f6f8;color:#202124;font:16px/1.45 Arial,sans-serif}}
-.card{{max-width:680px;margin:0 auto;background:#fff;padding:24px;overflow-wrap:anywhere}}
-h1{{font-size:24px;line-height:1.2;margin:0 0 12px}}h2{{font-size:18px;margin:28px 0 10px}}
-p{{margin:6px 0}}ul{{padding-left:22px}}li{{margin-bottom:14px}}.muted{{color:#5f6368}}
-@media(max-width:520px){{.card{{padding:18px 14px}}h1{{font-size:22px}}}}
-</style></head><body><main class=card><h1>Продуктовая оперативка</h1>
-<p>{escape(data['intro'])}</p>{sections}</main></body></html>"""
+<style>body{{margin:0;color:#202124;font:16px/1.45 Arial,sans-serif}}
+.card{{max-width:1000px;margin:auto;padding:20px;overflow-wrap:anywhere}}
+h1{{font-size:24px}}h2{{font-size:18px;margin:20px 0 8px}}li{{margin:6px 0}}
+table{{border-collapse:collapse;width:100%;table-layout:fixed;font-size:14px}}
+th,td{{text-align:left;vertical-align:top;border-bottom:1px solid #ddd;padding:8px 5px}}
+th:last-child,td:last-child{{width:14%}}
+@media(max-width:520px){{.card{{padding:10px}}table{{font-size:13px}}th,td{{padding:6px 3px}}}}
+</style></head><body><main class=card><h1>Оперативка</h1>{content}</main></body></html>"""
 
 
 def raw_message(to: str, subject: str, plain: str, html: str) -> bytes:
@@ -337,7 +455,7 @@ def maybe_send(moment: datetime | None = None, force: bool = False,
         stage = "composition"
         data = compose(packet, local.date().isoformat())
         validate_composition(data, packet["previous_editions"])
-        labels = {x["id"]: f"{x['product']}: {x['action']}" for x in
+        labels = {x["id"]: x["product"] for x in
                   (packet["previous_editions"][-1]["plans"] if packet["previous_editions"] else [])}
         for row in data["outcomes"]:
             row["label"] = labels[row["id"]]
@@ -353,9 +471,10 @@ def maybe_send(moment: datetime | None = None, force: bool = False,
         failure = record_failure(moment, stage, reason, code=type(error).__name__)
         # A failed composer cannot explain its own absence. Use the same daily
         # channel, but never receipt a refusal as a delivered daily edition.
-        data = {"intro": "Восстановить сборку оперативки. Оперативка не собрана: " + reason,
+        data = {"refusal": True, "intro": "Восстановить сборку оперативки. Оперативка не собрана: " + reason,
                 "plans": [], "outcomes": [], "extras": [],
-                "removed": [], "waiting": "", "questions": []}
+                "removed": [], "waiting": "", "questions": [], "rows": [],
+                "headline": "Восстановить сборку оперативки", "waiting_count": 0, "quiet": False}
         try:
             packet = {"wake_health": wake_health()}
         except (startup_context.InputLimitError, OSError, ValueError, KeyError, TypeError):
@@ -375,7 +494,7 @@ def maybe_send(moment: datetime | None = None, force: bool = False,
             health_text = " ".join(details)
         data["waiting"] = " ".join(filter(None, (ends_sentence(data["waiting"]), health_text)))
     plain, html = render_plain(data), render_html(data)
-    subject = f"Продуктовая оперативка — {local:%d.%m}"
+    subject = f"Оперативка {local:%d.%m} — {len(data['questions'])} вопросов к вам; {data['headline']}"
     delivery = thread_tick.deliver(
         "portfolio", "daily_refusal" if failure else "daily", subject, plain, moment,
         raw_message=raw_message(thread_tick.MAIL_TO, subject, plain, html),
