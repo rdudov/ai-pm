@@ -158,19 +158,98 @@ class DailyStandupRendering(unittest.TestCase):
                         "threads": {"demo": {"title": "Demo"}}}), \
                     mock.patch.object(daily.startup_context, "packet", return_value=value), \
                     mock.patch.object(daily, "sent_today", return_value=False), \
-                    mock.patch.object(daily, "compose", return_value=copy.deepcopy(SAMPLE)), \
+                    mock.patch.object(daily, "compose", return_value=copy.deepcopy(SAMPLE)) as compose, \
                     mock.patch.object(thread_tick, "MAIL_TO", "user@example.test"), \
                     mock.patch.object(thread_tick, "MAIL_SCRIPT", Path(__file__)), \
                     mock.patch.object(thread_tick, "MAIL_PYTHON", Path(__file__)), \
                     mock.patch.object(thread_tick, "deliver", return_value={"action": "send"}) as deliver:
                 self.assertEqual(daily.maybe_send(at)["action"], "send")
             plain = deliver.call_args.args[3]
-            self.assertIn(reason, plain)
-            self.assertIn("восстановить фоновую проверку", plain)
+            self.assertIn(reason, str(compose.call_args.args[0]["wake_health"]))
+            self.assertNotIn(reason, plain)
+            self.assertIn("Ждём восстановления фоновых проверок", plain)
             message = BytesParser(policy=policy.default).parsebytes(deliver.call_args.kwargs["raw_message"])
             html = message.get_body(preferencelist=("html",)).get_content()
-            self.assertIn(reason, html)
+            self.assertNotIn(reason, html)
+            self.assertIn("Ждём восстановления фоновых проверок", html)
             self.assertEqual(deliver.call_args.args[1], "daily")
+
+    def test_refusals_preserve_bounded_direction_health_and_delivery_identity(self):
+        import json
+        at = datetime(2026, 11, 15, 10, tzinfo=timezone.utc)
+        reason = "Вход для модели превысил допустимый размер."
+        for stage in ("sources", "engine", "parse"):
+            with self.subTest(stage=stage), tempfile.TemporaryDirectory() as home:
+                directory = Path(home)
+                (directory / "demo.json").write_text(json.dumps({"wake_failure": {"reason": reason}}))
+                with contextlib.ExitStack() as stack:
+                    for patch in (
+                        mock.patch.object(outbound, "LEDGER", directory / "outbound.json"),
+                        mock.patch.object(thread_tick, "STATE_DIR", directory),
+                        mock.patch.object(daily.product_memory, "installation", return_value={
+                            "threads": {"demo": {"title": "Demo"}}}),
+                        mock.patch.object(daily, "source_packet", side_effect=
+                            daily.startup_context.InputLimitError("source limit") if stage == "sources"
+                            else lambda *args: {"plan": "work", "snapshots": {}, "threads": {}}),
+                        mock.patch.object(daily.subprocess, "run", return_value=
+                            subprocess.CompletedProcess([], 2 if stage == "engine" else 0,
+                                                        "invalid JSON", "")),
+                        mock.patch.object(thread_tick, "MAIL_TO", "user@example.test"),
+                        mock.patch.object(thread_tick, "MAIL_SCRIPT", Path(__file__)),
+                        mock.patch.object(thread_tick, "MAIL_PYTHON", Path(__file__)),
+                    ):
+                        stack.enter_context(patch)
+                    send = stack.enter_context(mock.patch.object(thread_tick, "send_mail", return_value="refusal-id"))
+                    journal = stack.enter_context(contextlib.redirect_stderr(io.StringIO()))
+                    self.assertEqual(daily.maybe_send(at, force=True)["action"], "fail")
+                    self.assertEqual(daily.maybe_send(at, force=True)["action"], "fail")
+                    send.assert_called_once()
+                    message = BytesParser(policy=policy.default).parsebytes(send.call_args.kwargs["raw_message"])
+                    for kind in ("plain", "html"):
+                        body = message.get_body(preferencelist=(kind,)).get_content()
+                        self.assertIn(reason, body)
+                        self.assertIn("Demo: восстановить фоновую проверку", body)
+                    with outbound.Ledger() as ledger:
+                        entry = ledger.thread("portfolio")
+                        self.assertFalse(entry.get("daily_editions"))
+                        self.assertTrue(outbound.event_delivered_anywhere(
+                            ledger.data, "daily:2026-11-15:refusal"))
+                        self.assertEqual(entry["daily_standup"]["action"], "fail")
+
+    def test_unreadable_or_oversized_health_does_not_stop_refusal(self):
+        for error in (OSError("unreadable"), daily.startup_context.InputLimitError("health bound")):
+            with self.subTest(error=type(error).__name__), \
+                    mock.patch.object(daily, "source_packet", side_effect=ValueError("source")), \
+                    mock.patch.object(daily, "wake_health", side_effect=error), \
+                    mock.patch.object(thread_tick, "MAIL_TO", "user@example.test"), \
+                    mock.patch.object(thread_tick, "MAIL_SCRIPT", Path(__file__)), \
+                    mock.patch.object(thread_tick, "MAIL_PYTHON", Path(__file__)), \
+                    mock.patch.object(thread_tick, "deliver", return_value={"action": "send"}) as deliver:
+                self.assertEqual(daily.maybe_send(force=True)["action"], "fail")
+                deliver.assert_called_once()
+
+    def test_persistent_unsafe_health_is_waiting_never_completed_work(self):
+        import copy
+        health = [{"product": "Demo", "blocker": "Пока не проверено соединение."}]
+        for refusal in (False, True):
+            with self.subTest(refusal=refusal), \
+                    mock.patch.object(daily, "source_packet", return_value={
+                        "plan": "work", "snapshots": {}, "threads": {}, "wake_health": health}), \
+                    mock.patch.object(daily, "wake_health", return_value=health), \
+                    mock.patch.object(daily, "compose", side_effect=ValueError("parse") if refusal else
+                                      lambda *args: copy.deepcopy(SAMPLE)), \
+                    mock.patch.object(thread_tick, "MAIL_TO", "user@example.test"), \
+                    mock.patch.object(thread_tick, "MAIL_SCRIPT", Path(__file__)), \
+                    mock.patch.object(thread_tick, "MAIL_PYTHON", Path(__file__)), \
+                    mock.patch.object(thread_tick, "deliver", return_value={"action": "send"}) as deliver:
+                for day in (15, 16):
+                    daily.maybe_send(datetime(2026, 11, day, 10, tzinfo=timezone.utc), force=True)
+                    plain = deliver.call_args.args[3]
+                    for phrase in daily.EMPTY_NEGATIVES:
+                        self.assertNotIn(phrase, plain.casefold())
+                    extras = plain.split("Сделано сверх плана")[1].split("План на сегодня")[0]
+                    self.assertNotIn("фонов", extras)
+                    self.assertIn("фонов", plain.split("Ждём событий")[1])
 
     def test_failed_daily_engine_keeps_streams_in_journal_only(self):
         banner = "runtime header /private/runtime/path\n" * 200

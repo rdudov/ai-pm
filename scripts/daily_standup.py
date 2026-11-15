@@ -26,6 +26,7 @@ LOCAL_ZONE = ZoneInfo(os.environ.get("PRODUCT_OWNER_TIMEZONE", "Europe/Amsterdam
 SEND_HOUR = 8
 MODEL_TIMEOUT = 1800
 FAILURE_RETRY_SECONDS = 3600
+EMPTY_NEGATIVES = ("не сделано", "не проверено", "ещё не", "еще не", "пока не")
 
 
 def source_packet(moment: datetime) -> dict:
@@ -139,7 +140,7 @@ def validate_composition(data: dict, editions: list[dict]) -> None:
                (old["action"].strip().casefold(), old.get("result", row["result"]).strip().casefold()) for old in previous):
             raise ValueError("Повтор плана требует другого подхода или вопроса владельцу")
     text = json.dumps(data, ensure_ascii=False).casefold()
-    if any(phrase in text for phrase in ("не сделано", "не проверено", "ещё не", "еще не", "пока не")):
+    if any(phrase in text for phrase in EMPTY_NEGATIVES):
         raise ValueError("Препятствие нужно превратить в действие или вопрос")
 
 
@@ -167,7 +168,9 @@ def prompt(packet: dict, local_date: str) -> str:
   Расшифровывай внутренние слова; отделяй слова от чисел, сохраняя точные идентификаторы.
 - Не выдумывай факты. Манифест не равен чтению: открой полный текущий план
   и относящиеся оригиналы до решения. Не пересказывай неизменные recent_letters.
-- wake_health дверь добавит в extras как наблюдаемый отказ и шаг восстановления; не дублируй.
+- wake_health содержит причины отказов направлений. Используй их для смены подхода
+  или нового вопроса, когда это нужно. Дверь добавит общую строку ожидания восстановления;
+  не дублируй её и не называй постоянный отказ сделанной дополнительной работой.
 
 Источник:
 {json.dumps(packet, ensure_ascii=False)}
@@ -350,12 +353,27 @@ def maybe_send(moment: datetime | None = None, force: bool = False,
         failure = record_failure(moment, stage, reason, code=type(error).__name__)
         # A failed composer cannot explain its own absence. Use the same daily
         # channel, but never receipt a refusal as a delivered daily edition.
-        data = {"intro": "Оперативка не собрана: " + reason,
-                "plans": [], "outcomes": [], "extras": ["Восстановить сборку оперативки."],
+        data = {"intro": "Восстановить сборку оперативки. Оперативка не собрана: " + reason,
+                "plans": [], "outcomes": [], "extras": [],
                 "removed": [], "waiting": "", "questions": []}
-        packet = {}
-    data["extras"].extend(f"{row['product']}: зафиксирован отказ. Действие: восстановить фоновую проверку. {row['blocker']}"
-                          for row in packet.get("wake_health", []))
+        try:
+            packet = {"wake_health": wake_health()}
+        except (startup_context.InputLimitError, OSError, ValueError, KeyError, TypeError):
+            packet = {}
+    if packet.get("wake_health"):
+        # Persistent failures are waits, never completed work. Raw diagnostics
+        # belong only in the refusal; successful prose stays with the composer.
+        health_text = "Ждём восстановления фоновых проверок."
+        if failure:
+            details = []
+            for row in packet["wake_health"]:
+                detail = f"{row['product']}: восстановить фоновую проверку. Причина: {row['blocker']}"
+                if any(phrase in detail.casefold() for phrase in EMPTY_NEGATIVES):
+                    print(f"[daily wake health] {detail}", file=sys.stderr)
+                    detail = "Восстановить фоновую проверку. Причина и направление — в журнале службы."
+                details.append(ends_sentence(detail))
+            health_text = " ".join(details)
+        data["waiting"] = " ".join(filter(None, (ends_sentence(data["waiting"]), health_text)))
     plain, html = render_plain(data), render_html(data)
     subject = f"Продуктовая оперативка — {local:%d.%m}"
     delivery = thread_tick.deliver(

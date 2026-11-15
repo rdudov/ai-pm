@@ -142,7 +142,8 @@ class FailedWakeStaysInTheServiceJournal(unittest.TestCase):
                     deliver.call_args.kwargs["raw_message"])
                 for kind in ("plain", "html"):
                     body = message.get_body(preferencelist=(kind,)).get_content()
-                    self.assertIn(reason, body)
+                    self.assertIn("Ждём восстановления фоновых проверок", body)
+                    self.assertNotIn(reason, body)
                     for fragment in ("runtime header", "/private/runtime/path", "partial answer",
                                      "input_too_large", "other diagnostic"):
                         self.assertNotIn(fragment, body)
