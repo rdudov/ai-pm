@@ -79,7 +79,7 @@ class CompactContract(unittest.TestCase):
 
     def test_quiet_keeps_structured_plan_and_transfer_and_refuses_events(self):
         value = copy.deepcopy(SAMPLE)
-        value.update(quiet=True, questions=[], extras=[], waiting='', outcomes=[dict(id='old', status='перенесено',
+        value.update(quiet=True, questions=[], extras=[], waiting=[], outcomes=[dict(id='old', status='перенесено',
                      detail='Ждём ответа', deadline='16.11', approach='Другой источник')])
         value['rows'][0]['outcome_ids'] = ['old']
         daily.validate_composition(value, [dict(plans=[dict(id='old', **value['plans'][0])])])
@@ -88,11 +88,59 @@ class CompactContract(unittest.TestCase):
         with self.assertRaises(ValueError): daily.validate_composition(value, [])
 
     def test_no_long_intro_question_or_waiting_escape(self):
-        for field, limit in [('intro', 150), ('waiting', 400)]:
-            value = copy.deepcopy(SAMPLE); value[field] = 'x' * (limit+1)
-            with self.assertRaises(ValueError): daily.validate_composition(value, [])
+        value = copy.deepcopy(SAMPLE); value['intro'] = 'x' * 151
+        with self.assertRaises(ValueError): daily.validate_composition(value, [])
         value = copy.deepcopy(SAMPLE); value['questions'][0]['tradeoff'] = 'x'*181
         with self.assertRaises(ValueError): daily.validate_composition(value, [])
+
+
+class WaitingList(unittest.TestCase):
+    def test_bounded_items_fail_without_splitting_or_truncation(self):
+        for waiting, accepted in [([], True), (['x' * 300] * 5, True),
+                                  (['x' * 301], False), (['x'] * 6, False),
+                                  (['a\nb'], False), ([' '], False), ([None], False),
+                                  ('old scalar', False)]:
+            with self.subTest(waiting=waiting):
+                value = copy.deepcopy(SAMPLE); value['waiting'] = waiting
+                before = copy.deepcopy(value)
+                if accepted:
+                    daily.parse_composition(json.dumps(value))
+                else:
+                    with self.assertRaises(ValueError): daily.parse_composition(json.dumps(value))
+                self.assertEqual(value, before)
+
+    def test_bad_waiting_rebuilds_once_then_refuses(self):
+        bad = copy.deepcopy(SAMPLE); bad['waiting'] = ['x' * 301]
+        for answers, accepted in [([bad, SAMPLE], True), ([bad, bad], False)]:
+            with mock.patch.object(daily.subprocess, 'run', side_effect=[
+                    subprocess.CompletedProcess([], 0, json.dumps(x), '') for x in answers]) as run:
+                if accepted:
+                    self.assertEqual(daily.compose({}, '2026-11-20')['waiting'], SAMPLE['waiting'])
+                else:
+                    with self.assertRaises(ValueError): daily.compose({}, '2026-11-20')
+                self.assertEqual(run.call_count, 2)
+
+    def test_selected_waits_have_same_order_and_text_in_both_formats(self):
+        from html import escape
+        value = copy.deepcopy(SAMPLE)
+        value['waiting_count'] = 8
+        value['waiting'] = [
+            'Архив котировок: ждём новые данные, чтобы дополнить отчёт за неделю.',
+            'Отчёт: ждём ответ <партнёра> по разделу «Расходы» & приложениям, чтобы передать итог.']
+        daily.validate_composition(value, [])
+        plain, html = daily.render_plain(value), daily.render_html(value)
+        self.assertIn('всего ждут событий 8', plain)
+        self.assertIn('<h2>Ждём событий</h2><ul>', html)
+        for item in value['waiting']:
+            self.assertIn('\n- ' + item, plain)
+            self.assertIn('<li>' + escape(item) + '</li>', html)
+        self.assertLess(html.index(escape(value['waiting'][0])), html.index(escape(value['waiting'][1])))
+        self.assertNotIn('<партнёра>', html)
+        value['waiting'] = []  # all eight waits can be immaterial to today's letter
+        daily.validate_composition(value, [])
+        for body in (daily.render_plain(value), daily.render_html(value)):
+            self.assertNotIn('Ждём событий', body)
+            self.assertIn('всего ждут событий 8', body)
 
 
 class JournalNews(unittest.TestCase):

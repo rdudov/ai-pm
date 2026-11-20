@@ -132,7 +132,7 @@ class FailedWakeStaysInTheServiceJournal(unittest.TestCase):
                         mock.patch.object(daily, "source_packet", return_value={
                             "plan": "plan", "wake_health": daily.wake_health()}), \
                         mock.patch.object(daily, "compose", return_value={
-                            "intro": "Планы дня", "plans": [], "questions": [], "outcomes": [], "extras": [], "removed": [], "waiting": "", "rows": [], "headline": "Восстановление", "quiet": False, "waiting_count": 0}), \
+                            "intro": "Планы дня", "plans": [], "questions": [], "outcomes": [], "extras": [], "removed": [], "waiting": [], "rows": [], "headline": "Восстановление", "quiet": False, "waiting_count": 0}), \
                         mock.patch.object(tick, "MAIL_TO", "user@example.test"), \
                         mock.patch.object(tick, "MAIL_SCRIPT", Path(__file__)), \
                         mock.patch.object(tick, "MAIL_PYTHON", Path(__file__)), \

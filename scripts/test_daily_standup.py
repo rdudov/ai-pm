@@ -23,7 +23,7 @@ SAMPLE = {
     "plans": [{"product": "Companion", "action": "Закончить выравнивание.",
                "result": "Один понятный отчёт.", "deadline": "Сегодня к 12:00 МСК"}],
     "extras": ["Получено дополнительное заключение."], "removed": [],
-    "waiting": "Ждём внешнее событие.",
+    "waiting": ["Ждём заключение по отчёту, чтобы передать владельцу окончательный результат."],
     "questions": [{"question": "Удалять архив?", "recommendation": "Сохранить копию.",
                    "tradeoff": "Место против обратимости."}],
 }
@@ -52,7 +52,7 @@ class DailyStandupRendering(unittest.TestCase):
         plain = daily.render_plain(SAMPLE)
         html = daily.render_html(SAMPLE)
         self.assertIn("Companion", plain)
-        self.assertEqual(html.count("<h2>"), 3)
+        self.assertEqual(html.count("<h2>"), 4)
         self.assertIn("Companion", html)
         self.assertNotIn("ПОВОД:", plain + html)
         self.assertNotIn("ВОПРОС:", plain + html)
@@ -257,10 +257,10 @@ class DailyStandupRendering(unittest.TestCase):
         import copy
         warning = "Ждём восстановления фоновых проверок."
         for unhealthy in (False, True):
-            for waiting in ("", "Ответ <партнёра>."):
+            for waiting in ([], ["Ответ <партнёра> нужен для завершения отчёта."]):
                 with self.subTest(unhealthy=unhealthy, waiting=waiting):
                     value = copy.deepcopy(SAMPLE)
-                    value.update(quiet=True, questions=[], extras=[], waiting=waiting)
+                    value.update(quiet=True, questions=[], extras=[], waiting=copy.deepcopy(waiting))
                     value['plans'][0].pop('id', None)
                     previous = [{'event_id': 'daily:2026-11-15',
                                  'plans': [{'id': 'old', **value['plans'][0]}]}]
@@ -287,8 +287,8 @@ class DailyStandupRendering(unittest.TestCase):
                         self.assertIn("Без изменений. В работе 1, вопросов нет.", body)
                         self.assertEqual(body.count(warning), int(unhealthy))
                     if waiting:
-                        self.assertIn(waiting, plain)
-                        self.assertIn("Ответ &lt;партнёра&gt;.", html)
+                        self.assertIn(waiting[0], plain)
+                        self.assertIn("Ответ &lt;партнёра&gt; нужен для завершения отчёта.", html)
                     if not unhealthy and not waiting:
                         self.assertEqual(plain, "Без изменений. В работе 1, вопросов нет.")
                         self.assertNotIn("Ждём событий", html)
@@ -463,15 +463,49 @@ class PlanContinuity(unittest.TestCase):
         self.assertEqual(result['action'], 'fail')
         self.assertEqual(self.mail.call_count, count)
 
+    def test_old_scalar_edition_survives_next_list_edition_and_full_plan_link(self):
+        import json
+        from datetime import timedelta
+        legacy = self.copy(SAMPLE)
+        legacy['waiting'] = 'Архив; внешний ответ.'
+        legacy['plans'][0]['id'] = 'legacy-plan'
+        old = {'composition': legacy, 'plans': legacy['plans'],
+               'body': daily.render_plain(legacy), 'html': daily.render_html(legacy),
+               'previous_event_id': None}
+        delivered = thread_tick.deliver('portfolio', 'daily', 'Old', old['body'], self.at,
+                                        event_id='daily:2026-11-15', daily_edition=old)
+        self.assertEqual(delivered['action'], 'send')
+        original = self.edition()[-1]
+        new = self.compose({'previous_editions': [original]}, '2026-11-16')
+        new['waiting_count'] = 8
+        new['waiting'] = ['Отчёт: ждём ответ партнёра, чтобы завершить выводы.',
+                          'Архив: ждём новые котировки для обновления недельного отчёта.']
+        completed = subprocess.CompletedProcess([], 0, json.dumps(new), '')
+        with mock.patch.object(daily.subprocess, 'run', return_value=completed) as provider:
+            result = daily.maybe_send(self.at + timedelta(days=1))
+        self.assertEqual(result['action'], 'send')
+        editions = self.edition()
+        self.assertEqual(len(editions), 2)
+        self.assertEqual(editions[0], original)
+        self.assertEqual(editions[1]['previous_event_id'], original['event_id'])
+        self.assertEqual(editions[1]['composition']['outcomes'][0]['id'], 'legacy-plan')
+        self.assertIn(json.dumps(original, ensure_ascii=False), provider.call_args.kwargs['input'])
+        message = BytesParser(policy=policy.default).parsebytes(self.mail.call_args.kwargs['raw_message'])
+        for kind in ('plain', 'html'):
+            body = message.get_body(preferencelist=(kind,)).get_content()
+            for item in new['waiting']:
+                self.assertIn(item, body)
+        self.assertEqual(daily.previous_editions(), editions)
+
     def test_empty_sections_waiting_questions_and_escaping(self):
-        value = {**self.copy(SAMPLE), 'plans': [], 'outcomes': [], 'extras': [], 'removed': [], 'waiting': '', 'rows': []}
+        value = {**self.copy(SAMPLE), 'plans': [], 'outcomes': [], 'extras': [], 'removed': [], 'waiting': [], 'rows': []}
         self.assertEqual(daily.render_html(value).count('<h2>'), 1)
         self.assertNotIn('Нет.', daily.render_plain(value))
         for key in ('recommendation', 'tradeoff'):
             broken = self.copy(value); broken['questions'][0][key] = ''
             with self.assertRaises(ValueError):
                 daily.parse_composition(__import__('json').dumps(broken))
-        value['waiting'] = '<Все внешние события>'
+        value['waiting'] = ['<Все внешние события>']
         self.assertIn('&lt;Все внешние события&gt;', daily.render_html(value))
         value['intro'] = 'Пока не проверено'
         with self.assertRaises(ValueError):

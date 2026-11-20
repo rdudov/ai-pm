@@ -21,7 +21,7 @@ AT = datetime(2026, 8, 24, 8, tzinfo=timezone.utc)
 DATA = {"headline": "Work", "quiet": False, "waiting_count": 0,
         "rows": [{"work": "Demo", "outcome_ids": [], "plan_indexes": [0]}], "intro": "Планы дня", "plans": [{"product": "Demo", "action": "Continue",
         "result": "Ready", "deadline": "Today"}], "questions": [], "outcomes": [],
-        "extras": [], "removed": [], "waiting": ""}
+        "extras": [], "removed": [], "waiting": []}
 
 
 def composition(packet, local_date):

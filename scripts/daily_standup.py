@@ -124,8 +124,6 @@ def validate_plans(plans) -> None:
 
 def validate_composition(data: dict, editions: list[dict]) -> None:
     validate_plans(data["plans"])
-    if len(data["waiting"].splitlines()) > 1:
-        raise ValueError("Ожидания должны занимать одну строку")
     previous = editions[-1].get("plans", []) if editions else []
     ids = [row["id"] for row in previous]
     outcomes = data["outcomes"]
@@ -158,20 +156,28 @@ def prompt(packet: dict, local_date: str) -> str:
 "detail":"краткий итог","deadline":"при переносе — когда","approach":"другой путь"}}],
 "plans":[{{"product":"работа (номер задачи)","action":"действие","result":"результат","deadline":"срок"}}],
 "rows":[{{"work":"работа (номер задачи)","outcome_ids":["прежний id"],"plan_indexes":[0]}}],
-"extras":["важная новость"],"removed":[],"waiting":"одна короткая строка",
+"extras":["важная новость"],"removed":[],"waiting":["понятное важное ожидание"],
 "waiting_count":0,"quiet":false,
 "questions":[{{"question":"выбор","recommendation":"совет","tradeoff":"цена"}}]}}
 Инициативы: пустой список допустим; инициатив и новостей может быть ноль.
 Порядок: загрузка; вопросы; главное (до трёх); таблица до восьми строк;
-ожидания одной строкой; снятое при наличии. Каждая ячейка до 90 знаков.
+важные ожидания отдельными пунктами; снятое при наличии. Каждая ячейка до 90 знаков.
 Каждый прежний id получает ровно один outcomes. Каждый итог кроме снятого
 покажи ровно в одной rows.outcome_ids, каждый новый шаг — в rows.plan_indexes.
 Можно объединять связанные работы, сохранив все итоги видимыми.
 Вчера: ✓ получилось, ◐ частично, → перенесено; снятое с ✗ отдельно.
 План называет действие, результат и срок; второй день без продвижения требует
 другого подхода или вопроса. Один изменённый срок другим подходом не считается.
-Снятие объясни; ожидания не превращай в ежедневное действие. waiting_count —
-число внешних ожиданий; число в работе вычисляется по реальным plans.
+Снятие объясни; ожидания не превращай в ежедневное действие.
+В waiting включай только важное владельцу сейчас: мешает обещанному результату,
+требует его действия или несёт существенную задержку/риск. Несущественное опусти,
+но внутренние ожидания и обязательства сохрани. Каждый пункт сам по себе объясняет
+предмет, чего ждём и что это задерживает либо какой результат продолжится.
+Внутренние обозначения расшифруй или опусти. Не выдавай ярлык за объяснение.
+Не выдумывай актуальность, факты, сроки или поручения владельцу.
+До пяти пунктов waiting, каждый до 300 знаков; если важного нет — [].
+waiting_count — общее число внешних ожиданий, включая опущенные из письма;
+это не число пунктов waiting. Число в работе вычисляется по реальным plans.
 Вопросы — реальные решения владельца с рекомендацией и ценой; прежний ожидающий
 ответа вопрос допустим. Не придумывай вопросы. Числа образца не константы.
 Тихий день: quiet=true, короткое «Без изменений. В работе N, вопросов нет»;
@@ -200,12 +206,12 @@ def parse_composition(text: str, editions: list[dict] | None = None) -> dict:
             continue
         if not isinstance(value, dict):
             continue
-        if not all(isinstance(value.get(k), str) for k in ("intro", "waiting")):
+        if not isinstance(value.get("intro"), str):
             continue
         if not all(isinstance(value.get(k), list) for k in
-                   ("plans", "outcomes", "extras", "removed", "questions")):
+                   ("plans", "outcomes", "extras", "removed", "questions", "waiting")):
             continue
-        if not all(isinstance(x, str) and x.strip() for k in ("extras", "removed") for x in value[k]):
+        if not all(isinstance(x, str) and x.strip() for k in ("extras", "removed", "waiting") for x in value[k]):
             continue
         if not all(isinstance(x, dict) and all(isinstance(x.get(k), str) and x[k].strip()
                    for k in keys) for name, keys in
@@ -297,8 +303,14 @@ def validate_compact(data: dict) -> None:
         raise ValueError("Нужно число ожиданий")
     if type(data.get("quiet")) is not bool:
         raise ValueError("Нужен признак тихого дня")
-    for key, limit in (("intro", 150), ("headline", 150), ("waiting", 400)):
+    for key, limit in (("intro", 150), ("headline", 150)):
         bounded(data.get(key), limit)
+    if not isinstance(data.get("waiting"), list) or len(data["waiting"]) > 5:
+        raise ValueError("Ожидания: максимум пять важных пунктов")
+    for text in data["waiting"]:
+        bounded(text, 300)
+        if not text.strip():
+            raise ValueError("Ожидание требует понятного объяснения")
     for text in data["extras"] + data["removed"]:
         bounded(text, 300)
     for question in data["questions"]:
@@ -324,16 +336,24 @@ def validate_compact(data: dict) -> None:
 
 
 def load_line(data: dict) -> str:
-    return f"Загрузка: в работе {len(data['plans'])} · ждут событий {data['waiting_count']}"
+    return f"Загрузка: в работе {len(data['plans'])} · всего ждут событий {data['waiting_count']}"
 
 
 def quiet_line(data: dict) -> str:
     return f"Без изменений. В работе {len(data['plans'])}, вопросов нет."
 
 
+def waiting_items(data: dict) -> list[str]:
+    """Old saved editions retain their scalar; new compositions require a list."""
+    value = data['waiting']
+    return ([value] if value else []) if isinstance(value, str) else value
+
+
 def render_plain(data: dict) -> str:
+    waiting = waiting_items(data)
+    waits = ["", "Ждём событий"] + [f"- {x}" for x in waiting] if waiting else []
     if data.get("quiet"):
-        return quiet_line(data) + ("\n\nЖдём событий: " + data['waiting'] if data['waiting'] else "")
+        return '\n'.join([quiet_line(data)] + waits)
     parts = [load_line(data)]
     if data.get("refusal"):
         parts += [data["intro"]]
@@ -346,18 +366,18 @@ def render_plain(data: dict) -> str:
     if data['rows']:
         parts += ["", "В работе", "Работа | Вчера | Сегодня → результат | Срок"]
         parts += [' | '.join(row) for row in table_rows(data)]
-    if data['waiting']:
-        parts += ["", "Ждём событий: " + data['waiting']]
+    parts += waits
     if removed_rows(data):
         parts += ["", "Снято: " + "; ".join(removed_rows(data))]
     return '\n'.join(parts)
 
 
 def render_html(data: dict) -> str:
+    waiting = waiting_items(data)
+    waits = ('<h2>Ждём событий</h2><ul>' + ''.join(
+        f'<li>{escape(x)}</li>' for x in waiting) + '</ul>') if waiting else ''
     if data.get("quiet"):
-        content = f"<p>{escape(quiet_line(data))}</p>"
-        if data['waiting']:
-            content += f"<p>Ждём событий: {escape(data['waiting'])}</p>"
+        content = f"<p>{escape(quiet_line(data))}</p>" + waits
     else:
         content = f"<p>{escape(load_line(data))}</p>"
         if data.get("refusal"):
@@ -373,8 +393,7 @@ def render_html(data: dict) -> str:
                 f'<th>{x}</th>' for x in ('Работа', 'Вчера', 'Сегодня → результат', 'Срок')) + '</tr></thead><tbody>'
             content += ''.join('<tr>' + ''.join(f'<td>{escape(cell)}</td>' for cell in row) + '</tr>' for row in table_rows(data))
             content += '</tbody></table>'
-        if data['waiting']:
-            content += f"<p>Ждём событий: {escape(data['waiting'])}</p>"
+        content += waits
         if removed_rows(data):
             content += '<p>Снято: ' + escape('; '.join(removed_rows(data))) + '</p>'
     return f"""<!doctype html><html lang=ru><head><meta charset=utf-8>
@@ -475,7 +494,7 @@ def maybe_send(moment: datetime | None = None, force: bool = False,
         # channel, but never receipt a refusal as a delivered daily edition.
         data = {"refusal": True, "intro": "Восстановить сборку оперативки. Оперативка не собрана: " + reason,
                 "plans": [], "outcomes": [], "extras": [],
-                "removed": [], "waiting": "", "questions": [], "rows": [],
+                "removed": [], "waiting": [], "questions": [], "rows": [],
                 "headline": "Восстановить сборку оперативки", "waiting_count": 0, "quiet": False}
         try:
             packet = {"wake_health": wake_health()}
@@ -484,17 +503,16 @@ def maybe_send(moment: datetime | None = None, force: bool = False,
     if packet.get("wake_health"):
         # Persistent failures are waits, never completed work. Raw diagnostics
         # belong only in the refusal; successful prose stays with the composer.
-        health_text = "Ждём восстановления фоновых проверок."
+        health_items = ["Ждём восстановления фоновых проверок."]
         if failure:
-            details = []
+            health_items = []
             for row in packet["wake_health"]:
                 detail = f"{row['product']}: восстановить фоновую проверку. Причина: {row['blocker']}"
                 if any(phrase in detail.casefold() for phrase in EMPTY_NEGATIVES):
                     print(f"[daily wake health] {detail}", file=sys.stderr)
                     detail = "Восстановить фоновую проверку. Причина и направление — в журнале службы."
-                details.append(ends_sentence(detail))
-            health_text = " ".join(details)
-        data["waiting"] = " ".join(filter(None, (ends_sentence(data["waiting"]), health_text)))
+                health_items.append(ends_sentence(detail))
+        data["waiting"].extend(health_items)
     plain, html = render_plain(data), render_html(data)
     subject = f"Оперативка {local:%d.%m} — {len(data['questions'])} вопросов к вам; {data['headline']}"
     delivery = thread_tick.deliver(
