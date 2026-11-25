@@ -635,11 +635,16 @@ def validate_outcome_links(plan: dict) -> dict[int, dict]:
 
 
 def task_records(task_id: int):
-    """The task sources shared by plan acknowledgement and startup reading."""
+    """Real task reports shared by plan acknowledgement and startup reading.
+
+    test-runtime holds synthetic task instances, including deliberately broken
+    reports. Keep real nested evidence, but never require these fixture copies.
+    """
     task_root = Path(installation().get("tasks_repo") or "") / "tasks"
     for directory in task_root.glob(f"{int(task_id)}-*"):
         for path in directory.rglob("*"):
             if (path.is_file() and ".runner" not in path.parts
+                    and "test-runtime" not in path.relative_to(directory).parts[:-1]
                     and path.name in TASK_RECORD_NAMES):
                 yield path
 
